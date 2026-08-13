@@ -36,6 +36,17 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v6
 
+      - name: 验证容器 TLS 信任配置
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(grep -c 'apt-get install -y --no-install-recommends ca-certificates' Dockerfile.debian13)" -ge 2
+          if grep -R -E 'NODE_TLS_REJECT_UNAUTHORIZED=0|InsecureSkipVerify:[[:space:]]*true' \
+            Dockerfile.debian13 cmd/browser-install; then
+            echo '禁止通过关闭 TLS 证书校验绕过 CA 信任问题。' >&2
+            exit 1
+          fi
+
       - name: 配置 Go
         uses: actions/setup-go@v7
         with:
