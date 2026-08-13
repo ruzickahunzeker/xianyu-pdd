@@ -25,15 +25,57 @@ function imageURL(value) {
   return asString(firstValue(value, ["url", "imageUrl", "image_url", "thumbUrl"]));
 }
 
+function walkObjects(root, maxDepth, visit) {
+  const queue = [{ value: root, path: "store", depth: 0 }];
+  const visited = new Set();
+  while (queue.length) {
+    const current = queue.shift();
+    if (!current?.value || typeof current.value !== "object" || current.depth > maxDepth || visited.has(current.value)) continue;
+    visited.add(current.value);
+    visit(current.value, current.path);
+    for (const [key, value] of Object.entries(current.value)) {
+      if (value && typeof value === "object") queue.push({ value, path: `${current.path}.${key}`, depth: current.depth + 1 });
+    }
+  }
+}
+
+function findNestedValue(root, keys) {
+  let match;
+  walkObjects(root, 6, (value, path) => {
+    if (match || Array.isArray(value)) return;
+    for (const key of keys) {
+      const candidate = value[key];
+      if (candidate !== undefined && candidate !== null && candidate !== "") {
+        match = { value: candidate, path: `${path}.${key}` };
+        return;
+      }
+    }
+  });
+  return match ?? { value: undefined, path: "" };
+}
+
 function collectImages(store) {
-  const candidates = [
-    ...(Array.isArray(store?.goodsGallery) ? store.goodsGallery : []),
-    ...(Array.isArray(store?.gallery) ? store.gallery : []),
-    ...(Array.isArray(store?.topGallery) ? store.topGallery : []),
-    ...(Array.isArray(store?.goodsCarousel) ? store.goodsCarousel : [])
-  ];
-  const single = [store?.goodsImage, store?.thumbUrl, store?.hdThumbUrl];
-  return uniqueStrings([...candidates.map(imageURL), ...single]);
+  const images = [];
+  const paths = [];
+  const collectionKeys = new Set(["goodsGallery", "goods_gallery", "gallery", "topGallery", "goodsCarousel", "carouselGallery"]);
+  const singleKeys = new Set(["goodsImage", "goods_image", "thumbUrl", "thumbURL", "thumb_url", "hdThumbUrl", "hd_thumb_url"]);
+  walkObjects(store, 6, (value, path) => {
+    if (Array.isArray(value)) return;
+    for (const [key, candidate] of Object.entries(value)) {
+      if (collectionKeys.has(key) && Array.isArray(candidate)) {
+        const urls = candidate.map(imageURL).filter(Boolean);
+        if (urls.length) paths.push(`${path}.${key}`);
+        images.push(...urls);
+      } else if (singleKeys.has(key)) {
+        const url = imageURL(candidate);
+        if (url) {
+          paths.push(`${path}.${key}`);
+          images.push(url);
+        }
+      }
+    }
+  });
+  return { images: uniqueStrings(images).slice(0, 100), paths: uniqueStrings(paths) };
 }
 
 function normalizeSpec(spec) {
@@ -79,24 +121,11 @@ export function collectPDDProduct(rawDataOverride) {
   }
 
   function findSKUArray(root) {
-    const queue = [{ value: root, path: "store", depth: 0 }];
-    const visited = new Set();
-    while (queue.length) {
-      const current = queue.shift();
-      if (!current || current.depth > 6 || !current.value || typeof current.value !== "object" || visited.has(current.value)) continue;
-      visited.add(current.value);
-      if (Array.isArray(current.value) && current.value.some((item) => item && typeof item === "object" && (item.skuId !== undefined || item.skuID !== undefined || item.sku_id !== undefined))) {
-        return { skus: current.value, path: current.path };
-      }
-      if (!Array.isArray(current.value)) {
-        for (const entry of Object.entries(current.value)) {
-          const key = entry[0];
-          const value = entry[1];
-          if (value && typeof value === "object") queue.push({ value: value, path: current.path + "." + key, depth: current.depth + 1 });
-        }
-      }
-    }
-    return { skus: [], path: "" };
+    let match;
+    walkObjects(root, 6, (value, path) => {
+      if (!match && Array.isArray(value) && value.some((item) => item && typeof item === "object" && (item.skuId !== undefined || item.skuID !== undefined || item.sku_id !== undefined))) match = { skus: value, path };
+    });
+    return match ?? { skus: [], path: "" };
   }
 
   const located = Array.isArray(store.skus) && store.skus.length ? { skus: store.skus, path: "store.skus" } : findSKUArray(store);
@@ -111,17 +140,21 @@ export function collectPDDProduct(rawDataOverride) {
 
   const skus = rawSKUs.map((sku) => normalizeSKU(sku, goodsID));
   if (skus.some((sku) => !sku.sku_id)) throw new Error("SKU_ID_MISSING: 部分 SKU 缺少 skuId/skuID");
+  const title = findNestedValue(store, ["goodsName", "goods_name", "goodsTitle", "goods_title", "title"]);
+  const imageResult = collectImages(store);
 
   return {
     schema_version: 1,
     collection_method: "page_raw_data",
     sku_source_path: located.path,
+    title_source_path: title.path,
+    image_source_paths: imageResult.paths,
     collected_at: new Date().toISOString(),
     final_url: location.href,
     goods: {
       goods_id: goodsID,
-      title: asString(firstValue(store, ["goodsName", "goods_name", "title"])),
-      images: collectImages(store)
+      title: asString(title.value),
+      images: imageResult.images
     },
     skus
   };

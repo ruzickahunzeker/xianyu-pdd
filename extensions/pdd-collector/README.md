@@ -1,6 +1,6 @@
 # 拼多多浏览器采集器（原型）
 
-Manifest V3 扩展（当前版本 0.2.0），从当前拼多多商品页的 `window.rawData.store` 提取商品与 SKU 白名单数据。
+Manifest V3 扩展（当前版本 0.2.1），从当前拼多多商品页的 `window.rawData.store` 提取商品与 SKU 白名单数据。
 
 ## 安装
 
@@ -27,5 +27,5 @@ Authorization: Bearer <device-token>
 ## 当前限制
 
 - 当前为手动采集模式，绑定设备后可直接上传。
-- `window.rawData` 必须已经包含完整 `store.skus`。
+- `window.rawData.store` 内必须已经包含完整 SKU 数据；扩展会在有限深度内自动查找新版页面的嵌套 SKU、标题和图片字段。
 - 页面若先把超出 JavaScript 安全整数范围的 ID 解析成 `number`，转字符串无法恢复已丢失的精度；接入真实样本时必须验证 ID，并在必要时改为从原始响应文本提取。
