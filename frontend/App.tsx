@@ -6,6 +6,7 @@ import OrderList from './components/OrderList';
 import CardList from './components/CardList';
 import ItemList from './components/ItemList';
 import Settings from './components/Settings';
+import PDDCollectorDevices from './components/PDDCollectorDevices';
 import Rules from './components/Rules';
 import Notifications from './components/Notifications';
 import Chat from './components/Chat';
@@ -33,6 +34,7 @@ const ROUTES: Record<string, string> = {
   '/app/rules': 'rules',
   '/app/notifications': 'notifications',
   '/app/settings': 'settings',
+  '/app/pdd-collector': 'pdd-collector',
 };
 const TAB_TO_PATH: Record<string, string> = Object.fromEntries(
   Object.entries(ROUTES).map(([path, tab]) => [tab, path])
@@ -338,6 +340,7 @@ const App: React.FC = () => {
       />;
       case 'notifications': return <Notifications isAdmin={isAdmin} />;
       case 'settings': return isAdmin ? <Settings /> : <Dashboard />;
+      case 'pdd-collector': return isAdmin ? <PDDCollectorDevices /> : <Dashboard />;
       default: return <Dashboard />;
     }
   };

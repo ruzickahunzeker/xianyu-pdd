@@ -1040,3 +1040,15 @@ export const deleteDefaultReply = async (cookieId: string): Promise<ApiResponse>
 export const clearDefaultReplyRecords = async (cookieId: string): Promise<ApiResponse> => {
   return post(`/api/default-reply/${cookieId}/clear-records`, {});
 };
+
+export interface PDDCollectorDevice {
+  id: string;
+  name: string;
+  enabled: boolean;
+  last_seen_at: number;
+  last_collected_at: number;
+  created_at: number;
+}
+export interface CreatedPDDCollectorDevice extends PDDCollectorDevice { device_token: string }
+export const getPDDCollectorDevices = (): Promise<PDDCollectorDevice[]> => get('/api/pdd-collector/devices');
+export const createPDDCollectorDevice = (name: string): Promise<CreatedPDDCollectorDevice> => post('/api/pdd-collector/devices', { name });
