@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - codex/desktop-packaging
+      - feat/pdd-collection
     tags:
       - 'v*.*.*'
   workflow_dispatch:
@@ -284,6 +285,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
             type=raw,value=desktop-packaging,enable=${{ github.ref == 'refs/heads/codex/desktop-packaging' }}
             type=raw,value=alpha,enable=${{ github.ref == 'refs/heads/codex/desktop-packaging' }}
+            type=raw,value=pdd-collection,enable=${{ github.ref == 'refs/heads/feat/pdd-collection' }}
 
       - name: 创建并推送多架构 manifest
         shell: bash
