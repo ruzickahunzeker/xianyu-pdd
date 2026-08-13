@@ -1,6 +1,6 @@
 # 拼多多浏览器采集器（原型）
 
-Manifest V3 扩展，从当前拼多多商品页的 `window.rawData.store` 提取商品与 SKU 白名单数据。
+Manifest V3 扩展（当前版本 0.2.0），从当前拼多多商品页的 `window.rawData.store` 提取商品与 SKU 白名单数据。
 
 ## 安装
 

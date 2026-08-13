@@ -78,9 +78,32 @@ export function collectPDDProduct(rawDataOverride) {
     throw new Error("RAW_DATA_MISSING: 页面中未找到 window.rawData.store，请等待商品加载完成后重试");
   }
 
-  const rawSKUs = Array.isArray(store.skus) ? store.skus : [];
+  function findSKUArray(root) {
+    const queue = [{ value: root, path: "store", depth: 0 }];
+    const visited = new Set();
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current || current.depth > 6 || !current.value || typeof current.value !== "object" || visited.has(current.value)) continue;
+      visited.add(current.value);
+      if (Array.isArray(current.value) && current.value.some((item) => item && typeof item === "object" && (item.skuId !== undefined || item.skuID !== undefined || item.sku_id !== undefined))) {
+        return { skus: current.value, path: current.path };
+      }
+      if (!Array.isArray(current.value)) {
+        for (const entry of Object.entries(current.value)) {
+          const key = entry[0];
+          const value = entry[1];
+          if (value && typeof value === "object") queue.push({ value: value, path: current.path + "." + key, depth: current.depth + 1 });
+        }
+      }
+    }
+    return { skus: [], path: "" };
+  }
+
+  const located = Array.isArray(store.skus) && store.skus.length ? { skus: store.skus, path: "store.skus" } : findSKUArray(store);
+  const rawSKUs = located.skus;
   if (rawSKUs.length === 0) {
-    throw new Error("SKU_DATA_EMPTY: window.rawData.store.skus 为空");
+    const keys = Object.keys(store).slice(0, 30).join(", ");
+    throw new Error("SKU_DATA_EMPTY: 未在 rawData.store 中找到 SKU 数组；store字段: " + keys);
   }
 
   const goodsID = asString(firstValue(store, ["goodsId", "goodsID", "goods_id"]) ?? firstValue(rawSKUs[0], ["goodsId", "goodsID", "goods_id"]));
@@ -92,6 +115,7 @@ export function collectPDDProduct(rawDataOverride) {
   return {
     schema_version: 1,
     collection_method: "page_raw_data",
+    sku_source_path: located.path,
     collected_at: new Date().toISOString(),
     final_url: location.href,
     goods: {
