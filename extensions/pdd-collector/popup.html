@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>拼多多采集器</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="popup">
+  <header>
+    <h1>拼多多商品采集</h1>
+    <button id="open-options" class="link-button">设置</button>
+  </header>
+  <p id="status" class="status">打开拼多多商品页后开始采集。</p>
+  <div class="actions">
+    <button id="capture" class="primary">采集当前页面</button>
+    <button id="upload" disabled>上传服务端</button>
+    <button id="copy" disabled>复制 JSON</button>
+  </div>
+  <section id="summary" class="summary hidden">
+    <div><span>goodsId</span><strong id="goods-id"></strong></div>
+    <div><span>标题</span><strong id="title"></strong></div>
+    <div><span>SKU 数量</span><strong id="sku-count"></strong></div>
+  </section>
+  <details id="preview-wrap" class="hidden">
+    <summary>查看采集 JSON</summary>
+    <pre id="preview"></pre>
+  </details>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>拼多多采集器设置</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="options">
+  <main>
+    <h1>拼多多采集器设置</h1>
+    <p>Token 只保存在当前浏览器扩展的本地存储中，不会注入拼多多页面。</p>
+    <form id="settings-form">
+      <label>服务端地址<input id="server-url" type="url" placeholder="http://127.0.0.1:8080" required></label>
+      <label>设备 Token<input id="device-token" type="password" autocomplete="off" placeholder="pddc_…"></label>
+      <label>采集任务 ID<input id="task-id" type="text" autocomplete="off"></label>
+      <label>任务租约 Token<input id="lease-token" type="password" autocomplete="off"></label>
+      <button class="primary" type="submit">保存设置</button>
+      <span id="saved" class="saved"></span>
+    </form>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>
