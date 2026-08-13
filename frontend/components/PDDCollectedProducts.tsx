@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ChevronDown, ChevronUp, ExternalLink, ImageOff, PackageSearch, RefreshCw } from 'lucide-react';
-import { getPDDProduct, getPDDProducts, PDDProductDetail, PDDProductSummary } from '../services/api';
+import { createMaterialFromPDD, deletePDDProduct, getPDDProduct, getPDDProducts, PDDProductDetail, PDDProductSummary } from '../services/api';
 
 const money = (cent: number) => `¥${(cent / 100).toFixed(2)}`;
 const formatTime = (value: number) => value ? new Date(value * 1000).toLocaleString() : '—';
@@ -13,6 +13,7 @@ const PDDCollectedProducts: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState('');
   const [error, setError] = useState('');
+  const [creating, setCreating] = useState('');
 
   const load = async () => {
     setLoading(true); setError('');
@@ -53,7 +54,7 @@ const PDDCollectedProducts: React.FC = () => {
           {opened === product.goods_id ? <ChevronUp /> : <ChevronDown />}
         </button>
         {opened === product.goods_id && <div className="border-t border-slate-100 bg-slate-50 p-4 md:p-5">
-          <div className="mb-4 flex justify-end">{product.final_url && <a href={product.final_url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-sm font-bold text-brand">打开拼多多商品 <ExternalLink className="h-4 w-4" /></a>}</div>
+          <div className="mb-4 flex justify-end gap-3"><button disabled={creating===product.goods_id} onClick={async()=>{setCreating(product.goods_id);try{await createMaterialFromPDD(product.goods_id);alert('已创建素材草稿，请切换到素材库继续编辑')}catch(e){alert(e instanceof Error?e.message:'创建草稿失败')}finally{setCreating('')}}} className="rounded-xl bg-emerald-500 px-4 py-2 text-sm font-black text-white">{creating===product.goods_id?'创建中…':'创建发布草稿'}</button><button onClick={async()=>{if(!confirm('删除本地采集商品？关联素材草稿和闲鱼商品不会删除。'))return;try{const r=await deletePDDProduct(product.goods_id);alert(`${r.message}${r.draft_count?`，保留 ${r.draft_count} 个草稿`:''}`);setOpened('');await load()}catch(e){alert(e instanceof Error?e.message:'删除失败')}}} className="rounded-xl border border-red-200 px-4 py-2 text-sm font-black text-red-600">删除采集商品</button>{product.final_url && <a href={product.final_url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-sm font-bold text-brand">打开拼多多商品 <ExternalLink className="h-4 w-4" /></a>}</div>
           {detailLoading === product.goods_id || !detail ? <div className="p-8 text-center text-slate-500">正在加载 SKU…</div> : <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white"><table className="min-w-[900px] w-full text-sm"><thead className="bg-slate-100 text-left text-xs text-slate-500"><tr><th className="px-4 py-3">SKU / 图片</th><th className="px-4 py-3">完整规格原值</th><th className="px-4 py-3">价格</th><th className="px-4 py-3">库存</th><th className="px-4 py-3">状态</th></tr></thead><tbody className="divide-y divide-slate-100">{detail.skus.map(sku => <tr key={sku.sku_id}><td className="px-4 py-3"><div className="flex items-center gap-3">{sku.thumb_url && <img src={sku.thumb_url} className="h-12 w-12 rounded-lg object-cover" referrerPolicy="no-referrer" />}<code className="text-xs">{sku.sku_id}</code></div></td><td className="max-w-xl px-4 py-3 font-bold text-slate-700">{specText(sku.specs)}</td><td className="px-4 py-3 font-black text-rose-600">{money(sku.price_cent)}</td><td className="px-4 py-3 font-bold">{sku.stock}</td><td className="px-4 py-3"><span className={`rounded-full px-3 py-1 text-xs font-black ${sku.is_onsale ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{sku.is_onsale ? '在售' : '停售'}</span></td></tr>)}</tbody></table></div>}
         </div>}
       </section>;

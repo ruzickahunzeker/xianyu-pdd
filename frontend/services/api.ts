@@ -504,6 +504,10 @@ export const getItems = async (cookieId?: string): Promise<Item[]> => {
     }));
 }
 
+export const getItem = async (cookieId: string, itemId: string): Promise<Item> =>
+  get(`/items/${cookieId}/${itemId}`);
+
+
 export const syncItemsFromAccount = async (cookieId: string): Promise<any> => {
     return post('/items/get-all-from-account', { cookie_id: cookieId });
 }
@@ -526,6 +530,7 @@ export const publishItem = async (form: {
     postage_mode: string;
     postage?: string;
     images: File[];
+    skus?: Array<{price_cent:number;quantity:number;properties:Array<{name:string;value:string;image_url?:string}>}>;
 }): Promise<any> => {
     const body = new FormData();
     body.set('cookie_id', form.cookie_id);
@@ -536,6 +541,7 @@ export const publishItem = async (form: {
     body.set('quantity', String(form.quantity));
     body.set('postage_mode', form.postage_mode);
     body.set('postage', form.postage || '');
+    if (form.skus?.length) body.set('skus', JSON.stringify(form.skus));
     for (const file of form.images) {
       body.append('images', file);
     }
@@ -1066,3 +1072,12 @@ export interface PDDProductSummary {
 export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 'onsale_sku_count' | 'min_price_cent' | 'max_price_cent'> { skus: PDDSKU[] }
 export const getPDDProducts = (): Promise<PDDProductSummary[]> => get('/api/pdd-collector/catalog');
 export const getPDDProduct = (goodsId: string): Promise<PDDProductDetail> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
+export const deletePDDProduct = (goodsId:string):Promise<{draft_count:number;message:string}> => del(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
+export interface ProductMaterialSKU { source_sku_id?:string; price_cent:number; quantity:number; enabled:boolean; image_url?:string; properties:Array<{name:string;value:string;image_url?:string}> }
+export interface ProductMaterial { id:number; source_type:string; source_id:string; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; status:string; updated_at:number }
+export const createMaterialFromPDD = (goodsId:string):Promise<{id:number}> => post(`/materials/from-pdd/${encodeURIComponent(goodsId)}`,{});
+export const getMaterials = ():Promise<ProductMaterial[]> => get('/materials');
+export const updateMaterial = (id:number,data:Omit<ProductMaterial,'id'|'source_type'|'source_id'|'status'|'updated_at'>) => put(`/materials/${id}`,data);
+export const deleteMaterial = (id:number) => del(`/materials/${id}`);
+export const uploadMaterialImage = (file:File):Promise<{url:string}> => { const body=new FormData();body.append('image',file);return postForm('/materials/images',body) };
+export const publishMaterial = (id:number,cookieId:string):Promise<any> => post(`/materials/${id}/publish`,{cookie_id:cookieId},{timeoutMs:120_000});

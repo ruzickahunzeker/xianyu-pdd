@@ -47,3 +47,54 @@ func TestPublishParsingAndErrors(t *testing.T) {
 		t.Fatalf("stock error = %#v", err)
 	}
 }
+
+func TestPublishSKUPayload(t *testing.T) {
+	skus := []PublishSKU{
+		{PriceCents: 3000, Quantity: 1, Properties: []PublishSKUProperty{{Name: "颜色", Value: "黑色"}, {Name: "材质", Value: "游戏"}}},
+		{PriceCents: 2000, Quantity: 2, Properties: []PublishSKUProperty{{Name: "颜色", Value: "白色"}, {Name: "材质", Value: "普通"}}},
+	}
+	if err := validatePublishSKUs(skus); err != nil {
+		t.Fatal(err)
+	}
+	price, quantity := publishSKUSummary(skus)
+	if price != 2000 || quantity != 3 {
+		t.Fatalf("summary price=%d quantity=%d", price, quantity)
+	}
+	properties, rows, propertyImages := publishSKUPayload(skus)
+	if len(properties) != 2 || len(rows) != 2 {
+		t.Fatalf("properties=%#v rows=%#v", properties, rows)
+	}
+	if len(propertyImages) != 0 {
+		t.Fatalf("propertyImages=%#v", propertyImages)
+	}
+	row := rows[0].(map[string]any)
+	if row["priceInCent"] != "3000" || row["quantity"] != 1 {
+		t.Fatalf("row=%#v", row)
+	}
+}
+
+func TestPublishSKUPayloadIncludesPropertyImages(t *testing.T) {
+	skus := []PublishSKU{
+		{PriceCents: 3000, Quantity: 1, Properties: []PublishSKUProperty{{Name: "颜色", Value: "黑色", ImageURL: "https://img.example/black.jpg"}}},
+		{PriceCents: 3200, Quantity: 1, Properties: []PublishSKUProperty{{Name: "颜色", Value: "白色", ImageURL: "https://img.example/white.jpg"}}},
+	}
+	properties, _, images := publishSKUPayload(skus)
+	if len(images) != 2 {
+		t.Fatalf("images=%#v", images)
+	}
+	definition := properties[0].(map[string]any)
+	if definition["supportImage"] != true {
+		t.Fatalf("definition=%#v", definition)
+	}
+	values := definition["propertyValues"].([]any)
+	if values[0].(map[string]any)["propertyValueImg"] == nil {
+		t.Fatalf("values=%#v", values)
+	}
+}
+
+func TestValidatePublishSKUsRejectsDuplicateCombination(t *testing.T) {
+	skus := []PublishSKU{{PriceCents: 100, Quantity: 1, Properties: []PublishSKUProperty{{Name: "颜色", Value: "黑"}}}, {PriceCents: 200, Quantity: 1, Properties: []PublishSKUProperty{{Name: "颜色", Value: "黑"}}}}
+	if err := validatePublishSKUs(skus); err == nil {
+		t.Fatal("expected duplicate error")
+	}
+}

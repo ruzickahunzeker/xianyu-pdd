@@ -62,11 +62,49 @@ func (s *Server) mountPDDCollectorPublic(r interface {
 func (s *Server) mountPDDCollectorAdmin(r interface {
 	Post(string, http.HandlerFunc)
 	Get(string, http.HandlerFunc)
+	Delete(string, http.HandlerFunc)
 }) {
 	r.Post("/api/pdd-collector/devices", s.pddCreateCollectorDevice)
 	r.Get("/api/pdd-collector/devices", s.pddListCollectorDevices)
 	r.Get("/api/pdd-collector/catalog", s.pddListProducts)
 	r.Get("/api/pdd-collector/catalog/{goodsID}", s.pddGetProduct)
+	r.Delete("/api/pdd-collector/catalog/{goodsID}", s.pddDeleteProduct)
+}
+
+func (s *Server) pddDeleteProduct(w http.ResponseWriter, r *http.Request) {
+	goodsID := chi.URLParam(r, "goodsID")
+	if !pddNumericID.MatchString(goodsID) {
+		writeErr(w, http.StatusBadRequest, "goods_id 无效")
+		return
+	}
+	var draftCount int64
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM product_materials WHERE source_type='pdd' AND source_id=? AND deleted_at IS NULL`, goodsID).Scan(&draftCount)
+	tx, err := s.Store.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, 500, "删除采集商品失败")
+		return
+	}
+	defer tx.Rollback()
+	var productID int64
+	if err = tx.QueryRowContext(r.Context(), `SELECT id FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&productID); err != nil {
+		writeErr(w, 404, "采集商品不存在")
+		return
+	}
+	for _, q := range []string{`DELETE FROM pdd_sku_snapshots WHERE goods_id=?`, `DELETE FROM pdd_products WHERE id=?`} {
+		arg := any(goodsID)
+		if strings.Contains(q, "pdd_products") {
+			arg = productID
+		}
+		if _, err = tx.ExecContext(r.Context(), q, arg); err != nil {
+			writeErr(w, 500, "删除采集商品失败")
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		writeErr(w, 500, "删除采集商品失败")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"success": true, "draft_count": draftCount, "message": "采集商品已删除，关联素材草稿和闲鱼商品未受影响"})
 }
 
 func jsonValue(raw string, fallback any) any {

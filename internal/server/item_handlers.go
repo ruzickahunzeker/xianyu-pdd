@@ -89,6 +89,38 @@ func (s *Server) publishItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var publishSKUs []mtop.PublishSKU
+	if raw := strings.TrimSpace(r.FormValue("skus")); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &publishSKUs); err != nil {
+			writeErr(w, http.StatusBadRequest, "SKU 数据格式错误")
+			return
+		}
+	}
+	if r.MultipartForm != nil {
+		for skuIndex := range publishSKUs {
+			for propertyIndex := range publishSKUs[skuIndex].Properties {
+				property := &publishSKUs[skuIndex].Properties[propertyIndex]
+				field := fmt.Sprintf("spec_image_%d_%d", skuIndex, propertyIndex)
+				files := r.MultipartForm.File[field]
+				if len(files) == 0 {
+					continue
+				}
+				file, openErr := files[0].Open()
+				if openErr != nil {
+					writeErr(w, http.StatusBadRequest, "读取规格图片失败")
+					return
+				}
+				data, tooLarge, readErr := readLimitedBytes(file, 10<<20)
+				_ = file.Close()
+				if readErr != nil || tooLarge || len(data) == 0 {
+					writeErr(w, http.StatusBadRequest, "规格图片无效或超过 10 MiB")
+					return
+				}
+				contentType := http.DetectContentType(data)
+				property.Image = &mtop.PublishImage{Filename: files[0].Filename, ContentType: contentType, Data: data}
+			}
+		}
+	}
 	credentialUnlock := s.Store.LockAccountCredentials(cookieID)
 	latest, err := s.Store.Cookies.GetDetails(r.Context(), cookieID)
 	if err != nil || latest == nil || latest.UserID != userID || !hasStoredCookieCredential(latest) {
@@ -111,6 +143,7 @@ func (s *Server) publishItem(w http.ResponseWriter, r *http.Request) {
 		PostageCents:       postageCents,
 		Virtual:            true,
 		Images:             images,
+		SKUs:               publishSKUs,
 	})
 	runtimeCookie := ""
 	runtimeCookieChanged := false
@@ -184,7 +217,8 @@ func (s *Server) publishItem(w http.ResponseWriter, r *http.Request) {
 		ItemCategory:          res.CategoryID,
 		ItemPrice:             res.PriceText,
 		ItemDetail:            string(detailJSON),
-		MultiQuantityDelivery: quantity > 1,
+		IsMultiSpec:           len(publishSKUs) > 0,
+		MultiQuantityDelivery: quantity > 1 || len(publishSKUs) > 0,
 	}); err != nil {
 		if s.Logger != nil {
 			s.Logger.Error("平台已发布但保存本地商品失败", "cookie_id", cookieID, "item_id", res.ItemID, "err", err)
@@ -379,7 +413,18 @@ func (s *Server) syncItemsFromAccount(w http.ResponseWriter, r *http.Request) {
 	if res.UpdatedCookies != "" {
 		detailCookies = res.UpdatedCookies
 	}
-	s.enrichSyncedItemMultiSpec(mtopCtx, client, detailCookies, req.CookieID, res.Items)
+	// 详情请求复用同一个 CookieSession，必须在详情请求结束后再持久化，
+	// 否则详情接口下发的新 Cookie 会只停留在内存中。
+	syncResult, syncErr := s.syncSyncedItems(r.Context(), req.CookieID, res.Items)
+	if syncErr != nil {
+		credentialUnlock()
+		if s.Logger != nil {
+			s.Logger.Error("同步商品到本地失败", "cookie_id", req.CookieID, "err", syncErr)
+		}
+		writeErr(w, http.StatusInternalServerError, "保存商品同步结果失败")
+		return
+	}
+	detailSaved, detailFailed := s.enrichSyncedItemDetails(mtopCtx, client, detailCookies, req.CookieID, res.Items)
 	runtimeCookie := ""
 	runtimeCookieChanged := false
 	value, valueChanged, handled, persistErr := s.persistMTopCookieSessionLocked(r.Context(), latest, cookieSession)
@@ -408,21 +453,15 @@ func (s *Server) syncItemsFromAccount(w http.ResponseWriter, r *http.Request) {
 	if runtimeCookieChanged {
 		s.updateRunningCookie(r.Context(), req.CookieID, runtimeCookie)
 	}
-	syncResult, syncErr := s.syncSyncedItems(r.Context(), req.CookieID, res.Items)
-	if syncErr != nil {
-		if s.Logger != nil {
-			s.Logger.Error("同步商品到本地失败", "cookie_id", req.CookieID, "err", syncErr)
-		}
-		writeErr(w, http.StatusInternalServerError, "保存商品同步结果失败")
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success":       true,
-		"message":       "成功获取商品，共 " + strconv.Itoa(len(res.Items)) + " 件，保存 " + strconv.Itoa(syncResult.Saved) + " 件，删除 " + strconv.Itoa(syncResult.Deleted) + " 件",
-		"total_count":   len(res.Items),
-		"total_pages":   res.TotalPages,
-		"saved_count":   syncResult.Saved,
-		"deleted_count": syncResult.Deleted,
+		"success":             true,
+		"message":             "成功获取商品，共 " + strconv.Itoa(len(res.Items)) + " 件，保存 " + strconv.Itoa(syncResult.Saved) + " 件，删除 " + strconv.Itoa(syncResult.Deleted) + " 件",
+		"total_count":         len(res.Items),
+		"total_pages":         res.TotalPages,
+		"saved_count":         syncResult.Saved,
+		"deleted_count":       syncResult.Deleted,
+		"detail_saved_count":  detailSaved,
+		"detail_failed_count": detailFailed,
 	})
 }
 
@@ -473,7 +512,9 @@ func (s *Server) syncItemsPageFromAccount(w http.ResponseWriter, r *http.Request
 	if res.UpdatedCookies != "" {
 		detailCookies = res.UpdatedCookies
 	}
-	s.enrichSyncedItemMultiSpec(mtopCtx, client, detailCookies, req.CookieID, res.Items)
+	// 与完整同步相同，详情请求结束后再保存 CookieSession。
+	saved := s.saveSyncedItems(r.Context(), req.CookieID, res.Items)
+	detailSaved, detailFailed := s.enrichSyncedItemDetails(mtopCtx, client, detailCookies, req.CookieID, res.Items)
 	runtimeCookie := ""
 	runtimeCookieChanged := false
 	value, valueChanged, handled, persistErr := s.persistMTopCookieSessionLocked(r.Context(), latest, cookieSession)
@@ -502,14 +543,15 @@ func (s *Server) syncItemsPageFromAccount(w http.ResponseWriter, r *http.Request
 	if runtimeCookieChanged {
 		s.updateRunningCookie(r.Context(), req.CookieID, runtimeCookie)
 	}
-	saved := s.saveSyncedItems(r.Context(), req.CookieID, res.Items)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success":       true,
-		"message":       "成功获取第" + strconv.Itoa(res.PageNumber) + "页 " + strconv.Itoa(len(res.Items)) + " 个商品",
-		"page_number":   res.PageNumber,
-		"page_size":     res.PageSize,
-		"current_count": len(res.Items),
-		"saved_count":   saved,
+		"success":             true,
+		"message":             "成功获取第" + strconv.Itoa(res.PageNumber) + "页 " + strconv.Itoa(len(res.Items)) + " 个商品",
+		"page_number":         res.PageNumber,
+		"page_size":           res.PageSize,
+		"current_count":       len(res.Items),
+		"saved_count":         saved,
+		"detail_saved_count":  detailSaved,
+		"detail_failed_count": detailFailed,
 	})
 }
 
@@ -582,25 +624,54 @@ func (s *Server) syncSyncedItems(ctx context.Context, cookieID string, items []m
 	return s.Store.Items.SyncFromRemote(ctx, cookieID, rows)
 }
 
-func (s *Server) enrichSyncedItemMultiSpec(ctx context.Context, client mtop.Client, cookies, cookieID string, items []mtop.ItemListItem) {
+func (s *Server) enrichSyncedItemDetails(ctx context.Context, client mtop.Client, cookies, cookieID string, items []mtop.ItemListItem) (saved, failed int) {
 	fetcher, ok := client.(mtop.ItemDetailFetcher)
 	if !ok {
-		return
+		return 0, 0
 	}
 	for index := range items {
-		if items[index].IsMultiSpec || s.Store.Items.IsMultiSpec(ctx, cookieID, items[index].ID) {
-			items[index].IsMultiSpec = true
+		// P0 只强制丰富多规格商品；列表明确标记或本地历史状态为 true 都需要详情。
+		if !items[index].IsMultiSpec && !s.Store.Items.IsMultiSpec(ctx, cookieID, items[index].ID) {
 			continue
 		}
-		isMultiSpec, err := fetcher.DetectItemMultiSpec(ctx, cookies, items[index].ID)
+		detail, err := fetcher.FetchItemDetail(ctx, cookies, items[index].ID)
 		if err != nil {
+			failed++
 			if s.Logger != nil {
-				s.Logger.Warn("识别商品多规格状态失败", "cookie_id", cookieID, "item_id", items[index].ID, "err", err)
+				s.Logger.Warn("同步商品完整详情失败", "cookie_id", cookieID, "item_id", items[index].ID, "err", err)
 			}
 			continue
 		}
-		items[index].IsMultiSpec = isMultiSpec
+		if err := s.saveSyncedItemDetail(ctx, cookieID, detail); err != nil {
+			failed++
+			if s.Logger != nil {
+				s.Logger.Warn("保存商品完整详情失败", "cookie_id", cookieID, "item_id", items[index].ID, "err", err)
+			}
+			continue
+		}
+		items[index].IsMultiSpec = detail.IsMultiSpec
+		_ = s.Store.Items.SetMultiSpec(ctx, cookieID, items[index].ID, detail.IsMultiSpec)
+		saved++
 	}
+	return saved, failed
+}
+
+func (s *Server) saveSyncedItemDetail(ctx context.Context, cookieID string, detail *mtop.ItemRemoteDetail) error {
+	if detail == nil {
+		return errors.New("商品详情为空")
+	}
+	images, _ := json.Marshal(detail.Images)
+	category, _ := json.Marshal(detail.Category)
+	raw, _ := json.Marshal(detail.RawData)
+	syncedAt := time.Now().UTC().Unix()
+	dbSKUs := make([]db.ItemSKU, 0, len(detail.SKUs))
+	for _, sku := range detail.SKUs {
+		props, _ := json.Marshal(sku.Properties)
+		features, _ := json.Marshal(sku.Features)
+		skuRaw, _ := json.Marshal(sku.RawData)
+		dbSKUs = append(dbSKUs, db.ItemSKU{SKUID: sku.SKUID, InventoryID: sku.InventoryID, PriceCents: sku.PriceCents, Quantity: sku.Quantity, PropertiesJSON: string(props), PropertyImageURL: sku.PropertyImageURL, FeaturesJSON: string(features), Enabled: sku.Enabled, Status: sku.Status, SortOrder: sku.SortOrder, RawJSON: string(skuRaw)})
+	}
+	return s.Store.Items.ReplaceRemoteDetail(ctx, db.ItemRemoteDetail{CookieID: cookieID, ItemID: detail.ItemID, Description: detail.Description, ImagesJSON: string(images), CategoryJSON: string(category), MinPriceCents: detail.MinPriceCents, MaxPriceCents: detail.MaxPriceCents, TotalQuantity: detail.TotalQuantity, ItemStatus: detail.Status, ItemStatusText: detail.StatusText, TransportFee: detail.TransportFee, RawJSON: string(raw), SyncedAt: syncedAt}, dbSKUs)
 }
 
 func (s *Server) listItemsByCookie(w http.ResponseWriter, r *http.Request) {
@@ -631,12 +702,28 @@ func (s *Server) getItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "商品不存在")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"cookie_id": it.CookieID, "item_id": it.ItemID, "item_title": it.ItemTitle,
 		"item_description": it.ItemDescription, "item_category": it.ItemCategory,
 		"item_price": it.ItemPrice, "item_detail": it.ItemDetail,
 		"is_multi_spec": it.IsMultiSpec, "multi_quantity_delivery": it.MultiQuantityDelivery,
-	})
+	}
+	if remote, remoteErr := s.Store.Items.RemoteDetailWithSKUs(r.Context(), cid, itemID); remoteErr == nil {
+		out["remote_detail"] = remoteDetailToMap(remote)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func remoteDetailToMap(remote *db.ItemWithSKUs) map[string]any {
+	if remote == nil || remote.Detail == nil {
+		return nil
+	}
+	d := remote.Detail
+	skus := make([]map[string]any, 0, len(remote.SKUs))
+	for _, sku := range remote.SKUs {
+		skus = append(skus, map[string]any{"sku_id": sku.SKUID, "inventory_id": sku.InventoryID, "price_cent": sku.PriceCents, "quantity": sku.Quantity, "properties": jsonValue(sku.PropertiesJSON, []any{}), "property_image_url": sku.PropertyImageURL, "features": jsonValue(sku.FeaturesJSON, map[string]any{}), "enabled": sku.Enabled, "status": sku.Status, "sort_order": sku.SortOrder})
+	}
+	return map[string]any{"description": d.Description, "images": jsonValue(d.ImagesJSON, []string{}), "category": jsonValue(d.CategoryJSON, map[string]any{}), "min_price_cent": d.MinPriceCents, "max_price_cent": d.MaxPriceCents, "total_quantity": d.TotalQuantity, "item_status": d.ItemStatus, "item_status_text": d.ItemStatusText, "transport_fee": d.TransportFee, "synced_at": d.SyncedAt, "sku_count": len(skus), "skus": skus}
 }
 
 func (s *Server) createItem(w http.ResponseWriter, r *http.Request) {

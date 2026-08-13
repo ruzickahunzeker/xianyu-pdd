@@ -128,11 +128,10 @@ func TestLatestMigrationsDownUpSQLite(t *testing.T) {
 		t.Fatalf("goose dialect: %v", err)
 	}
 	goose.SetBaseFS(migrationsFS)
-	// 依次回滚最新版本到 13，再整体升级。
-	for i := 0; i < 14; i++ {
-		if err := goose.Down(d, "migrations/sqlite"); err != nil {
-			t.Fatalf("down migration #%d: %v", i+1, err)
-		}
+	// 回滚到版本 13，再整体升级。不要按固定次数回滚，否则新增迁移后
+	// 测试会停在更高版本，错误地认为迁移 14 的字段没有删除。
+	if err := goose.DownTo(d, "migrations/sqlite", 13); err != nil {
+		t.Fatalf("down migrations to version 13: %v", err)
 	}
 	if columnExists(t, d, "notification_channels", "event_types") {
 		t.Fatal("event_types should be removed after migration 14 down")

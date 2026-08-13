@@ -1,0 +1,7 @@
+-- +goose Up
+CREATE TABLE item_remote_details (cookie_id TEXT NOT NULL,item_id TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',images_json TEXT NOT NULL DEFAULT '[]',category_json TEXT NOT NULL DEFAULT '{}',min_price_cent BIGINT NOT NULL DEFAULT 0,max_price_cent BIGINT NOT NULL DEFAULT 0,total_quantity BIGINT NOT NULL DEFAULT 0,item_status INTEGER NOT NULL DEFAULT 0,item_status_text TEXT NOT NULL DEFAULT '',transport_fee TEXT NOT NULL DEFAULT '',raw_json TEXT NOT NULL DEFAULT '{}',synced_at BIGINT NOT NULL,PRIMARY KEY(cookie_id,item_id),FOREIGN KEY(cookie_id,item_id) REFERENCES item_info(cookie_id,item_id) ON DELETE CASCADE);
+CREATE TABLE item_skus (id BIGSERIAL PRIMARY KEY,cookie_id TEXT NOT NULL,item_id TEXT NOT NULL,sku_id TEXT NOT NULL,inventory_id TEXT NOT NULL DEFAULT '',price_cent BIGINT NOT NULL DEFAULT 0,quantity BIGINT NOT NULL DEFAULT 0,properties_json TEXT NOT NULL DEFAULT '[]',property_image_url TEXT NOT NULL DEFAULT '',features_json TEXT NOT NULL DEFAULT '{}',enabled INTEGER NOT NULL DEFAULT 1,status INTEGER NOT NULL DEFAULT 0,sort_order INTEGER NOT NULL DEFAULT 0,raw_json TEXT NOT NULL DEFAULT '{}',synced_at BIGINT NOT NULL,UNIQUE(cookie_id,item_id,sku_id),FOREIGN KEY(cookie_id,item_id) REFERENCES item_info(cookie_id,item_id) ON DELETE CASCADE);
+CREATE INDEX idx_item_skus_item ON item_skus(cookie_id,item_id,sort_order);
+-- +goose Down
+DROP TABLE IF EXISTS item_skus;
+DROP TABLE IF EXISTS item_remote_details;

@@ -38,6 +38,9 @@ ENV PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node
 COPY --from=browser-install-builder /out/browser-install-host /usr/local/bin/browser-install
 COPY .docker/playwright-runtime /prebuilt-playwright-runtime
 RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
     mkdir -p /ms-playwright-go /ms-playwright; \
     case "$TARGETARCH" in \
       amd64) runtime_arch=amd64 ;; \
@@ -79,6 +82,8 @@ COPY --from=playwright-runtime /ms-playwright /ms-playwright
 # 浏览器文件本身不包含 Linux 动态链接库。使用与 runtime 同捆的 Playwright
 # driver 只安装 Chromium 所需系统依赖，并在同一镜像层清理 apt/npm/临时缓存。
 RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends ca-certificates; \
     node /ms-playwright-go/package/cli.js install-deps chromium; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* /root/.cache /tmp/* /var/tmp/*; \

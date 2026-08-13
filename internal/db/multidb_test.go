@@ -771,10 +771,8 @@ func TestMultiDB_LatestMigrationsDownUp(t *testing.T) {
 				t.Fatalf("set goose dialect: %v", err)
 			}
 			goose.SetBaseFS(migrationsFS)
-			for i := 0; i < 14; i++ {
-				if err := goose.Down(tg.store.DB, "migrations/"+subdir); err != nil {
-					t.Fatalf("migration down #%d: %v", i+1, err)
-				}
+			if err := goose.DownTo(tg.store.DB, "migrations/"+subdir, 13); err != nil {
+				t.Fatalf("migration down to version 13: %v", err)
 			}
 			if columnExistsForDialect(t, tg.store.DB, tg.dialect, "notification_channels", "event_types") {
 				t.Fatal("notification_channels.event_types should be removed after down")

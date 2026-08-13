@@ -26,6 +26,7 @@ import (
 const (
 	UploadMediaAPI     = "https://stream-upload.goofish.com/api/upload.api"
 	PublishItemAPI     = "https://h5api.m.goofish.com/h5/mtop.idle.pc.idleitem.publish/1.0/"
+	PublishMultiSKUAPI = "https://h5api.m.goofish.com/h5/mtop.idle.pc.backend.idleitem.publish/1.0/"
 	RecommendItemAPI   = "https://h5api.m.goofish.com/h5/mtop.taobao.idle.kgraph.property.recommend/2.0/"
 	DefaultLocationAPI = "https://h5api.m.goofish.com/h5/mtop.taobao.idle.local.poi.get/1.0/"
 )
@@ -95,6 +96,19 @@ type PublishItemRequest struct {
 	Virtual           bool
 	PreferredCategory *PublishCategory
 	Images            []PublishImage
+	SKUs              []PublishSKU
+}
+
+type PublishSKUProperty struct {
+	Name     string        `json:"name"`
+	Value    string        `json:"value"`
+	ImageURL string        `json:"image_url,omitempty"`
+	Image    *PublishImage `json:"-"`
+}
+type PublishSKU struct {
+	PriceCents int64                `json:"price_cent"`
+	Quantity   int                  `json:"quantity"`
+	Properties []PublishSKUProperty `json:"properties"`
 }
 
 type PublishItemResult struct {
@@ -122,6 +136,12 @@ func (c *ClientImpl) PublishItem(ctx context.Context, cookiesStr string, req Pub
 	}
 	if strings.TrimSpace(req.Description) == "" {
 		req.Description = req.Title
+	}
+	if len(req.SKUs) > 0 {
+		if err := validatePublishSKUs(req.SKUs); err != nil {
+			return nil, err
+		}
+		req.PriceCents, req.Quantity = publishSKUSummary(req.SKUs)
 	}
 	if req.PriceCents <= 0 {
 		return nil, errors.New("商品价格必须大于 0")
@@ -152,6 +172,30 @@ func (c *ClientImpl) PublishItem(ctx context.Context, cookiesStr string, req Pub
 			currentCookies = updated
 		}
 		uploaded = append(uploaded, res)
+	}
+	propertyImages := map[string]uploadedImage{}
+	for skuIndex := range req.SKUs {
+		for propertyIndex := range req.SKUs[skuIndex].Properties {
+			property := &req.SKUs[skuIndex].Properties[propertyIndex]
+			if property.Image == nil {
+				continue
+			}
+			key := property.Name + "\x00" + property.Value
+			image, exists := propertyImages[key]
+			if !exists {
+				var updated string
+				var err error
+				image, updated, err = c.uploadPublishImage(ctx, currentCookies, *property.Image)
+				if err != nil {
+					return nil, fmt.Errorf("上传规格图片 %s=%s 失败: %w", property.Name, property.Value, err)
+				}
+				if updated != "" {
+					currentCookies = updated
+				}
+				propertyImages[key] = image
+			}
+			property.ImageURL = image.URL
+		}
 	}
 	var category map[string]any
 	var updated string
@@ -450,6 +494,16 @@ func (c *ClientImpl) publishItemOnce(ctx context.Context, cookiesStr string, req
 		"bizcode":      "pcMainPublish",
 		"publishScene": "pcMainPublish",
 	}
+	if len(req.SKUs) > 0 {
+		properties, skus, propertyImageList := publishSKUPayload(req.SKUs)
+		data["quantity"] = "1"
+		data["itemProperties"] = properties
+		data["itemSkuList"] = skus
+		data["itemPriceDTO"] = map[string]any{}
+		if len(propertyImageList) > 0 {
+			data["propertyImageList"] = propertyImageList
+		}
+	}
 	if !req.Virtual {
 		data["itemAddrDTO"] = map[string]any{
 			"area":       location["area"],
@@ -461,7 +515,13 @@ func (c *ClientImpl) publishItemOnce(ctx context.Context, cookiesStr string, req
 			"prov":       location["prov"],
 		}
 	}
-	decoded, updated, err := c.callMTop(ctx, cookiesStr, PublishItemAPI, "mtop.idle.pc.idleitem.publish", "1.0", "a21ybx.publish.0.0", "a21ybx.home.sidebar.1.46413da6EPl7v5", "46413da6EPl7v5", data)
+	endpoint, api, callData := PublishItemAPI, "mtop.idle.pc.idleitem.publish", any(data)
+	if len(req.SKUs) > 0 {
+		endpoint, api = PublishMultiSKUAPI, "mtop.idle.pc.backend.idleitem.publish"
+		rawInput, _ := json.Marshal(data)
+		callData = map[string]any{"inputJson": string(rawInput)}
+	}
+	decoded, updated, err := c.callMTop(ctx, cookiesStr, endpoint, api, "1.0", "a21107h.42826273.0.0", "a21ybx.home.sidebar.1.46413da6EPl7v5", "46413da6EPl7v5", callData)
 	if err != nil {
 		return nil, err
 	}
@@ -491,6 +551,104 @@ func (c *ClientImpl) publishItemOnce(ctx context.Context, cookiesStr string, req
 	return result, nil
 }
 
+func validatePublishSKUs(skus []PublishSKU) error {
+	if len(skus) < 2 || len(skus) > 200 {
+		return errors.New("多规格商品 SKU 数量必须在 2 到 200 之间")
+	}
+	seen := map[string]bool{}
+	dimensions := []string{}
+	for idx, sku := range skus {
+		if sku.PriceCents <= 0 || sku.Quantity < 0 || sku.Quantity > 999999 || len(sku.Properties) == 0 {
+			return fmt.Errorf("第 %d 个 SKU 售价、库存或规格无效", idx+1)
+		}
+		parts := make([]string, 0, len(sku.Properties))
+		names := map[string]bool{}
+		for _, p := range sku.Properties {
+			p.Name = strings.TrimSpace(p.Name)
+			p.Value = strings.TrimSpace(p.Value)
+			if p.Name == "" || p.Value == "" || names[p.Name] {
+				return fmt.Errorf("第 %d 个 SKU 规格名称或值无效", idx+1)
+			}
+			names[p.Name] = true
+			parts = append(parts, p.Name+"="+p.Value)
+		}
+		if idx == 0 {
+			for _, p := range sku.Properties {
+				dimensions = append(dimensions, strings.TrimSpace(p.Name))
+			}
+		} else if len(sku.Properties) != len(dimensions) {
+			return errors.New("所有 SKU 的规格维度必须一致")
+		} else {
+			for j, p := range sku.Properties {
+				if strings.TrimSpace(p.Name) != dimensions[j] {
+					return errors.New("所有 SKU 的规格维度和顺序必须一致")
+				}
+			}
+		}
+		key := strings.Join(parts, "\x00")
+		if seen[key] {
+			return errors.New("SKU 规格组合不能重复")
+		}
+		seen[key] = true
+	}
+	return nil
+}
+
+func publishSKUSummary(skus []PublishSKU) (int64, int) {
+	min := skus[0].PriceCents
+	total := 0
+	for _, s := range skus {
+		if s.PriceCents < min {
+			min = s.PriceCents
+		}
+		total += s.Quantity
+	}
+	return min, total
+}
+
+func publishSKUPayload(skus []PublishSKU) ([]any, []any, []any) {
+	type valueInfo struct{ value, image string }
+	order := []string{}
+	values := map[string][]valueInfo{}
+	rows := make([]any, 0, len(skus))
+	propertyImages := []any{}
+	for _, sku := range skus {
+		props := make([]any, 0, len(sku.Properties))
+		for _, p := range sku.Properties {
+			if _, ok := values[p.Name]; !ok {
+				order = append(order, p.Name)
+			}
+			found := false
+			for _, v := range values[p.Name] {
+				if v.value == p.Value {
+					found = true
+				}
+			}
+			if !found {
+				values[p.Name] = append(values[p.Name], valueInfo{p.Value, p.ImageURL})
+			}
+			props = append(props, map[string]any{"propertyText": p.Name, "valueText": p.Value})
+		}
+		rows = append(rows, map[string]any{"priceInCent": strconv.FormatInt(sku.PriceCents, 10), "quantity": sku.Quantity, "propertyList": props})
+	}
+	definitions := make([]any, 0, len(order))
+	for _, name := range order {
+		vals := make([]any, 0, len(values[name]))
+		hasImages := false
+		for _, v := range values[name] {
+			x := map[string]any{"propertyValue": v.value}
+			if v.image != "" {
+				hasImages = true
+				x["propertyValueImg"] = map[string]any{"url": v.image}
+				propertyImages = append(propertyImages, map[string]any{"property": map[string]any{"propertyText": name, "valueText": v.value}, "url": v.image})
+			}
+			vals = append(vals, x)
+		}
+		definitions = append(definitions, map[string]any{"propertyName": name, "supportImage": hasImages, "propertyValues": vals})
+	}
+	return definitions, rows, propertyImages
+}
+
 func (c *ClientImpl) callMTop(ctx context.Context, cookiesStr, endpoint, api, version, spmCnt, spmPre, logID string, data any) (map[string]any, string, error) {
 	hc := c.httpClient()
 	rawData, _ := json.Marshal(data)
@@ -499,12 +657,20 @@ func (c *ClientImpl) callMTop(ctx context.Context, cookiesStr, endpoint, api, ve
 	t := strconv.FormatInt(time.Now().UnixMilli(), 10)
 	sign := protocol.GenerateSign(t, protocol.SignToken(signingCookies), dataVal)
 	query := buildMTopQuery(api, version, t, sign, spmCnt, spmPre, logID)
+	if api == "mtop.idle.pc.backend.idleitem.publish" {
+		query += "&idle_site_biz_code=COMMONPRO"
+	}
 	body := "data=" + url.QueryEscape(dataVal)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"?"+query, strings.NewReader(body))
 	if err != nil {
 		return nil, cookiesStr, err
 	}
 	setCommonHeaders(req, requestCookies)
+	if api == "mtop.idle.pc.backend.idleitem.publish" {
+		req.Header.Set("origin", "https://seller.goofish.com")
+		req.Header.Set("referer", "https://seller.goofish.com/?site=COMMONPRO")
+		req.Header.Set("idle_site_biz_code", "COMMONPRO")
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, cookiesStr, fmt.Errorf("%s 请求失败: %w", api, err)

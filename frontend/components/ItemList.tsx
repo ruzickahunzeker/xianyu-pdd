@@ -4,6 +4,7 @@ import { selectActivePublishBatch } from './itemPublishBatchState';
 import { Item, AccountDetail, ShippingRule } from '../types';
 import {
   getItems,
+  getItem,
   getAccountDetails,
   syncItemsFromAccount,
   createItem,
@@ -20,7 +21,7 @@ import {
   deleteItem,
   getShippingRules
 } from '../services/api';
-import { ArrowRight, Box, CheckCircle2, CircleDashed, Edit, Filter, Link2, PackagePlus, Plus, RefreshCw, Save, Search, ShoppingBag, Trash2, UploadCloud, User, X } from 'lucide-react';
+import { ArrowRight, Box, CheckCircle2, CircleDashed, Edit, Eye, Filter, Link2, PackagePlus, Plus, RefreshCw, Save, Search, ShoppingBag, Trash2, UploadCloud, User, X } from 'lucide-react';
 
 interface ItemListProps {
   onConfigureDelivery: (item: Item) => void;
@@ -117,6 +118,8 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
   const [recentBatch, setRecentBatch] = useState<PublishBatchDetail | null>(null);
   const batchPollInFlight = useRef(false);
   const [selectedItem, setSelectedItem] = useState<Item | null>(null);
+  const [detailItem, setDetailItem] = useState<Item | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [editForm, setEditForm] = useState<Partial<Item>>({});
   const [addForm, setAddForm] = useState({
     cookie_id: '',
@@ -135,6 +138,7 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
     postage_mode: 'free',
     postage: '',
     images: [] as File[]
+    ,skus: [] as Array<{price_cent:number;quantity:number;properties:Array<{name:string;value:string;image_url?:string}>}>
   });
   const [publishImagePreviews, setPublishImagePreviews] = useState<{ key: string; url: string }[]>([]);
 
@@ -221,6 +225,15 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
     setShowEditModal(true);
   };
 
+  const handleViewDetail = async (item: Item) => {
+    setDetailItem(item); setDetailLoading(true);
+    try { setDetailItem(await getItem(item.cookie_id, item.item_id)); }
+    catch (error:any) { alert(error?.message || '读取商品详情失败'); setDetailItem(null); }
+    finally { setDetailLoading(false); }
+  };
+
+  const copyDetailToPublish = () => { if(!detailItem?.remote_detail)return; const d=detailItem.remote_detail; setPublishForm({...publishForm,cookie_id:detailItem.cookie_id,title:detailItem.item_title||'',description:d.description||detailItem.item_description||'',price:(d.min_price_cent/100).toFixed(2),quantity:String(d.total_quantity),skus:d.skus.map(s=>({price_cent:s.price_cent,quantity:s.quantity,properties:s.properties.map(p=>({name:p.propertyText||'',value:p.actualValueText||p.valueText||'',image_url:s.property_image_url||''}))})),images:[]});setDetailItem(null);setShowPublishModal(true); };
+
   const handleSaveEdit = async () => {
     if (!selectedItem) return;
     try {
@@ -303,6 +316,7 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
         postage_mode: 'free',
         postage: '',
         images: []
+        ,skus: []
       });
       if (result?.item_id) {
         const publishedItem: Item = {
@@ -708,6 +722,9 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
                       </span>
                   </div>
                   <div className="space-y-2 mt-auto">
+                      <button onClick={() => void handleViewDetail(item)} className="w-full flex items-center justify-center gap-1.5 px-2.5 py-2 rounded-lg text-[11px] font-extrabold bg-blue-50 text-blue-700 hover:bg-blue-100">
+                        <Eye className="w-3.5 h-3.5" />查看商品与 SKU
+                      </button>
                       <button
                         onClick={() => onConfigureDelivery(item)}
                         className={`w-full flex items-center justify-between gap-1 px-2.5 py-2 rounded-lg text-[11px] font-extrabold transition-all ${hasRule ? 'bg-gray-900 text-white hover:bg-black' : 'bg-brand text-white hover:bg-brand-highlight shadow-md shadow-blue-100'}`}
@@ -726,6 +743,23 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
              </div>
           )}
       </div>
+
+      {detailItem && createPortal(
+        <div className="modal-overlay-centered">
+          <div className="modal-container" style={{maxWidth:'980px'}}>
+            <div className="modal-header flex items-center justify-between"><div><h3 className="text-xl font-extrabold">商品与 SKU 详情</h3><p className="text-xs text-gray-500 mt-1">{detailItem.item_title} · {detailItem.item_id}</p></div><button onClick={()=>setDetailItem(null)} className="p-2 rounded-xl hover:bg-gray-100"><X className="w-5 h-5" /></button></div>
+            <div className="modal-body space-y-5">
+              {detailLoading ? <div className="py-12 text-center text-gray-500">正在读取详情…</div> : !detailItem.remote_detail ? <div className="rounded-xl bg-amber-50 p-4 text-amber-800">尚未同步完整详情，请重新同步该账号商品。</div> : <>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">{[
+                  ['价格区间', `¥${(detailItem.remote_detail.min_price_cent/100).toFixed(2)} - ¥${(detailItem.remote_detail.max_price_cent/100).toFixed(2)}`],
+                  ['SKU 数量', String(detailItem.remote_detail.sku_count)], ['总库存', String(detailItem.remote_detail.total_quantity)], ['状态', detailItem.remote_detail.item_status_text || String(detailItem.remote_detail.item_status)]
+                ].map(([label,value])=><div key={label} className="rounded-xl bg-gray-50 p-3"><div className="text-[11px] text-gray-500">{label}</div><div className="mt-1 font-extrabold text-gray-900">{value}</div></div>)}</div>
+                <div className="overflow-x-auto rounded-xl border border-gray-200"><table className="min-w-[760px] w-full text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="px-4 py-3">SKU / 图片</th><th className="px-4 py-3">规格组合</th><th className="px-4 py-3">售价</th><th className="px-4 py-3">库存</th><th className="px-4 py-3">状态</th></tr></thead><tbody className="divide-y divide-gray-100">{detailItem.remote_detail.skus.map(sku=><tr key={sku.sku_id}><td className="px-4 py-3"><div className="flex items-center gap-2">{sku.property_image_url&&<img src={sku.property_image_url} className="w-10 h-10 rounded-lg object-cover" />}<code className="text-xs">{sku.sku_id}</code></div></td><td className="px-4 py-3 font-bold">{sku.properties.map(p=>`${p.propertyText}：${p.actualValueText||p.valueText}`).join(' / ')}</td><td className="px-4 py-3 font-extrabold text-rose-600">¥{(sku.price_cent/100).toFixed(2)}</td><td className="px-4 py-3 font-bold">{sku.quantity}</td><td className="px-4 py-3">{sku.enabled&&sku.status===0?'在售':'不可用'}</td></tr>)}</tbody></table></div>
+                <button onClick={copyDetailToPublish} className="w-full rounded-xl bg-emerald-500 px-4 py-3 font-extrabold text-white hover:bg-emerald-600">复制此商品及 SKU 到发布表单</button>
+              </>}
+            </div>
+          </div>
+        </div>, document.body)}
 
       {showEditModal && selectedItem && createPortal(
         <div className="modal-overlay-centered">
@@ -810,7 +844,7 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
             <div className="modal-header flex items-center justify-between">
               <div>
                 <h3 className="text-xl font-extrabold text-gray-900">发布商品到闲鱼</h3>
-                <p className="text-xs text-gray-500 mt-1">普通单规格发布；库存数量会写入闲鱼发布参数，用于判断账号库存能力。</p>
+                <p className="text-xs text-gray-500 mt-1">支持普通商品和多规格商品发布；多规格库存与价格按 SKU 提交。</p>
               </div>
               <button onClick={() => setShowPublishModal(false)} className="p-2 rounded-xl hover:bg-gray-100 transition-colors" title="关闭">
                 <X className="w-5 h-5 text-gray-500" />
@@ -820,6 +854,7 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 leading-6">
                 发布时必须填写库存。若账号没有库存发布能力，后端会返回明确的“库存权限不足”错误，不会误报为普通发布失败。
               </div>
+              {publishForm.skus.length > 0 && <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"><div className="font-extrabold text-emerald-800">多规格发布：{publishForm.skus.length} 个 SKU</div><div className="mt-2 space-y-1 text-xs text-emerald-800">{publishForm.skus.map((s,i)=><div key={i}>{s.properties.map(p=>`${p.name}：${p.value}`).join(' / ')} · ¥{(s.price_cent/100).toFixed(2)} · 库存 {s.quantity}</div>)}</div><button onClick={()=>setPublishForm({...publishForm,skus:[]})} className="mt-3 text-xs font-bold text-red-600">改为单规格发布</button></div>}
               <div className="space-y-2">
                 <label className="block text-sm font-bold text-gray-700">发布账号</label>
                 <select className="w-full ios-input px-4 py-3 rounded-xl" value={publishForm.cookie_id} onChange={e => setPublishForm({...publishForm, cookie_id: e.target.value})}>

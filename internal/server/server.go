@@ -177,6 +177,7 @@ func (s *Server) Router() http.Handler {
 		s.mountAutomation(r)
 		// 商品
 		s.mountItemsReal(r)
+		s.mountMaterials(r)
 		// 关键字 + 指定商品回复
 		s.mountKeywordsReal(r)
 		s.mountItemRepliesReal(r)

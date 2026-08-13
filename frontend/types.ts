@@ -190,7 +190,12 @@ export interface Item {
   multi_quantity_delivery?: number | boolean;
   is_multi_qty_ship?: number | boolean;
   created_at?: string;
+  remote_detail?: ItemRemoteDetail;
 }
+
+export interface ItemRemoteProperty { propertyId?: number|string; propertyText?: string; valueId?: number|string; valueText?: string; actualValueText?: string; }
+export interface ItemRemoteSKU { sku_id:string; inventory_id:string; price_cent:number; quantity:number; properties:ItemRemoteProperty[]; property_image_url?:string; enabled:boolean; status:number; sort_order:number; }
+export interface ItemRemoteDetail { description:string; images:string[]; category:Record<string,unknown>; min_price_cent:number; max_price_cent:number; total_quantity:number; item_status:number; item_status_text:string; transport_fee:string; synced_at:number; sku_count:number; skus:ItemRemoteSKU[]; }
 
 export type AutomationTriggerType = 'order_paid' | 'buyer_reviewed' | 'review_missing_timeout';
 export type AutomationActionType = 'confirm_shipment' | 'send_card' | 'send_text';
