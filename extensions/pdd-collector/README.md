@@ -10,10 +10,10 @@ Manifest V3 扩展，从当前拼多多商品页的 `window.rawData.store` 提�
 4. 打开一个已经完整加载的拼多多商品页。
 5. 点击扩展图标，再点击“采集当前页面”。
 
-采集结果可以先预览或复制 JSON。服务端实现采集任务 API 后，在设置页填写服务端地址、设备 Token、任务 ID 和租约 Token，即可调用：
+采集结果可以先预览或复制 JSON。服务端启用采集 API 后，在设置页填写服务端地址和设备 Token，即可调用：
 
 ```text
-POST /api/pdd-collector/tasks/{taskId}/complete
+POST /api/pdd-collector/products
 Authorization: Bearer <device-token>
 ```
 
@@ -26,6 +26,6 @@ Authorization: Bearer <device-token>
 
 ## 当前限制
 
-- 当前为手动采集原型，尚未自动领取服务端任务。
+- 当前为手动采集模式，绑定设备后可直接上传。
 - `window.rawData` 必须已经包含完整 `store.skus`。
 - 页面若先把超出 JavaScript 安全整数范围的 ID 解析成 `number`，转字符串无法恢复已丢失的精度；接入真实样本时必须验证 ID，并在必要时改为从原始响应文本提取。

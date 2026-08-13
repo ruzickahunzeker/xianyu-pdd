@@ -3,9 +3,7 @@ import { collectPDDProduct } from "./collector.js";
 const DEFAULT_SETTINGS = {
   serverURL: "http://127.0.0.1:8080",
   deviceToken: "",
-  taskID: "",
-  leaseToken: ""
-};
+ };
 
 async function settings() {
   return { ...DEFAULT_SETTINGS, ...(await chrome.storage.local.get(DEFAULT_SETTINGS)) };
@@ -25,36 +23,34 @@ async function capture() {
     world: "MAIN",
     func: () => JSON.stringify(globalThis.rawData)
   });
-  const normalized = collectPDDProduct(JSON.parse(result));
+  const normalized = { ...collectPDDProduct(JSON.parse(result)), collection_id: crypto.randomUUID() };
   await chrome.storage.local.set({ lastCollection: normalized });
   return normalized;
 }
 
-function endpoint(baseURL, taskID) {
+function endpoint(baseURL) {
   const base = baseURL.replace(/\/+$/, "");
-  return `${base}/api/pdd-collector/tasks/${encodeURIComponent(taskID)}/complete`;
+  return `${base}/api/pdd-collector/products`;
 }
 
 async function upload(payload) {
   const config = await settings();
   if (!config.serverURL) throw new Error("请先配置服务端地址");
   if (!config.deviceToken) throw new Error("请先配置设备 Token");
-  if (!config.taskID) throw new Error("请先配置采集任务 ID");
-  if (!config.leaseToken) throw new Error("请先配置任务租约 Token");
 
-  const response = await fetch(endpoint(config.serverURL, config.taskID), {
+  const response = await fetch(endpoint(config.serverURL), {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${config.deviceToken}`,
       "Content-Type": "application/json",
       "X-Collector-Version": chrome.runtime.getManifest().version
     },
-    body: JSON.stringify({ ...payload, lease_token: config.leaseToken })
+    body: JSON.stringify(payload)
   });
   const text = await response.text();
   let body;
   try { body = text ? JSON.parse(text) : {}; } catch { body = { message: text }; }
-  if (!response.ok) throw new Error(body?.message || `上传失败：HTTP ${response.status}`);
+  if (!response.ok) throw new Error(body?.detail || body?.message || `上传失败：HTTP ${response.status}`);
   return body;
 }
 

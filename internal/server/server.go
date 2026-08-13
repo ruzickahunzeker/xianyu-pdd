@@ -139,6 +139,8 @@ func (s *Server) Router() http.Handler {
 	// 健康检查（无需认证）。
 	r.Get("/health", s.health)
 
+	s.mountPDDCollectorPublic(r)
+
 	// 认证组（无需登录的端点，但解析会话以判断登录态）。
 	r.Group(func(r chi.Router) {
 		r.Use(s.Auth.Middleware) // 解析 session，不强制登录
@@ -193,6 +195,7 @@ func (s *Server) Router() http.Handler {
 		r.Group(func(r chi.Router) {
 			r.Use(auth.RequireAdmin)
 			s.mountAdminReal(r)
+			s.mountPDDCollectorAdmin(r)
 		})
 	})
 
