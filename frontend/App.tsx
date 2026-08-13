@@ -6,7 +6,7 @@ import OrderList from './components/OrderList';
 import CardList from './components/CardList';
 import ItemList from './components/ItemList';
 import Settings from './components/Settings';
-import PDDCollectorDevices from './components/PDDCollectorDevices';
+import PDDCollector from './components/PDDCollector';
 import Rules from './components/Rules';
 import Notifications from './components/Notifications';
 import Chat from './components/Chat';
@@ -340,7 +340,7 @@ const App: React.FC = () => {
       />;
       case 'notifications': return <Notifications isAdmin={isAdmin} />;
       case 'settings': return isAdmin ? <Settings /> : <Dashboard />;
-      case 'pdd-collector': return isAdmin ? <PDDCollectorDevices /> : <Dashboard />;
+      case 'pdd-collector': return isAdmin ? <PDDCollector /> : <Dashboard />;
       default: return <Dashboard />;
     }
   };

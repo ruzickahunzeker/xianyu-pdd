@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
 	"xianyu-go/internal/db"
@@ -64,6 +65,67 @@ func (s *Server) mountPDDCollectorAdmin(r interface {
 }) {
 	r.Post("/api/pdd-collector/devices", s.pddCreateCollectorDevice)
 	r.Get("/api/pdd-collector/devices", s.pddListCollectorDevices)
+	r.Get("/api/pdd-collector/catalog", s.pddListProducts)
+	r.Get("/api/pdd-collector/catalog/{goodsID}", s.pddGetProduct)
+}
+
+func jsonValue(raw string, fallback any) any {
+	var value any
+	if json.Unmarshal([]byte(raw), &value) != nil {
+		return fallback
+	}
+	return value
+}
+
+func (s *Server) pddListProducts(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT p.id,p.goods_id,p.final_url,p.title,p.images_json,p.first_collected_at,p.last_collected_at,COUNT(s.id),COALESCE(SUM(CASE WHEN s.is_onsale=1 THEN 1 ELSE 0 END),0),COALESCE(MIN(s.price_cent),0),COALESCE(MAX(s.price_cent),0) FROM pdd_products p LEFT JOIN pdd_skus s ON s.product_id=p.id GROUP BY p.id,p.goods_id,p.final_url,p.title,p.images_json,p.first_collected_at,p.last_collected_at ORDER BY p.last_collected_at DESC`)
+	if err != nil {
+		writeErr(w, 500, "查询拼多多商品失败")
+		return
+	}
+	defer rows.Close()
+	out := make([]map[string]any, 0)
+	for rows.Next() {
+		var id, firstAt, lastAt, skuCount, onSaleCount, minPrice, maxPrice int64
+		var goodsID, finalURL, title, images string
+		if err := rows.Scan(&id, &goodsID, &finalURL, &title, &images, &firstAt, &lastAt, &skuCount, &onSaleCount, &minPrice, &maxPrice); err != nil {
+			writeErr(w, 500, "读取拼多多商品失败")
+			return
+		}
+		out = append(out, map[string]any{"id": id, "goods_id": goodsID, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "sku_count": skuCount, "onsale_sku_count": onSaleCount, "min_price_cent": minPrice, "max_price_cent": maxPrice})
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) pddGetProduct(w http.ResponseWriter, r *http.Request) {
+	goodsID := chi.URLParam(r, "goodsID")
+	if !pddNumericID.MatchString(goodsID) {
+		writeErr(w, http.StatusBadRequest, "goods_id 无效")
+		return
+	}
+	var id, firstAt, lastAt int64
+	var finalURL, title, images string
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,final_url,title,images_json,first_collected_at,last_collected_at FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&id, &finalURL, &title, &images, &firstAt, &lastAt); err != nil {
+		writeErr(w, http.StatusNotFound, "拼多多商品不存在")
+		return
+	}
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,sku_id,specs_json,spec_value_ids_json,thumb_url,prices_json,price_cent,stock,is_onsale,last_collected_at FROM pdd_skus WHERE product_id=? ORDER BY is_onsale DESC,stock DESC,id`, id)
+	if err != nil {
+		writeErr(w, 500, "查询拼多多SKU失败")
+		return
+	}
+	defer rows.Close()
+	skus := make([]map[string]any, 0)
+	for rows.Next() {
+		var skuRecordID, price, stock, onSale, collectedAt int64
+		var skuID, specs, specIDs, thumbURL, prices string
+		if err := rows.Scan(&skuRecordID, &skuID, &specs, &specIDs, &thumbURL, &prices, &price, &stock, &onSale, &collectedAt); err != nil {
+			writeErr(w, 500, "读取拼多多SKU失败")
+			return
+		}
+		skus = append(skus, map[string]any{"id": skuRecordID, "sku_id": skuID, "specs": jsonValue(specs, []any{}), "spec_value_ids": jsonValue(specIDs, []any{}), "thumb_url": thumbURL, "prices": jsonValue(prices, map[string]any{}), "price_cent": price, "stock": stock, "is_onsale": onSale != 0, "last_collected_at": collectedAt})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "goods_id": goodsID, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "skus": skus})
 }
 
 func tokenDigest(token string) string {

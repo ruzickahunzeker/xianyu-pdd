@@ -1,11 +1,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func TestPDDCollectorRejectsMissingToken(t *testing.T) {
@@ -60,5 +63,35 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	var count int
 	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM pdd_sku_snapshots`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("snapshot count=%d err=%v", count, err)
+	}
+}
+
+func TestPDDCollectorCatalog(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	_, err := store.DB.Exec(`INSERT INTO pdd_products(id,goods_id,final_url,title,images_json,first_collected_at,last_collected_at) VALUES(1,'123','https://pdd/123','测试商品','["https://img/a.jpg"]',10,20)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.DB.Exec(`INSERT INTO pdd_skus(product_id,goods_id,sku_id,specs_json,spec_value_ids_json,thumb_url,prices_json,price_cent,stock,is_onsale,raw_snapshot_json,last_collected_at) VALUES(1,'123','456','[{"spec_key":"规格","raw_value":"整箱10罐【限时】"}]','["789"]','https://img/sku.jpg','{}',2990,8,1,'{}',20)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/pdd-collector/catalog", nil)
+	listRec := httptest.NewRecorder()
+	srv.pddListProducts(listRec, listReq)
+	if listRec.Code != http.StatusOK || !strings.Contains(listRec.Body.String(), `"sku_count":1`) {
+		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
+	}
+
+	routeContext := chi.NewRouteContext()
+	routeContext.URLParams.Add("goodsID", "123")
+	detailReq := httptest.NewRequest(http.MethodGet, "/api/pdd-collector/catalog/123", nil)
+	detailReq = detailReq.WithContext(context.WithValue(detailReq.Context(), chi.RouteCtxKey, routeContext))
+	detailRec := httptest.NewRecorder()
+	srv.pddGetProduct(detailRec, detailReq)
+	if detailRec.Code != http.StatusOK || !strings.Contains(detailRec.Body.String(), "整箱10罐") {
+		t.Fatalf("detail status=%d body=%s", detailRec.Code, detailRec.Body.String())
 	}
 }

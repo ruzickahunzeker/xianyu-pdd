@@ -1052,3 +1052,17 @@ export interface PDDCollectorDevice {
 export interface CreatedPDDCollectorDevice extends PDDCollectorDevice { device_token: string }
 export const getPDDCollectorDevices = (): Promise<PDDCollectorDevice[]> => get('/api/pdd-collector/devices');
 export const createPDDCollectorDevice = (name: string): Promise<CreatedPDDCollectorDevice> => post('/api/pdd-collector/devices', { name });
+
+export interface PDDSpec { spec_key: string; spec_key_id?: string; spec_value_id?: string; raw_value: string }
+export interface PDDSKU {
+  id: number; sku_id: string; specs: PDDSpec[]; spec_value_ids: string[]; thumb_url: string;
+  prices: Record<string, unknown>; price_cent: number; stock: number; is_onsale: boolean; last_collected_at: number;
+}
+export interface PDDProductSummary {
+  id: number; goods_id: string; final_url: string; title: string; images: string[];
+  first_collected_at: number; last_collected_at: number; sku_count: number; onsale_sku_count: number;
+  min_price_cent: number; max_price_cent: number;
+}
+export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 'onsale_sku_count' | 'min_price_cent' | 'max_price_cent'> { skus: PDDSKU[] }
+export const getPDDProducts = (): Promise<PDDProductSummary[]> => get('/api/pdd-collector/catalog');
+export const getPDDProduct = (goodsId: string): Promise<PDDProductDetail> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);

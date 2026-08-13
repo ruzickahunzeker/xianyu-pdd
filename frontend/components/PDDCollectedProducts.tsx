@@ -1,0 +1,63 @@
+import React, { useEffect, useState } from 'react';
+import { ChevronDown, ChevronUp, ExternalLink, ImageOff, PackageSearch, RefreshCw } from 'lucide-react';
+import { getPDDProduct, getPDDProducts, PDDProductDetail, PDDProductSummary } from '../services/api';
+
+const money = (cent: number) => `¥${(cent / 100).toFixed(2)}`;
+const formatTime = (value: number) => value ? new Date(value * 1000).toLocaleString() : '—';
+const specText = (specs: PDDProductDetail['skus'][number]['specs']) => specs.map(spec => `${spec.spec_key || '规格'}：${spec.raw_value}`).join(' / ') || '无规格信息';
+
+const PDDCollectedProducts: React.FC = () => {
+  const [products, setProducts] = useState<PDDProductSummary[]>([]);
+  const [details, setDetails] = useState<Record<string, PDDProductDetail>>({});
+  const [opened, setOpened] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState('');
+  const [error, setError] = useState('');
+
+  const load = async () => {
+    setLoading(true); setError('');
+    try { setProducts(await getPDDProducts()); }
+    catch (err) { setError(err instanceof Error ? err.message : '加载采集商品失败'); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { void load(); }, []);
+
+  const toggle = async (goodsId: string) => {
+    if (opened === goodsId) { setOpened(''); return; }
+    setOpened(goodsId);
+    if (details[goodsId]) return;
+    setDetailLoading(goodsId); setError('');
+    try {
+      const detail = await getPDDProduct(goodsId);
+      setDetails(current => ({ ...current, [goodsId]: detail }));
+    }
+    catch (err) { setError(err instanceof Error ? err.message : '加载 SKU 失败'); setOpened(''); }
+    finally { setDetailLoading(''); }
+  };
+
+  return <div className="space-y-5">
+    <div className="flex items-center justify-between gap-4">
+      <div><h2 className="text-2xl font-black text-slate-950">已采集商品</h2><p className="mt-1 text-sm text-slate-500">查看拼多多商品和完整 SKU 原始规格。</p></div>
+      <button onClick={() => void load()} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 font-bold text-slate-600"><RefreshCw className="h-4 w-4" />刷新</button>
+    </div>
+    {error && <div className="rounded-xl bg-red-50 p-4 font-bold text-red-600">{error}</div>}
+    {loading ? <div className="rounded-2xl border bg-white p-10 text-center text-slate-500">加载中…</div> : products.length === 0 ? <div className="rounded-2xl border bg-white p-12 text-center text-slate-500"><PackageSearch className="mx-auto mb-3 h-9 w-9" />尚未采集商品</div> : products.map(product => {
+      const detail = details[product.goods_id];
+      const image = product.images?.[0];
+      return <section key={product.goods_id} className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <button onClick={() => void toggle(product.goods_id)} className="grid w-full gap-4 p-5 text-left md:grid-cols-[72px_minmax(0,1fr)_150px_150px_28px] md:items-center">
+          {image ? <img src={image} className="h-[72px] w-[72px] rounded-xl object-cover" referrerPolicy="no-referrer" /> : <span className="flex h-[72px] w-[72px] items-center justify-center rounded-xl bg-slate-100 text-slate-400"><ImageOff /></span>}
+          <div className="min-w-0"><div className="truncate font-black text-slate-900">{product.title || '（未采集到标题）'}</div><div className="mt-1 text-xs text-slate-400">商品 ID：{product.goods_id}</div><div className="mt-2 text-sm font-bold text-brand">{money(product.min_price_cent)}{product.max_price_cent !== product.min_price_cent ? ` - ${money(product.max_price_cent)}` : ''}</div></div>
+          <div><div className="text-xs text-slate-400">SKU</div><div className="font-black">{product.sku_count} 个 <span className="text-sm text-emerald-600">({product.onsale_sku_count} 在售)</span></div></div>
+          <div><div className="text-xs text-slate-400">最后采集</div><div className="text-sm font-bold">{formatTime(product.last_collected_at)}</div></div>
+          {opened === product.goods_id ? <ChevronUp /> : <ChevronDown />}
+        </button>
+        {opened === product.goods_id && <div className="border-t border-slate-100 bg-slate-50 p-4 md:p-5">
+          <div className="mb-4 flex justify-end">{product.final_url && <a href={product.final_url} target="_blank" rel="noreferrer" className="flex items-center gap-1 text-sm font-bold text-brand">打开拼多多商品 <ExternalLink className="h-4 w-4" /></a>}</div>
+          {detailLoading === product.goods_id || !detail ? <div className="p-8 text-center text-slate-500">正在加载 SKU…</div> : <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white"><table className="min-w-[900px] w-full text-sm"><thead className="bg-slate-100 text-left text-xs text-slate-500"><tr><th className="px-4 py-3">SKU / 图片</th><th className="px-4 py-3">完整规格原值</th><th className="px-4 py-3">价格</th><th className="px-4 py-3">库存</th><th className="px-4 py-3">状态</th></tr></thead><tbody className="divide-y divide-slate-100">{detail.skus.map(sku => <tr key={sku.sku_id}><td className="px-4 py-3"><div className="flex items-center gap-3">{sku.thumb_url && <img src={sku.thumb_url} className="h-12 w-12 rounded-lg object-cover" referrerPolicy="no-referrer" />}<code className="text-xs">{sku.sku_id}</code></div></td><td className="max-w-xl px-4 py-3 font-bold text-slate-700">{specText(sku.specs)}</td><td className="px-4 py-3 font-black text-rose-600">{money(sku.price_cent)}</td><td className="px-4 py-3 font-bold">{sku.stock}</td><td className="px-4 py-3"><span className={`rounded-full px-3 py-1 text-xs font-black ${sku.is_onsale ? 'bg-emerald-50 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>{sku.is_onsale ? '在售' : '停售'}</span></td></tr>)}</tbody></table></div>}
+        </div>}
+      </section>;
+    })}
+  </div>;
+};
+export default PDDCollectedProducts;

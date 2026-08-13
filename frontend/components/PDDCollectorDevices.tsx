@@ -4,7 +4,7 @@ import { createPDDCollectorDevice, getPDDCollectorDevices, PDDCollectorDevice } 
 
 const formatTime = (value: number) => value ? new Date(value * 1000).toLocaleString() : '从未';
 
-const PDDCollectorDevices: React.FC = () => {
+const PDDCollectorDevices: React.FC<{ compact?: boolean }> = ({ compact = false }) => {
   const [devices, setDevices] = useState<PDDCollectorDevice[]>([]);
   const [name, setName] = useState('');
   const [token, setToken] = useState('');
@@ -38,10 +38,10 @@ const PDDCollectorDevices: React.FC = () => {
   };
 
   return <div className="space-y-6">
-    <div className="flex items-center justify-between">
+    {!compact && <div className="flex items-center justify-between">
       <div><h1 className="text-3xl font-black text-slate-950">拼多多采集设备</h1><p className="mt-2 text-slate-500">绑定浏览器扩展，采集商品后直接上传数据库。</p></div>
       <button onClick={() => void load()} className="flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 font-bold text-slate-600"><RefreshCw className="h-4 w-4" />刷新</button>
-    </div>
+    </div>}
 
     <form onSubmit={create} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
       <h2 className="mb-4 flex items-center gap-2 text-lg font-black"><Plus className="h-5 w-5 text-brand" />创建采集设备</h2>
