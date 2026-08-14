@@ -58,6 +58,8 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"risk_control_logs", "processing_status"},
 		{"risk_control_logs", "duration_ms"},
 		{"notification_outbox", "worker_token"},
+		{"material_publish_sku_mappings", "source_goods_id"},
+		{"pdd_products", "mall_sn"},
 	}
 	for _, c := range checks {
 		if !columnExists(t, db, c.table, c.col) {

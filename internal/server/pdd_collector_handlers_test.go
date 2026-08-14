@@ -74,7 +74,7 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := `{"schema_version":1,"collection_id":"0d2858ce-43ad-4d1e-b953-01ff9492983a","collection_method":"page_raw_data","collected_at":"2026-08-13T12:00:00Z","final_url":"https://mobile.yangkeduo.com/goods.html?goods_id=972484695683","goods":{"goods_id":"972484695683","title":"测试商品","images":["https://img.example/a.jpg"]},"skus":[{"sku_id":"1928995096086","goods_id":"972484695683","thumb_url":"https://img.example/sku.jpg","stock":1000,"is_onsale":true,"prices":{"old_group_price":28500},"spec_value_ids":["30553766053"],"specs":[{"spec_key":"数量","spec_key_id":"1216","spec_value_id":"30553766053","raw_value":"整箱10罐【限时特价】"}]}]}`
+	body := `{"schema_version":1,"collection_id":"0d2858ce-43ad-4d1e-b953-01ff9492983a","collection_method":"page_raw_data","collected_at":"2026-08-13T12:00:00Z","final_url":"https://mobile.yangkeduo.com/goods.html?goods_id=972484695683","goods":{"goods_id":"972484695683","mall_sn":"CgI2W-test-token","title":"测试商品","images":["https://img.example/a.jpg"]},"skus":[{"sku_id":"1928995096086","goods_id":"972484695683","thumb_url":"https://img.example/sku.jpg","stock":1000,"is_onsale":true,"prices":{"old_group_price":28500},"spec_value_ids":["30553766053"],"specs":[{"spec_key":"数量","spec_key_id":"1216","spec_value_id":"30553766053","raw_value":"整箱10罐【限时特价】"}]}]}`
 	upload := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/pdd-collector/products", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -95,6 +95,13 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	if skuID != "1928995096086" || price != 28500 || stock != 1000 || !strings.Contains(raw, "整箱10罐") {
 		t.Fatalf("sku=%s price=%d stock=%d raw=%s", skuID, price, stock, raw)
 	}
+	var mallSN string
+	if err := store.DB.QueryRow(`SELECT mall_sn FROM pdd_products WHERE goods_id='972484695683'`).Scan(&mallSN); err != nil {
+		t.Fatal(err)
+	}
+	if mallSN != "CgI2W-test-token" {
+		t.Fatalf("mall_sn=%q", mallSN)
+	}
 	second := upload()
 	if second.Code != http.StatusOK {
 		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
@@ -113,7 +120,7 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 func TestPDDCollectorCatalog(t *testing.T) {
 	srv, store, cleanup := newTestServer(t)
 	defer cleanup()
-	_, err := store.DB.Exec(`INSERT INTO pdd_products(id,goods_id,final_url,title,images_json,first_collected_at,last_collected_at) VALUES(1,'123','https://pdd/123','测试商品','["https://img/a.jpg"]',10,20)`)
+	_, err := store.DB.Exec(`INSERT INTO pdd_products(id,goods_id,mall_sn,final_url,title,images_json,first_collected_at,last_collected_at) VALUES(1,'123','mall-token','https://pdd/123','测试商品','["https://img/a.jpg"]',10,20)`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +132,7 @@ func TestPDDCollectorCatalog(t *testing.T) {
 	listReq := httptest.NewRequest(http.MethodGet, "/api/pdd-collector/catalog", nil)
 	listRec := httptest.NewRecorder()
 	srv.pddListProducts(listRec, listReq)
-	if listRec.Code != http.StatusOK || !strings.Contains(listRec.Body.String(), `"sku_count":1`) {
+	if listRec.Code != http.StatusOK || !strings.Contains(listRec.Body.String(), `"sku_count":1`) || !strings.Contains(listRec.Body.String(), `"mall_sn":"mall-token"`) {
 		t.Fatalf("list status=%d body=%s", listRec.Code, listRec.Body.String())
 	}
 
@@ -135,7 +142,7 @@ func TestPDDCollectorCatalog(t *testing.T) {
 	detailReq = detailReq.WithContext(context.WithValue(detailReq.Context(), chi.RouteCtxKey, routeContext))
 	detailRec := httptest.NewRecorder()
 	srv.pddGetProduct(detailRec, detailReq)
-	if detailRec.Code != http.StatusOK || !strings.Contains(detailRec.Body.String(), "整箱10罐") {
+	if detailRec.Code != http.StatusOK || !strings.Contains(detailRec.Body.String(), "整箱10罐") || !strings.Contains(detailRec.Body.String(), `"mall_sn":"mall-token"`) {
 		t.Fatalf("detail status=%d body=%s", detailRec.Code, detailRec.Body.String())
 	}
 }

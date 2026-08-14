@@ -28,3 +28,27 @@ func TestMaterialPropertiesKey(t *testing.T) {
 		t.Fatalf("materialPropertiesKey()=%q, want %q", got, want)
 	}
 }
+
+func TestMaterialSourceGoodsIDsSupportsBundlesAndLegacyRows(t *testing.T) {
+	material := map[string]any{
+		"source_id": "goods-a",
+		"skus": []any{
+			map[string]any{"source_sku_id": "sku-a"},
+			map[string]any{"source_goods_id": "goods-b", "source_sku_id": "sku-b"},
+			map[string]any{"source_goods_id": "goods-b", "source_sku_id": "sku-c"},
+		},
+	}
+	got := materialSourceGoodsIDs(material)
+	if len(got) != 2 || got[0] != "goods-a" || got[1] != "goods-b" {
+		t.Fatalf("materialSourceGoodsIDs()=%v", got)
+	}
+	if key := materialSourceKey("goods-b", "sku-b"); key != "goods-b\x00sku-b" {
+		t.Fatalf("materialSourceKey()=%q", key)
+	}
+}
+
+func TestMaterialTextTreatsNilAsEmpty(t *testing.T) {
+	if got := materialText(nil); got != "" {
+		t.Fatalf("materialText(nil)=%q", got)
+	}
+}

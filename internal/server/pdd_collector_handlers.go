@@ -54,6 +54,7 @@ type pddCollectionInput struct {
 	FinalURL         string `json:"final_url"`
 	Goods            struct {
 		GoodsID       string                  `json:"goods_id"`
+		MallSN        string                  `json:"mall_sn"`
 		Title         string                  `json:"title"`
 		Images        []string                `json:"images"`
 		GoodsProperty []pddGoodsPropertyInput `json:"goods_property"`
@@ -124,7 +125,7 @@ func jsonValue(raw string, fallback any) any {
 }
 
 func (s *Server) pddListProducts(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT p.id,p.goods_id,p.final_url,p.title,p.images_json,p.first_collected_at,p.last_collected_at,COUNT(s.id),COALESCE(SUM(CASE WHEN s.is_onsale=1 THEN 1 ELSE 0 END),0),COALESCE(MIN(s.price_cent),0),COALESCE(MAX(s.price_cent),0) FROM pdd_products p LEFT JOIN pdd_skus s ON s.product_id=p.id GROUP BY p.id,p.goods_id,p.final_url,p.title,p.images_json,p.first_collected_at,p.last_collected_at ORDER BY p.last_collected_at DESC`)
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT p.id,p.goods_id,p.mall_sn,p.final_url,p.title,p.images_json,p.first_collected_at,p.last_collected_at,COUNT(s.id),COALESCE(SUM(CASE WHEN s.is_onsale=1 THEN 1 ELSE 0 END),0),COALESCE(MIN(s.price_cent),0),COALESCE(MAX(s.price_cent),0) FROM pdd_products p LEFT JOIN pdd_skus s ON s.product_id=p.id GROUP BY p.id,p.goods_id,p.mall_sn,p.final_url,p.title,p.images_json,p.first_collected_at,p.last_collected_at ORDER BY p.last_collected_at DESC`)
 	if err != nil {
 		writeErr(w, 500, "查询拼多多商品失败")
 		return
@@ -133,12 +134,12 @@ func (s *Server) pddListProducts(w http.ResponseWriter, r *http.Request) {
 	out := make([]map[string]any, 0)
 	for rows.Next() {
 		var id, firstAt, lastAt, skuCount, onSaleCount, minPrice, maxPrice int64
-		var goodsID, finalURL, title, images string
-		if err := rows.Scan(&id, &goodsID, &finalURL, &title, &images, &firstAt, &lastAt, &skuCount, &onSaleCount, &minPrice, &maxPrice); err != nil {
+		var goodsID, mallSN, finalURL, title, images string
+		if err := rows.Scan(&id, &goodsID, &mallSN, &finalURL, &title, &images, &firstAt, &lastAt, &skuCount, &onSaleCount, &minPrice, &maxPrice); err != nil {
 			writeErr(w, 500, "读取拼多多商品失败")
 			return
 		}
-		out = append(out, map[string]any{"id": id, "goods_id": goodsID, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "sku_count": skuCount, "onsale_sku_count": onSaleCount, "min_price_cent": minPrice, "max_price_cent": maxPrice})
+		out = append(out, map[string]any{"id": id, "goods_id": goodsID, "mall_sn": mallSN, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "sku_count": skuCount, "onsale_sku_count": onSaleCount, "min_price_cent": minPrice, "max_price_cent": maxPrice})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -150,8 +151,8 @@ func (s *Server) pddGetProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id, firstAt, lastAt int64
-	var finalURL, title, images, properties string
-	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,final_url,title,images_json,properties_json,first_collected_at,last_collected_at FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&id, &finalURL, &title, &images, &properties, &firstAt, &lastAt); err != nil {
+	var mallSN, finalURL, title, images, properties string
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,mall_sn,final_url,title,images_json,properties_json,first_collected_at,last_collected_at FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&id, &mallSN, &finalURL, &title, &images, &properties, &firstAt, &lastAt); err != nil {
 		writeErr(w, http.StatusNotFound, "拼多多商品不存在")
 		return
 	}
@@ -171,7 +172,7 @@ func (s *Server) pddGetProduct(w http.ResponseWriter, r *http.Request) {
 		}
 		skus = append(skus, map[string]any{"id": skuRecordID, "sku_id": skuID, "specs": jsonValue(specs, []any{}), "spec_value_ids": jsonValue(specIDs, []any{}), "thumb_url": thumbURL, "prices": jsonValue(prices, map[string]any{}), "price_cent": price, "stock": stock, "is_onsale": onSale != 0, "last_collected_at": collectedAt})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "goods_id": goodsID, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "goods_property": jsonValue(properties, []any{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "skus": skus})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "goods_id": goodsID, "mall_sn": mallSN, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "goods_property": jsonValue(properties, []any{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "skus": skus})
 }
 
 func tokenDigest(token string) string {
@@ -263,6 +264,10 @@ func validatePDDCollection(in *pddCollectionInput) error {
 	}
 	if !pddNumericID.MatchString(in.Goods.GoodsID) {
 		return errors.New("goods_id 必须是数字字符串")
+	}
+	in.Goods.MallSN = strings.TrimSpace(in.Goods.MallSN)
+	if len(in.Goods.MallSN) > 2048 {
+		return errors.New("mall_sn 长度无效")
 	}
 	if len(in.SKUs) == 0 || len(in.SKUs) > 5000 {
 		return errors.New("SKU 数量必须在 1 到 5000 之间")
@@ -380,8 +385,8 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	productUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id"}, map[string]string{"final_url": "EXCLUDED.final_url", "title": "EXCLUDED.title", "images_json": "EXCLUDED.images_json", "properties_json": "EXCLUDED.properties_json", "last_collected_at": "EXCLUDED.last_collected_at"})
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_products(goods_id,final_url,title,images_json,properties_json,first_collected_at,last_collected_at) VALUES(?,?,?,?,?,?,?)`+productUpsert, in.Goods.GoodsID, in.FinalURL, in.Goods.Title, string(images), string(properties), collectedAt, collectedAt)
+	productUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id"}, map[string]string{"mall_sn": "EXCLUDED.mall_sn", "final_url": "EXCLUDED.final_url", "title": "EXCLUDED.title", "images_json": "EXCLUDED.images_json", "properties_json": "EXCLUDED.properties_json", "last_collected_at": "EXCLUDED.last_collected_at"})
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_products(goods_id,mall_sn,final_url,title,images_json,properties_json,first_collected_at,last_collected_at) VALUES(?,?,?,?,?,?,?,?)`+productUpsert, in.Goods.GoodsID, in.Goods.MallSN, in.FinalURL, in.Goods.Title, string(images), string(properties), collectedAt, collectedAt)
 	if err != nil {
 		writeErr(w, 500, "保存拼多多商品失败")
 		return

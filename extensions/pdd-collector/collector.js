@@ -148,6 +148,28 @@ function collectGoodsProperties(store) {
   };
 }
 
+export function collectMallSN(store) {
+  let match;
+  walkObjects(store, 6, (value, path) => {
+    if (match || Array.isArray(value)) return;
+    const direct = firstValue(value, ["mall_sn", "mallSn"]);
+    if (direct !== undefined) {
+      match = { value: asString(direct), path: `${path}.mall_sn` };
+      return;
+    }
+    const route = firstValue(value, ["pddRoute", "pdd_route"]);
+    if (!route) return;
+    try {
+      const parsed = new URL(asString(route), "https://mobile.pinduoduo.com/");
+      const mallSN = parsed.searchParams.get("mall_sn");
+      if (mallSN) match = { value: mallSN, path: `${path}.pddRoute.mall_sn` };
+    } catch {
+      // Ignore malformed route candidates and continue walking for another one.
+    }
+  });
+  return match ?? { value: "", path: "" };
+}
+
 export function collectPDDProduct(rawDataOverride) {
   const rawData = rawDataOverride ?? globalThis.rawData;
   const store = rawData?.store;
@@ -178,6 +200,7 @@ export function collectPDDProduct(rawDataOverride) {
   const title = findNestedValue(store, ["goodsName", "goods_name", "goodsTitle", "goods_title", "title"]);
   const imageResult = collectImages(store);
   const propertyResult = collectGoodsProperties(store);
+  const mallSN = collectMallSN(store);
 
   return {
     schema_version: 1,
@@ -186,10 +209,12 @@ export function collectPDDProduct(rawDataOverride) {
     title_source_path: title.path,
     image_source_paths: imageResult.paths,
     goods_property_source_path: propertyResult.path,
+    mall_sn_source_path: mallSN.path,
     collected_at: new Date().toISOString(),
     final_url: location.href,
     goods: {
       goods_id: goodsID,
+      mall_sn: mallSN.value,
       title: asString(title.value),
       images: imageResult.images,
       goods_property: propertyResult.properties

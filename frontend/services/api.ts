@@ -1066,7 +1066,7 @@ export interface PDDSKU {
   prices: Record<string, unknown>; price_cent: number; stock: number; is_onsale: boolean; last_collected_at: number;
 }
 export interface PDDProductSummary {
-  id: number; goods_id: string; final_url: string; title: string; images: string[];
+  id: number; goods_id: string; mall_sn:string; final_url: string; title: string; images: string[];
   first_collected_at: number; last_collected_at: number; sku_count: number; onsale_sku_count: number;
   min_price_cent: number; max_price_cent: number;
 }
@@ -1074,9 +1074,9 @@ export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 
 export const getPDDProducts = (): Promise<PDDProductSummary[]> => get('/api/pdd-collector/catalog');
 export const getPDDProduct = (goodsId: string): Promise<PDDProductDetail> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
 export const deletePDDProduct = (goodsId:string):Promise<{draft_count:number;message:string}> => del(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
-export interface ProductMaterialSKU { material_sku_id?:string; source_sku_id?:string; source_properties?:Array<{name:string;value:string}>; source_image_url?:string; price_cent:number; quantity:number; enabled:boolean; image_url?:string; properties:Array<{name:string;value:string;image_url?:string}> }
-export interface ProductMaterial { id:number; source_type:string; source_id:string; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; image_property_name:string; status:string; updated_at:number }
-export interface MaterialPublishRecord { id:number; cookie_id:string; published_item_id:string; status:string; error_message:string; created_at:number; finished_at:number }
+export interface ProductMaterialSKU { material_sku_id?:string; source_goods_id?:string; source_sku_id?:string; source_properties?:Array<{name:string;value:string}>; source_image_url?:string; price_cent:number; quantity:number; enabled:boolean; image_url?:string; properties:Array<{name:string;value:string;image_url?:string}> }
+export interface ProductMaterial { id:number; source_type:string; source_id:string; source_ids?:string[]; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; image_property_name:string; status:string; updated_at:number }
+export interface MaterialPublishRecord { id:number; cookie_id:string; published_item_id:string; status:string; error_message:string; created_at:number; finished_at:number; mapping_counts?:Record<'pending'|'mapped'|'unmapped'|'ambiguous',number> }
 export const createMaterialFromPDD = (goodsId:string):Promise<{id:number}> => post(`/materials/from-pdd/${encodeURIComponent(goodsId)}`,{});
 export const getMaterials = (query = ''):Promise<ProductMaterial[]> => get(`/materials${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''}`);
 export const updateMaterial = (id:number,data:Omit<ProductMaterial,'id'|'source_type'|'source_id'|'status'|'updated_at'>) => put(`/materials/${id}`,data);

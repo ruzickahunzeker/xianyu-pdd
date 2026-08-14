@@ -24,6 +24,7 @@ import (
 
 type materialSKU struct {
 	MaterialSKUID    string             `json:"material_sku_id"`
+	SourceGoodsID    string             `json:"source_goods_id,omitempty"`
 	SourceSKUID      string             `json:"source_sku_id,omitempty"`
 	SourceProperties []materialProperty `json:"source_properties,omitempty"`
 	SourceImageURL   string             `json:"source_image_url,omitempty"`
@@ -233,7 +234,7 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 	for _, raw := range enabledSKUs {
 		row, _ := raw.(map[string]any)
 		properties, _ := json.Marshal(row["properties"])
-		_, _ = s.Store.DB.ExecContext(r.Context(), `INSERT INTO material_publish_sku_mappings(publish_record_id,material_sku_id,source_sku_id,published_properties_json,published_price_cent,published_quantity,mapping_status) VALUES(?,?,?,?,?,?,'pending')`, recordID, fmt.Sprint(row["material_sku_id"]), fmt.Sprint(row["source_sku_id"]), string(properties), jsonInt64(row["price_cent"]), jsonInt64(row["quantity"]))
+		_, _ = s.Store.DB.ExecContext(r.Context(), `INSERT INTO material_publish_sku_mappings(publish_record_id,material_sku_id,source_goods_id,source_sku_id,published_properties_json,published_price_cent,published_quantity,mapping_status) VALUES(?,?,?,?,?,?,?,'pending')`, recordID, materialText(row["material_sku_id"]), materialText(row["source_goods_id"]), materialText(row["source_sku_id"]), string(properties), jsonInt64(row["price_cent"]), jsonInt64(row["quantity"]))
 	}
 	if status == "success" && itemID != "" {
 		s.backfillPublishedSKUMappings(r, recordID, input.CookieID, itemID)
@@ -256,7 +257,7 @@ func (s *Server) backfillPublishedSKUMappings(r *http.Request, recordID int64, c
 	}
 	publishRaw, _ := item["publish_raw"].(map[string]any)
 	remoteSKUs, _ := publishRaw["itemSkuList"].([]any)
-	remoteByProperties := map[string]string{}
+	remoteByProperties := map[string][]string{}
 	for _, raw := range remoteSKUs {
 		sku, _ := raw.(map[string]any)
 		properties, _ := sku["propertyList"].([]any)
@@ -269,15 +270,23 @@ func (s *Server) backfillPublishedSKUMappings(r *http.Request, recordID int64, c
 			})
 		}
 		if skuID := strings.TrimSpace(fmt.Sprint(sku["skuId"])); skuID != "" {
-			remoteByProperties[materialPropertiesKey(pairs)] = skuID
+			key := materialPropertiesKey(pairs)
+			remoteByProperties[key] = append(remoteByProperties[key], skuID)
 		}
+	}
+	if len(remoteByProperties) == 0 {
+		return
 	}
 	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,published_properties_json FROM material_publish_sku_mappings WHERE publish_record_id=?`, recordID)
 	if err != nil {
 		return
 	}
 	defer rows.Close()
-	type mappingUpdate struct{ id int64; skuID string }
+	type mappingUpdate struct {
+		id     int64
+		skuID  string
+		status string
+	}
 	updates := []mappingUpdate{}
 	for rows.Next() {
 		var id int64
@@ -287,12 +296,18 @@ func (s *Server) backfillPublishedSKUMappings(r *http.Request, recordID int64, c
 		}
 		var properties []materialProperty
 		_ = json.Unmarshal([]byte(raw), &properties)
-		if skuID := remoteByProperties[materialPropertiesKey(properties)]; skuID != "" {
-			updates = append(updates, mappingUpdate{id: id, skuID: skuID})
+		matches := remoteByProperties[materialPropertiesKey(properties)]
+		switch len(matches) {
+		case 1:
+			updates = append(updates, mappingUpdate{id: id, skuID: matches[0], status: "mapped"})
+		case 0:
+			updates = append(updates, mappingUpdate{id: id, status: "unmapped"})
+		default:
+			updates = append(updates, mappingUpdate{id: id, status: "ambiguous"})
 		}
 	}
 	for _, update := range updates {
-		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE material_publish_sku_mappings SET xianyu_sku_id=?,mapping_status='mapped' WHERE id=?`, update.skuID, update.id)
+		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE material_publish_sku_mappings SET xianyu_sku_id=?,mapping_status=? WHERE id=?`, update.skuID, update.status, update.id)
 	}
 }
 
@@ -302,6 +317,38 @@ func materialPropertiesKey(properties []materialProperty) string {
 		pairs = append(pairs, strings.TrimSpace(property.Name)+"\x00"+strings.TrimSpace(property.Value))
 	}
 	return strings.Join(pairs, "\x01")
+}
+
+func materialSourceKey(goodsID, skuID string) string {
+	return strings.TrimSpace(goodsID) + "\x00" + strings.TrimSpace(skuID)
+}
+
+func materialText(value any) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func materialSourceGoodsIDs(material map[string]any) []string {
+	seen := map[string]bool{}
+	result := []string{}
+	primary := materialText(material["source_id"])
+	for _, raw := range material["skus"].([]any) {
+		row, _ := raw.(map[string]any)
+		goodsID := materialText(row["source_goods_id"])
+		if goodsID == "" && materialText(row["source_sku_id"]) != "" {
+			goodsID = primary
+		}
+		if goodsID != "" && !seen[goodsID] {
+			seen[goodsID] = true
+			result = append(result, goodsID)
+		}
+	}
+	if len(result) == 0 && primary != "" {
+		result = append(result, primary)
+	}
+	return result
 }
 
 func materialImageURL(property map[string]any) string {
@@ -446,6 +493,8 @@ func validateMaterial(in *materialInput) error {
 	seen := map[string]bool{}
 	for idx := range in.SKUs {
 		sku := &in.SKUs[idx]
+		sku.SourceGoodsID = strings.TrimSpace(sku.SourceGoodsID)
+		sku.SourceSKUID = strings.TrimSpace(sku.SourceSKUID)
 		if strings.TrimSpace(sku.MaterialSKUID) == "" {
 			sku.MaterialSKUID = uuid.NewString()
 		}
@@ -474,7 +523,9 @@ func validateMaterial(in *materialInput) error {
 }
 
 func materialMap(id, userID int64, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName string, postage, created, updated int64) map[string]any {
-	return map[string]any{"id": id, "user_id": userID, "source_type": sourceType, "source_id": sourceID, "title": title, "description": description, "images": jsonValue(images, []string{}), "category": jsonValue(category, map[string]any{}), "skus": jsonValue(skus, []any{}), "postage_mode": postageMode, "postage_cent": postage, "status": status, "image_property_name": imagePropertyName, "created_at": created, "updated_at": updated}
+	material := map[string]any{"id": id, "user_id": userID, "source_type": sourceType, "source_id": sourceID, "title": title, "description": description, "images": jsonValue(images, []string{}), "category": jsonValue(category, map[string]any{}), "skus": jsonValue(skus, []any{}), "postage_mode": postageMode, "postage_cent": postage, "status": status, "image_property_name": imagePropertyName, "created_at": created, "updated_at": updated}
+	material["source_ids"] = materialSourceGoodsIDs(material)
+	return material
 }
 func scanMaterial(row interface{ Scan(...any) error }) (map[string]any, error) {
 	var id, userID, postage, created, updated int64
@@ -488,9 +539,9 @@ func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 	query := `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE user_id=? AND deleted_at IS NULL`
 	args := []any{uid}
 	if keyword := strings.TrimSpace(r.URL.Query().Get("q")); keyword != "" {
-		query += ` AND (title LIKE ? OR (source_type='pdd' AND source_id LIKE ?))`
+		query += ` AND (title LIKE ? OR source_id LIKE ? OR skus_json LIKE ?)`
 		pattern := "%" + keyword + "%"
-		args = append(args, pattern, pattern)
+		args = append(args, pattern, pattern, pattern)
 	}
 	query += ` ORDER BY updated_at DESC`
 	rows, err := s.Store.DB.QueryContext(r.Context(), query, args...)
@@ -568,7 +619,7 @@ func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 		for _, p := range specs {
 			props = append(props, materialProperty{Name: p.SpecKey, Value: p.RawValue})
 		}
-		skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceSKUID: skuID, SourceProperties: append([]materialProperty(nil), props...), SourceImageURL: thumb, PriceCents: price, Quantity: stock, Enabled: enabled != 0, Properties: props, ImageURL: thumb})
+		skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: append([]materialProperty(nil), props...), SourceImageURL: thumb, PriceCents: price, Quantity: stock, Enabled: enabled != 0, Properties: props, ImageURL: thumb})
 	}
 	var imageList []string
 	_ = json.Unmarshal([]byte(images), &imageList)
@@ -603,6 +654,13 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(r, &in) != nil {
 		writeErr(w, 400, "请求格式错误")
 		return
+	}
+	var primarySourceID string
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT source_id FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid).Scan(&primarySourceID)
+	for index := range in.SKUs {
+		if in.SKUs[index].SourceGoodsID == "" && in.SKUs[index].SourceSKUID != "" {
+			in.SKUs[index].SourceGoodsID = primarySourceID
+		}
 	}
 	if err := validateMaterial(&in); err != nil {
 		writeErr(w, 400, err.Error())
@@ -644,7 +702,10 @@ func (s *Server) listMaterialPublishRecords(w http.ResponseWriter, r *http.Reque
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	pendingRows, pendingErr := s.Store.DB.QueryContext(r.Context(), `SELECT id,cookie_id,published_item_id FROM material_publish_records WHERE material_id=? AND user_id=? AND status='success' AND published_item_id<>'' AND EXISTS(SELECT 1 FROM material_publish_sku_mappings WHERE publish_record_id=material_publish_records.id AND mapping_status='pending')`, id, uid)
 	if pendingErr == nil {
-		type pendingRecord struct{ id int64; cookieID, itemID string }
+		type pendingRecord struct {
+			id               int64
+			cookieID, itemID string
+		}
 		pending := []pendingRecord{}
 		for pendingRows.Next() {
 			var record pendingRecord
@@ -668,7 +729,19 @@ func (s *Server) listMaterialPublishRecords(w http.ResponseWriter, r *http.Reque
 		var recordID, created, finished int64
 		var requestID, cookieID, itemID, status, code, message string
 		if rows.Scan(&recordID, &requestID, &cookieID, &itemID, &status, &code, &message, &created, &finished) == nil {
-			out = append(out, map[string]any{"id": recordID, "request_id": requestID, "cookie_id": cookieID, "published_item_id": itemID, "status": status, "error_code": code, "error_message": message, "created_at": created, "finished_at": finished})
+			mappingCounts := map[string]int64{"pending": 0, "mapped": 0, "unmapped": 0, "ambiguous": 0}
+			mappingRows, mappingErr := s.Store.DB.QueryContext(r.Context(), `SELECT mapping_status,COUNT(*) FROM material_publish_sku_mappings WHERE publish_record_id=? GROUP BY mapping_status`, recordID)
+			if mappingErr == nil {
+				for mappingRows.Next() {
+					var mappingStatus string
+					var count int64
+					if mappingRows.Scan(&mappingStatus, &count) == nil {
+						mappingCounts[mappingStatus] = count
+					}
+				}
+				_ = mappingRows.Close()
+			}
+			out = append(out, map[string]any{"id": recordID, "request_id": requestID, "cookie_id": cookieID, "published_item_id": itemID, "status": status, "error_code": code, "error_message": message, "created_at": created, "finished_at": finished, "mapping_counts": mappingCounts})
 		}
 	}
 	writeJSON(w, 200, out)
@@ -678,40 +751,47 @@ func (s *Server) materialSourceDiff(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
 	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
-	if err != nil || material["source_type"] != "pdd" {
+	if err != nil || len(materialSourceGoodsIDs(material)) == 0 {
 		writeErr(w, 404, "拼多多来源素材不存在")
 		return
 	}
 	current := map[string]map[string]any{}
 	for _, raw := range material["skus"].([]any) {
 		row, _ := raw.(map[string]any)
-		current[fmt.Sprint(row["source_sku_id"])] = row
-	}
-	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,price_cent,stock,is_onsale FROM pdd_skus WHERE goods_id=? ORDER BY id`, material["source_id"])
-	if err != nil {
-		writeErr(w, 500, "读取来源 SKU 失败")
-		return
-	}
-	defer rows.Close()
-	added, changed, seen := []any{}, []any{}, map[string]bool{}
-	for rows.Next() {
-		var skuID, specs, image string
-		var price, stock int64
-		var onSale int
-		_ = rows.Scan(&skuID, &specs, &image, &price, &stock, &onSale)
-		seen[skuID] = true
-		old := current[skuID]
-		entry := map[string]any{"source_sku_id": skuID, "source_properties": jsonValue(specs, []any{}), "source_image_url": image, "price_cent": price, "quantity": stock, "enabled": onSale != 0}
-		if old == nil {
-			added = append(added, entry)
-		} else if jsonInt64(old["price_cent"]) != price || jsonInt64(old["quantity"]) != stock || fmt.Sprint(old["source_image_url"]) != image {
-			changed = append(changed, entry)
+		goodsID := materialText(row["source_goods_id"])
+		if goodsID == "" {
+			goodsID = materialText(material["source_id"])
 		}
+		current[materialSourceKey(goodsID, materialText(row["source_sku_id"]))] = row
+	}
+	added, changed, seen := []any{}, []any{}, map[string]bool{}
+	for _, goodsID := range materialSourceGoodsIDs(material) {
+		rows, queryErr := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,price_cent,stock,is_onsale FROM pdd_skus WHERE goods_id=? ORDER BY id`, goodsID)
+		if queryErr != nil {
+			writeErr(w, 500, "读取来源 SKU 失败")
+			return
+		}
+		for rows.Next() {
+			var skuID, specs, image string
+			var price, stock int64
+			var onSale int
+			_ = rows.Scan(&skuID, &specs, &image, &price, &stock, &onSale)
+			key := materialSourceKey(goodsID, skuID)
+			seen[key] = true
+			old := current[key]
+			entry := map[string]any{"source_goods_id": goodsID, "source_sku_id": skuID, "source_properties": jsonValue(specs, []any{}), "source_image_url": image, "price_cent": price, "quantity": stock, "enabled": onSale != 0}
+			if old == nil {
+				added = append(added, entry)
+			} else if jsonInt64(old["price_cent"]) != price || jsonInt64(old["quantity"]) != stock || fmt.Sprint(old["source_image_url"]) != image {
+				changed = append(changed, entry)
+			}
+		}
+		_ = rows.Close()
 	}
 	removed := []string{}
-	for sourceSKU := range current {
-		if sourceSKU != "" && !seen[sourceSKU] {
-			removed = append(removed, sourceSKU)
+	for sourceKey, row := range current {
+		if materialText(row["source_sku_id"]) != "" && !seen[sourceKey] {
+			removed = append(removed, sourceKey)
 		}
 	}
 	writeJSON(w, 200, map[string]any{"added": added, "changed": changed, "removed": removed})
@@ -734,7 +814,7 @@ func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
-	if err != nil || material["source_type"] != "pdd" {
+	if err != nil || len(materialSourceGoodsIDs(material)) == 0 {
 		writeErr(w, 404, "拼多多来源素材不存在")
 		return
 	}
@@ -743,50 +823,56 @@ func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(raw, &skus)
 	bySource := map[string]*materialSKU{}
 	for i := range skus {
-		bySource[skus[i].SourceSKUID] = &skus[i]
+		if skus[i].SourceGoodsID == "" && skus[i].SourceSKUID != "" {
+			skus[i].SourceGoodsID = materialText(material["source_id"])
+		}
+		bySource[materialSourceKey(skus[i].SourceGoodsID, skus[i].SourceSKUID)] = &skus[i]
 	}
-	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,price_cent,stock,is_onsale FROM pdd_skus WHERE goods_id=? ORDER BY id`, material["source_id"])
-	if err != nil {
-		writeErr(w, 500, "读取来源 SKU 失败")
-		return
-	}
-	defer rows.Close()
 	seen := map[string]bool{}
-	for rows.Next() {
-		var skuID, specsRaw, image string
-		var price, stock int64
-		var onSale int
-		_ = rows.Scan(&skuID, &specsRaw, &image, &price, &stock, &onSale)
-		seen[skuID] = true
-		var specs []pddSpecInput
-		_ = json.Unmarshal([]byte(specsRaw), &specs)
-		props := []materialProperty{}
-		for _, p := range specs {
-			props = append(props, materialProperty{Name: p.SpecKey, Value: p.RawValue})
+	for _, goodsID := range materialSourceGoodsIDs(material) {
+		rows, queryErr := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,price_cent,stock,is_onsale FROM pdd_skus WHERE goods_id=? ORDER BY id`, goodsID)
+		if queryErr != nil {
+			writeErr(w, 500, "读取来源 SKU 失败")
+			return
 		}
-		sku := bySource[skuID]
-		if sku == nil && input.AddNew {
-			skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceSKUID: skuID, SourceProperties: props, SourceImageURL: image, Properties: append([]materialProperty(nil), props...), PriceCents: price, Quantity: stock, Enabled: onSale != 0})
-			continue
+		for rows.Next() {
+			var skuID, specsRaw, image string
+			var price, stock int64
+			var onSale int
+			_ = rows.Scan(&skuID, &specsRaw, &image, &price, &stock, &onSale)
+			key := materialSourceKey(goodsID, skuID)
+			seen[key] = true
+			var specs []pddSpecInput
+			_ = json.Unmarshal([]byte(specsRaw), &specs)
+			props := []materialProperty{}
+			for _, p := range specs {
+				props = append(props, materialProperty{Name: p.SpecKey, Value: p.RawValue})
+			}
+			sku := bySource[key]
+			if sku == nil && input.AddNew {
+				skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: props, SourceImageURL: image, Properties: append([]materialProperty(nil), props...), PriceCents: price, Quantity: stock, Enabled: onSale != 0})
+				continue
+			}
+			if sku == nil {
+				continue
+			}
+			sku.SourceProperties = props
+			sku.SourceImageURL = image
+			if input.Prices {
+				sku.PriceCents = price
+			}
+			if input.Stock {
+				sku.Quantity = stock
+			}
+			if input.Images {
+				sku.ImageURL = image
+			}
 		}
-		if sku == nil {
-			continue
-		}
-		sku.SourceProperties = props
-		sku.SourceImageURL = image
-		if input.Prices {
-			sku.PriceCents = price
-		}
-		if input.Stock {
-			sku.Quantity = stock
-		}
-		if input.Images {
-			sku.ImageURL = image
-		}
+		_ = rows.Close()
 	}
 	if input.DisableRemoved {
 		for i := range skus {
-			if skus[i].SourceSKUID != "" && !seen[skus[i].SourceSKUID] {
+			if skus[i].SourceSKUID != "" && !seen[materialSourceKey(skus[i].SourceGoodsID, skus[i].SourceSKUID)] {
 				skus[i].Enabled = false
 			}
 		}
