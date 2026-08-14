@@ -39,6 +39,13 @@ type pddSKUInput struct {
 	Specs        []pddSpecInput `json:"specs"`
 }
 
+type pddGoodsPropertyInput struct {
+	Key         string   `json:"key"`
+	Values      []string `json:"values"`
+	RefPID      string   `json:"ref_pid,omitempty"`
+	ReferenceID string   `json:"reference_id,omitempty"`
+}
+
 type pddCollectionInput struct {
 	SchemaVersion    int    `json:"schema_version"`
 	CollectionID     string `json:"collection_id"`
@@ -46,9 +53,10 @@ type pddCollectionInput struct {
 	CollectedAt      string `json:"collected_at"`
 	FinalURL         string `json:"final_url"`
 	Goods            struct {
-		GoodsID string   `json:"goods_id"`
-		Title   string   `json:"title"`
-		Images  []string `json:"images"`
+		GoodsID       string                  `json:"goods_id"`
+		Title         string                  `json:"title"`
+		Images        []string                `json:"images"`
+		GoodsProperty []pddGoodsPropertyInput `json:"goods_property"`
 	} `json:"goods"`
 	SKUs []pddSKUInput `json:"skus"`
 }
@@ -142,8 +150,8 @@ func (s *Server) pddGetProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id, firstAt, lastAt int64
-	var finalURL, title, images string
-	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,final_url,title,images_json,first_collected_at,last_collected_at FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&id, &finalURL, &title, &images, &firstAt, &lastAt); err != nil {
+	var finalURL, title, images, properties string
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,final_url,title,images_json,properties_json,first_collected_at,last_collected_at FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&id, &finalURL, &title, &images, &properties, &firstAt, &lastAt); err != nil {
 		writeErr(w, http.StatusNotFound, "拼多多商品不存在")
 		return
 	}
@@ -163,7 +171,7 @@ func (s *Server) pddGetProduct(w http.ResponseWriter, r *http.Request) {
 		}
 		skus = append(skus, map[string]any{"id": skuRecordID, "sku_id": skuID, "specs": jsonValue(specs, []any{}), "spec_value_ids": jsonValue(specIDs, []any{}), "thumb_url": thumbURL, "prices": jsonValue(prices, map[string]any{}), "price_cent": price, "stock": stock, "is_onsale": onSale != 0, "last_collected_at": collectedAt})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "goods_id": goodsID, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "skus": skus})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "goods_id": goodsID, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "goods_property": jsonValue(properties, []any{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "skus": skus})
 }
 
 func tokenDigest(token string) string {
@@ -260,6 +268,25 @@ func validatePDDCollection(in *pddCollectionInput) error {
 		return errors.New("SKU 数量必须在 1 到 5000 之间")
 	}
 	seen := make(map[string]struct{}, len(in.SKUs))
+	properties := make([]pddGoodsPropertyInput, 0, len(in.Goods.GoodsProperty))
+	for _, property := range in.Goods.GoodsProperty {
+		property.Key = strings.TrimSpace(property.Key)
+		if property.Key == "" || property.Key == "品牌" || property.Key == "发货地" {
+			continue
+		}
+		values := make([]string, 0, len(property.Values))
+		for _, value := range property.Values {
+			if value = strings.TrimSpace(value); value != "" {
+				values = append(values, value)
+			}
+		}
+		if len(values) == 0 {
+			continue
+		}
+		property.Values = values
+		properties = append(properties, property)
+	}
+	in.Goods.GoodsProperty = properties
 	for i, sku := range in.SKUs {
 		if !pddNumericID.MatchString(sku.SKUID) || sku.GoodsID != in.Goods.GoodsID {
 			return fmt.Errorf("第%d个SKU标识无效", i+1)
@@ -276,12 +303,12 @@ func validatePDDCollection(in *pddCollectionInput) error {
 }
 
 func pddPriceCent(prices map[string]any) int64 {
-	for _, key := range []string{"old_group_price", "sku_price"} {
-		if n, ok := prices[key].(float64); ok && n >= 0 {
-			return int64(n + .5)
-		}
-	}
-	for _, key := range []string{"group_price", "normal_price"} {
+	// group_price is the customer-facing group-buy price in yuan. sku_price is
+	// the same effective price in cents on the page payloads we collect. Keep
+	// normal_price (single-buy price) and old_group_price (reference/old group
+	// price) only as fallbacks so newly collected materials do not start at the
+	// crossed-out price.
+	for _, key := range []string{"group_price"} {
 		var yuan float64
 		switch v := prices[key].(type) {
 		case float64:
@@ -292,6 +319,24 @@ func pddPriceCent(prices map[string]any) int64 {
 		if yuan >= 0 && yuan != 0 {
 			return int64(yuan*100 + .5)
 		}
+	}
+	if n, ok := prices["sku_price"].(float64); ok && n > 0 {
+		return int64(n + .5)
+	}
+	for _, key := range []string{"normal_price"} {
+		var yuan float64
+		switch v := prices[key].(type) {
+		case float64:
+			yuan = v
+		case string:
+			_, _ = fmt.Sscan(v, &yuan)
+		}
+		if yuan > 0 {
+			return int64(yuan*100 + .5)
+		}
+	}
+	if n, ok := prices["old_group_price"].(float64); ok && n > 0 {
+		return int64(n + .5)
 	}
 	return 0
 }
@@ -314,6 +359,7 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 
 	payload, _ := json.Marshal(in)
 	images, _ := json.Marshal(in.Goods.Images)
+	properties, _ := json.Marshal(in.Goods.GoodsProperty)
 	collectedAt := time.Now().Unix()
 	if parsed, parseErr := time.Parse(time.RFC3339, in.CollectedAt); parseErr == nil {
 		collectedAt = parsed.Unix()
@@ -334,8 +380,8 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	productUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id"}, map[string]string{"final_url": "EXCLUDED.final_url", "title": "EXCLUDED.title", "images_json": "EXCLUDED.images_json", "last_collected_at": "EXCLUDED.last_collected_at"})
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_products(goods_id,final_url,title,images_json,first_collected_at,last_collected_at) VALUES(?,?,?,?,?,?)`+productUpsert, in.Goods.GoodsID, in.FinalURL, in.Goods.Title, string(images), collectedAt, collectedAt)
+	productUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id"}, map[string]string{"final_url": "EXCLUDED.final_url", "title": "EXCLUDED.title", "images_json": "EXCLUDED.images_json", "properties_json": "EXCLUDED.properties_json", "last_collected_at": "EXCLUDED.last_collected_at"})
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_products(goods_id,final_url,title,images_json,properties_json,first_collected_at,last_collected_at) VALUES(?,?,?,?,?,?,?)`+productUpsert, in.Goods.GoodsID, in.FinalURL, in.Goods.Title, string(images), string(properties), collectedAt, collectedAt)
 	if err != nil {
 		writeErr(w, 500, "保存拼多多商品失败")
 		return

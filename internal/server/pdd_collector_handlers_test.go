@@ -22,6 +22,50 @@ func TestPDDCollectorRejectsMissingToken(t *testing.T) {
 	}
 }
 
+func TestPDDPriceCentPrefersGroupPrice(t *testing.T) {
+	prices := map[string]any{
+		"group_price":     "26.9",
+		"sku_price":       float64(2690),
+		"normal_price":    "39.9",
+		"old_group_price": float64(3750),
+	}
+	if got := pddPriceCent(prices); got != 2690 {
+		t.Fatalf("pddPriceCent()=%d, want 2690", got)
+	}
+}
+
+func TestValidatePDDCollectionFiltersBrandAndShippingOrigin(t *testing.T) {
+	var input pddCollectionInput
+	if err := json.Unmarshal([]byte(`{"schema_version":1,"collection_id":"0d2858ce-43ad-4d1e-b953-01ff9492983a","goods":{"goods_id":"123","goods_property":[{"key":"品牌","values":["测试品牌"]},{"key":"发货地","values":["辽宁省"]},{"key":"材质","values":[" 合金钢 "]}]},"skus":[{"sku_id":"456","goods_id":"123","stock":1}]}`), &input); err != nil {
+		t.Fatal(err)
+	}
+	if err := validatePDDCollection(&input); err != nil {
+		t.Fatal(err)
+	}
+	if len(input.Goods.GoodsProperty) != 1 || input.Goods.GoodsProperty[0].Key != "材质" || input.Goods.GoodsProperty[0].Values[0] != "合金钢" {
+		t.Fatalf("goods properties=%+v", input.Goods.GoodsProperty)
+	}
+}
+
+func TestPDDPriceCentFallbackOrder(t *testing.T) {
+	tests := []struct {
+		name   string
+		prices map[string]any
+		want   int64
+	}{
+		{"sku price", map[string]any{"sku_price": float64(1680), "normal_price": "28.8", "old_group_price": float64(2680)}, 1680},
+		{"normal price", map[string]any{"normal_price": "28.8", "old_group_price": float64(2680)}, 2880},
+		{"old group price", map[string]any{"old_group_price": float64(2680)}, 2680},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pddPriceCent(tt.prices); got != tt.want {
+				t.Fatalf("pddPriceCent()=%d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	srv, store, cleanup := newTestServer(t)
 	defer cleanup()

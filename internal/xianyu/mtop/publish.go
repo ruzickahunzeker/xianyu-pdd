@@ -138,6 +138,7 @@ func (c *ClientImpl) PublishItem(ctx context.Context, cookiesStr string, req Pub
 		req.Description = req.Title
 	}
 	if len(req.SKUs) > 0 {
+		normalizePublishSKUImages(req.SKUs)
 		if err := validatePublishSKUs(req.SKUs); err != nil {
 			return nil, err
 		}
@@ -226,6 +227,35 @@ func (c *ClientImpl) PublishItem(ctx context.Context, cookiesStr string, req Pub
 		}
 	}
 	return c.publishItemOnce(ctx, currentCookies, req, uploaded, category, location)
+}
+
+// normalizePublishSKUImages keeps images on only one property dimension. PDD
+// source data commonly repeats the SKU thumbnail on every property, while
+// Xianyu accepts images on exactly one property dimension.
+func normalizePublishSKUImages(skus []PublishSKU) {
+	imagePropertyName := ""
+	for _, sku := range skus {
+		for _, property := range sku.Properties {
+			if property.Image != nil || strings.TrimSpace(property.ImageURL) != "" {
+				imagePropertyName = strings.TrimSpace(property.Name)
+			}
+		}
+		if imagePropertyName != "" {
+			break
+		}
+	}
+	for skuIndex := range skus {
+		for propertyIndex := range skus[skuIndex].Properties {
+			property := &skus[skuIndex].Properties[propertyIndex]
+			if property.Image == nil && strings.TrimSpace(property.ImageURL) == "" {
+				continue
+			}
+			if strings.TrimSpace(property.Name) != imagePropertyName {
+				property.Image = nil
+				property.ImageURL = ""
+			}
+		}
+	}
 }
 
 // RecommendPublishCategory 根据关键词调用闲鱼推荐接口，返回可直接用于发布的完整类目。
@@ -557,6 +587,7 @@ func validatePublishSKUs(skus []PublishSKU) error {
 	}
 	seen := map[string]bool{}
 	dimensions := []string{}
+	imagePropertyNames := map[string]bool{}
 	for idx, sku := range skus {
 		if sku.PriceCents <= 0 || sku.Quantity < 0 || sku.Quantity > 999999 || len(sku.Properties) == 0 {
 			return fmt.Errorf("第 %d 个 SKU 售价、库存或规格无效", idx+1)
@@ -568,6 +599,9 @@ func validatePublishSKUs(skus []PublishSKU) error {
 			p.Value = strings.TrimSpace(p.Value)
 			if p.Name == "" || p.Value == "" || names[p.Name] {
 				return fmt.Errorf("第 %d 个 SKU 规格名称或值无效", idx+1)
+			}
+			if p.Image != nil || strings.TrimSpace(p.ImageURL) != "" {
+				imagePropertyNames[p.Name] = true
 			}
 			names[p.Name] = true
 			parts = append(parts, p.Name+"="+p.Value)
@@ -590,6 +624,9 @@ func validatePublishSKUs(skus []PublishSKU) error {
 			return errors.New("SKU 规格组合不能重复")
 		}
 		seen[key] = true
+	}
+	if len(imagePropertyNames) > 1 {
+		return errors.New("多规格商品只允许一个规格类型上传图片")
 	}
 	return nil
 }

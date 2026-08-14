@@ -98,3 +98,18 @@ func TestValidatePublishSKUsRejectsDuplicateCombination(t *testing.T) {
 		t.Fatal("expected duplicate error")
 	}
 }
+
+func TestNormalizePublishSKUImagesKeepsOnlyLastProperty(t *testing.T) {
+	image := &PublishImage{Filename: "spec.png", ContentType: "image/png", Data: []byte("image")}
+	skus := []PublishSKU{
+		{PriceCents: 100, Quantity: 1, Properties: []PublishSKUProperty{{Name: "颜色", Value: "红", Image: image}, {Name: "尺码", Value: "M", Image: image}}},
+		{PriceCents: 100, Quantity: 1, Properties: []PublishSKUProperty{{Name: "颜色", Value: "蓝"}, {Name: "尺码", Value: "L"}}},
+	}
+	normalizePublishSKUImages(skus)
+	if skus[0].Properties[0].Image != nil || skus[0].Properties[1].Image == nil {
+		t.Fatalf("images were not normalized: %#v", skus[0].Properties)
+	}
+	if err := validatePublishSKUs(skus); err != nil {
+		t.Fatalf("normalized SKU should validate: %v", err)
+	}
+}

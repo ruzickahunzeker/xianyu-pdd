@@ -1060,6 +1060,7 @@ export const getPDDCollectorDevices = (): Promise<PDDCollectorDevice[]> => get('
 export const createPDDCollectorDevice = (name: string): Promise<CreatedPDDCollectorDevice> => post('/api/pdd-collector/devices', { name });
 
 export interface PDDSpec { spec_key: string; spec_key_id?: string; spec_value_id?: string; raw_value: string }
+export interface PDDGoodsProperty { key:string; values:string[]; ref_pid?:string; reference_id?:string }
 export interface PDDSKU {
   id: number; sku_id: string; specs: PDDSpec[]; spec_value_ids: string[]; thumb_url: string;
   prices: Record<string, unknown>; price_cent: number; stock: number; is_onsale: boolean; last_collected_at: number;
@@ -1069,15 +1070,19 @@ export interface PDDProductSummary {
   first_collected_at: number; last_collected_at: number; sku_count: number; onsale_sku_count: number;
   min_price_cent: number; max_price_cent: number;
 }
-export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 'onsale_sku_count' | 'min_price_cent' | 'max_price_cent'> { skus: PDDSKU[] }
+export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 'onsale_sku_count' | 'min_price_cent' | 'max_price_cent'> { goods_property:PDDGoodsProperty[]; skus: PDDSKU[] }
 export const getPDDProducts = (): Promise<PDDProductSummary[]> => get('/api/pdd-collector/catalog');
 export const getPDDProduct = (goodsId: string): Promise<PDDProductDetail> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
 export const deletePDDProduct = (goodsId:string):Promise<{draft_count:number;message:string}> => del(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
-export interface ProductMaterialSKU { source_sku_id?:string; price_cent:number; quantity:number; enabled:boolean; image_url?:string; properties:Array<{name:string;value:string;image_url?:string}> }
-export interface ProductMaterial { id:number; source_type:string; source_id:string; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; status:string; updated_at:number }
+export interface ProductMaterialSKU { material_sku_id?:string; source_sku_id?:string; source_properties?:Array<{name:string;value:string}>; source_image_url?:string; price_cent:number; quantity:number; enabled:boolean; image_url?:string; properties:Array<{name:string;value:string;image_url?:string}> }
+export interface ProductMaterial { id:number; source_type:string; source_id:string; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; image_property_name:string; status:string; updated_at:number }
+export interface MaterialPublishRecord { id:number; cookie_id:string; published_item_id:string; status:string; error_message:string; created_at:number; finished_at:number }
 export const createMaterialFromPDD = (goodsId:string):Promise<{id:number}> => post(`/materials/from-pdd/${encodeURIComponent(goodsId)}`,{});
-export const getMaterials = ():Promise<ProductMaterial[]> => get('/materials');
+export const getMaterials = (query = ''):Promise<ProductMaterial[]> => get(`/materials${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''}`);
 export const updateMaterial = (id:number,data:Omit<ProductMaterial,'id'|'source_type'|'source_id'|'status'|'updated_at'>) => put(`/materials/${id}`,data);
 export const deleteMaterial = (id:number) => del(`/materials/${id}`);
 export const uploadMaterialImage = (file:File):Promise<{url:string}> => { const body=new FormData();body.append('image',file);return postForm('/materials/images',body) };
 export const publishMaterial = (id:number,cookieId:string):Promise<any> => post(`/materials/${id}/publish`,{cookie_id:cookieId},{timeoutMs:120_000});
+export const getMaterialPublishRecords = (id:number):Promise<MaterialPublishRecord[]> => get(`/materials/${id}/publish-records`);
+export const getMaterialSourceDiff = (id:number):Promise<{added:any[];changed:any[];removed:string[]}> => get(`/materials/${id}/source-diff`);
+export const syncMaterialSource = (id:number,options:{prices:boolean;stock:boolean;images:boolean;add_new:boolean;disable_removed:boolean}) => post(`/materials/${id}/sync-source`,options);

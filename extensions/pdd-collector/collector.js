@@ -55,8 +55,10 @@ function findNestedValue(root, keys) {
 }
 
 function collectImages(store) {
-  const images = [];
+  const fallbackImages = [];
   const paths = [];
+  let topGallery = [];
+  let detailGallery = [];
   const collectionKeys = new Set(["goodsGallery", "goods_gallery", "gallery", "topGallery", "goodsCarousel", "carouselGallery"]);
   const singleKeys = new Set(["goodsImage", "goods_image", "thumbUrl", "thumbURL", "thumb_url", "hdThumbUrl", "hd_thumb_url"]);
   walkObjects(store, 6, (value, path) => {
@@ -65,17 +67,32 @@ function collectImages(store) {
       if (collectionKeys.has(key) && Array.isArray(candidate)) {
         const urls = candidate.map(imageURL).filter(Boolean);
         if (urls.length) paths.push(`${path}.${key}`);
-        images.push(...urls);
+        fallbackImages.push(...urls);
+        if (key === "topGallery" && urls.length > topGallery.length) topGallery = urls;
+      } else if (key === "detailGallery" && Array.isArray(candidate)) {
+        const urls = candidate.map(imageURL).filter(Boolean);
+        if (urls.length) paths.push(`${path}.${key}`);
+        if (urls.length > detailGallery.length) detailGallery = urls;
       } else if (singleKeys.has(key)) {
         const url = imageURL(candidate);
         if (url) {
           paths.push(`${path}.${key}`);
-          images.push(url);
+          fallbackImages.push(url);
         }
       }
     }
   });
-  return { images: uniqueStrings(images).slice(0, 100), paths: uniqueStrings(paths) };
+  const selected = [
+    ...topGallery.slice(0, 3),
+    ...detailGallery.slice(0, 3),
+    ...topGallery.slice(-3)
+  ];
+  const images = uniqueStrings(selected);
+  for (const url of uniqueStrings([...topGallery, ...detailGallery, ...fallbackImages])) {
+    if (images.length >= 9) break;
+    if (!images.includes(url)) images.push(url);
+  }
+  return { images: images.slice(0, 9), paths: uniqueStrings(paths) };
 }
 
 function normalizeSpec(spec) {
@@ -113,6 +130,24 @@ function normalizeSKU(sku, fallbackGoodsID) {
   };
 }
 
+function collectGoodsProperties(store) {
+  let match;
+  walkObjects(store, 6, (value, path) => {
+    if (match || !Array.isArray(value?.goodsProperty)) return;
+    match = { properties: value.goodsProperty, path: `${path}.goodsProperty` };
+  });
+  const excluded = new Set(["发货地", "品牌"]);
+  return {
+    path: match?.path || "",
+    properties: (match?.properties || []).map(property => ({
+      key: asString(property?.key),
+      values: uniqueStrings(Array.isArray(property?.values) ? property.values : []),
+      ref_pid: asString(firstValue(property, ["ref_pid", "refPid"])),
+      reference_id: asString(firstValue(property, ["reference_id", "referenceId"]))
+    })).filter(property => property.key && property.values.length && !excluded.has(property.key))
+  };
+}
+
 export function collectPDDProduct(rawDataOverride) {
   const rawData = rawDataOverride ?? globalThis.rawData;
   const store = rawData?.store;
@@ -142,6 +177,7 @@ export function collectPDDProduct(rawDataOverride) {
   if (skus.some((sku) => !sku.sku_id)) throw new Error("SKU_ID_MISSING: 部分 SKU 缺少 skuId/skuID");
   const title = findNestedValue(store, ["goodsName", "goods_name", "goodsTitle", "goods_title", "title"]);
   const imageResult = collectImages(store);
+  const propertyResult = collectGoodsProperties(store);
 
   return {
     schema_version: 1,
@@ -149,12 +185,14 @@ export function collectPDDProduct(rawDataOverride) {
     sku_source_path: located.path,
     title_source_path: title.path,
     image_source_paths: imageResult.paths,
+    goods_property_source_path: propertyResult.path,
     collected_at: new Date().toISOString(),
     final_url: location.href,
     goods: {
       goods_id: goodsID,
       title: asString(title.value),
-      images: imageResult.images
+      images: imageResult.images,
+      goods_property: propertyResult.properties
     },
     skus
   };

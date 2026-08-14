@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"net/textproto"
 	"net/url"
 	"os"
@@ -17,16 +18,20 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"xianyu-go/internal/auth"
 )
 
 type materialSKU struct {
-	SourceSKUID string             `json:"source_sku_id,omitempty"`
-	PriceCents  int64              `json:"price_cent"`
-	Quantity    int64              `json:"quantity"`
-	Enabled     bool               `json:"enabled"`
-	Properties  []materialProperty `json:"properties"`
-	ImageURL    string             `json:"image_url,omitempty"`
+	MaterialSKUID    string             `json:"material_sku_id"`
+	SourceSKUID      string             `json:"source_sku_id,omitempty"`
+	SourceProperties []materialProperty `json:"source_properties,omitempty"`
+	SourceImageURL   string             `json:"source_image_url,omitempty"`
+	PriceCents       int64              `json:"price_cent"`
+	Quantity         int64              `json:"quantity"`
+	Enabled          bool               `json:"enabled"`
+	Properties       []materialProperty `json:"properties"`
+	ImageURL         string             `json:"image_url,omitempty"`
 }
 type materialProperty struct {
 	Name     string `json:"name"`
@@ -34,13 +39,14 @@ type materialProperty struct {
 	ImageURL string `json:"image_url,omitempty"`
 }
 type materialInput struct {
-	Title        string         `json:"title"`
-	Description  string         `json:"description"`
-	Images       []string       `json:"images"`
-	Category     map[string]any `json:"category"`
-	SKUs         []materialSKU  `json:"skus"`
-	PostageMode  string         `json:"postage_mode"`
-	PostageCents int64          `json:"postage_cent"`
+	Title             string         `json:"title"`
+	Description       string         `json:"description"`
+	Images            []string       `json:"images"`
+	Category          map[string]any `json:"category"`
+	SKUs              []materialSKU  `json:"skus"`
+	PostageMode       string         `json:"postage_mode"`
+	PostageCents      int64          `json:"postage_cent"`
+	ImagePropertyName string         `json:"image_property_name"`
 }
 
 func (s *Server) mountMaterials(r chi.Router) {
@@ -53,6 +59,9 @@ func (s *Server) mountMaterials(r chi.Router) {
 	r.Post("/materials/images", s.uploadMaterialImage)
 	r.Get("/materials/images/{name}", s.getMaterialImage)
 	r.Post("/materials/{id}/publish", s.publishMaterial)
+	r.Get("/materials/{id}/publish-records", s.listMaterialPublishRecords)
+	r.Get("/materials/{id}/source-diff", s.materialSourceDiff)
+	r.Post("/materials/{id}/sync-source", s.syncMaterialSource)
 }
 
 type publishMaterialInput struct {
@@ -70,7 +79,7 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请选择发布账号")
 		return
 	}
-	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "素材不存在")
 		return
@@ -108,6 +117,36 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "素材至少需要一个启用的 SKU")
 		return
 	}
+	// 采集源可能把同一张 SKU 缩略图重复写到每个规格属性。闲鱼只允许
+	// 一个规格类型带图，因此在生成 multipart 和 SKU JSON 前统一清理。
+	imagePropertyName := strings.TrimSpace(fmt.Sprint(material["image_property_name"]))
+	for _, raw := range enabledSKUs {
+		row, _ := raw.(map[string]any)
+		properties, _ := row["properties"].([]any)
+		for _, rawProperty := range properties {
+			property, _ := rawProperty.(map[string]any)
+			if imagePropertyName == "" && materialImageURL(property) != "" {
+				imagePropertyName = strings.TrimSpace(fmt.Sprint(property["name"]))
+			}
+		}
+		if imagePropertyName != "" {
+			break
+		}
+	}
+	for _, raw := range enabledSKUs {
+		row, _ := raw.(map[string]any)
+		properties, _ := row["properties"].([]any)
+		for _, rawProperty := range properties {
+			property, _ := rawProperty.(map[string]any)
+			if materialImageURL(property) == "" {
+				continue
+			}
+			name := strings.TrimSpace(fmt.Sprint(property["name"]))
+			if name != imagePropertyName {
+				delete(property, "image_url")
+			}
+		}
+	}
 	// A single SKU is represented by the normal price/quantity fields. The
 	// seller backend only accepts itemSkuList for actual multi-SKU products.
 	if len(enabledSKUs) > 1 {
@@ -139,7 +178,7 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 			properties, _ := row["properties"].([]any)
 			for propertyIndex, rawProperty := range properties {
 				property, _ := rawProperty.(map[string]any)
-				source := strings.TrimSpace(fmt.Sprint(property["image_url"]))
+				source := materialImageURL(property)
 				key := fmt.Sprint(property["name"]) + "\x00" + fmt.Sprint(property["value"])
 				if source == "" || seenSpecImages[key] {
 					continue
@@ -161,7 +200,116 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 	proxy.ContentLength = int64(body.Len())
 	proxy.Header = r.Header.Clone()
 	proxy.Header.Set("Content-Type", mw.FormDataContentType())
-	s.publishItem(w, proxy)
+	requestID := uuid.NewString()
+	now := time.Now().Unix()
+	snapshot, _ := json.Marshal(enabledSKUs)
+	_, recordErr := s.Store.DB.ExecContext(r.Context(), `INSERT INTO material_publish_records(request_id,material_id,user_id,source_type,source_id,cookie_id,status,sku_snapshot_json,created_at) VALUES(?,?,?,?,?,?,'publishing',?,?)`, requestID, id, uid, fmt.Sprint(material["source_type"]), fmt.Sprint(material["source_id"]), input.CookieID, string(snapshot), now)
+	if recordErr != nil {
+		writeErr(w, http.StatusInternalServerError, "创建发布记录失败")
+		return
+	}
+	var recordID int64
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id FROM material_publish_records WHERE request_id=?`, requestID).Scan(&recordID); err != nil {
+		writeErr(w, http.StatusInternalServerError, "读取发布记录失败")
+		return
+	}
+	recorder := httptest.NewRecorder()
+	s.publishItem(recorder, proxy)
+	resultBody := recorder.Body.Bytes()
+	var publishResult map[string]any
+	_ = json.Unmarshal(resultBody, &publishResult)
+	status := "failed"
+	itemID := ""
+	if recorder.Code >= 200 && recorder.Code < 300 {
+		status = "success"
+		itemID = strings.TrimSpace(fmt.Sprint(publishResult["item_id"]))
+	}
+	errorCode, errorMessage := "", ""
+	if status == "failed" {
+		errorCode = strings.TrimSpace(fmt.Sprint(publishResult["code"]))
+		errorMessage = strings.TrimSpace(fmt.Sprint(publishResult["message"]))
+	}
+	_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE material_publish_records SET published_item_id=?,status=?,error_code=?,error_message=?,finished_at=? WHERE id=?`, itemID, status, errorCode, errorMessage, time.Now().Unix(), recordID)
+	for _, raw := range enabledSKUs {
+		row, _ := raw.(map[string]any)
+		properties, _ := json.Marshal(row["properties"])
+		_, _ = s.Store.DB.ExecContext(r.Context(), `INSERT INTO material_publish_sku_mappings(publish_record_id,material_sku_id,source_sku_id,published_properties_json,published_price_cent,published_quantity,mapping_status) VALUES(?,?,?,?,?,?,'pending')`, recordID, fmt.Sprint(row["material_sku_id"]), fmt.Sprint(row["source_sku_id"]), string(properties), jsonInt64(row["price_cent"]), jsonInt64(row["quantity"]))
+	}
+	if status == "success" && itemID != "" {
+		s.backfillPublishedSKUMappings(r, recordID, input.CookieID, itemID)
+	}
+	for key, values := range recorder.Header() {
+		w.Header()[key] = values
+	}
+	w.WriteHeader(recorder.Code)
+	_, _ = w.Write(resultBody)
+}
+
+func (s *Server) backfillPublishedSKUMappings(r *http.Request, recordID int64, cookieID, itemID string) {
+	var detail string
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT item_detail FROM item_info WHERE cookie_id=? AND item_id=?`, cookieID, itemID).Scan(&detail); err != nil {
+		return
+	}
+	var item map[string]any
+	if json.Unmarshal([]byte(detail), &item) != nil {
+		return
+	}
+	publishRaw, _ := item["publish_raw"].(map[string]any)
+	remoteSKUs, _ := publishRaw["itemSkuList"].([]any)
+	remoteByProperties := map[string]string{}
+	for _, raw := range remoteSKUs {
+		sku, _ := raw.(map[string]any)
+		properties, _ := sku["propertyList"].([]any)
+		pairs := make([]materialProperty, 0, len(properties))
+		for _, rawProperty := range properties {
+			property, _ := rawProperty.(map[string]any)
+			pairs = append(pairs, materialProperty{
+				Name:  strings.TrimSpace(fmt.Sprint(property["propertyText"])),
+				Value: strings.TrimSpace(fmt.Sprint(property["actualValueText"])),
+			})
+		}
+		if skuID := strings.TrimSpace(fmt.Sprint(sku["skuId"])); skuID != "" {
+			remoteByProperties[materialPropertiesKey(pairs)] = skuID
+		}
+	}
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,published_properties_json FROM material_publish_sku_mappings WHERE publish_record_id=?`, recordID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	type mappingUpdate struct{ id int64; skuID string }
+	updates := []mappingUpdate{}
+	for rows.Next() {
+		var id int64
+		var raw string
+		if rows.Scan(&id, &raw) != nil {
+			continue
+		}
+		var properties []materialProperty
+		_ = json.Unmarshal([]byte(raw), &properties)
+		if skuID := remoteByProperties[materialPropertiesKey(properties)]; skuID != "" {
+			updates = append(updates, mappingUpdate{id: id, skuID: skuID})
+		}
+	}
+	for _, update := range updates {
+		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE material_publish_sku_mappings SET xianyu_sku_id=?,mapping_status='mapped' WHERE id=?`, update.skuID, update.id)
+	}
+}
+
+func materialPropertiesKey(properties []materialProperty) string {
+	pairs := make([]string, 0, len(properties))
+	for _, property := range properties {
+		pairs = append(pairs, strings.TrimSpace(property.Name)+"\x00"+strings.TrimSpace(property.Value))
+	}
+	return strings.Join(pairs, "\x01")
+}
+
+func materialImageURL(property map[string]any) string {
+	value, ok := property["image_url"].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func createMaterialImagePart(writer *multipart.Writer, field, filename, contentType string) (io.Writer, error) {
@@ -298,6 +446,9 @@ func validateMaterial(in *materialInput) error {
 	seen := map[string]bool{}
 	for idx := range in.SKUs {
 		sku := &in.SKUs[idx]
+		if strings.TrimSpace(sku.MaterialSKUID) == "" {
+			sku.MaterialSKUID = uuid.NewString()
+		}
 		if sku.PriceCents <= 0 || sku.Quantity < 0 || len(sku.Properties) == 0 {
 			return errors.New("SKU 售价、库存或规格无效")
 		}
@@ -322,19 +473,27 @@ func validateMaterial(in *materialInput) error {
 	return nil
 }
 
-func materialMap(id, userID int64, sourceType, sourceID, title, description, images, category, skus, postageMode, status string, postage, created, updated int64) map[string]any {
-	return map[string]any{"id": id, "user_id": userID, "source_type": sourceType, "source_id": sourceID, "title": title, "description": description, "images": jsonValue(images, []string{}), "category": jsonValue(category, map[string]any{}), "skus": jsonValue(skus, []any{}), "postage_mode": postageMode, "postage_cent": postage, "status": status, "created_at": created, "updated_at": updated}
+func materialMap(id, userID int64, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName string, postage, created, updated int64) map[string]any {
+	return map[string]any{"id": id, "user_id": userID, "source_type": sourceType, "source_id": sourceID, "title": title, "description": description, "images": jsonValue(images, []string{}), "category": jsonValue(category, map[string]any{}), "skus": jsonValue(skus, []any{}), "postage_mode": postageMode, "postage_cent": postage, "status": status, "image_property_name": imagePropertyName, "created_at": created, "updated_at": updated}
 }
 func scanMaterial(row interface{ Scan(...any) error }) (map[string]any, error) {
 	var id, userID, postage, created, updated int64
-	var sourceType, sourceID, title, description, images, category, skus, postageMode, status string
-	err := row.Scan(&id, &userID, &sourceType, &sourceID, &title, &description, &images, &category, &skus, &postageMode, &postage, &status, &created, &updated)
-	return materialMap(id, userID, sourceType, sourceID, title, description, images, category, skus, postageMode, status, postage, created, updated), err
+	var sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName string
+	err := row.Scan(&id, &userID, &sourceType, &sourceID, &title, &description, &images, &category, &skus, &postageMode, &postage, &status, &created, &updated, &imagePropertyName)
+	return materialMap(id, userID, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, postage, created, updated), err
 }
 
 func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
-	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at FROM product_materials WHERE user_id=? AND deleted_at IS NULL ORDER BY updated_at DESC`, uid)
+	query := `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE user_id=? AND deleted_at IS NULL`
+	args := []any{uid}
+	if keyword := strings.TrimSpace(r.URL.Query().Get("q")); keyword != "" {
+		query += ` AND (title LIKE ? OR (source_type='pdd' AND source_id LIKE ?))`
+		pattern := "%" + keyword + "%"
+		args = append(args, pattern, pattern)
+	}
+	query += ` ORDER BY updated_at DESC`
+	rows, err := s.Store.DB.QueryContext(r.Context(), query, args...)
 	if err != nil {
 		writeErr(w, 500, "查询素材失败")
 		return
@@ -354,7 +513,7 @@ func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getMaterial(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	m, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	m, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil {
 		writeErr(w, 404, "素材不存在")
 		return
@@ -375,7 +534,7 @@ func (s *Server) insertMaterial(w http.ResponseWriter, r *http.Request, sourceTy
 	cat, _ := json.Marshal(in.Category)
 	skus, _ := json.Marshal(in.SKUs)
 	now := time.Now().Unix()
-	res, err := s.Store.DB.ExecContext(r.Context(), `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now)
+	res, err := s.Store.DB.ExecContext(r.Context(), `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now, in.ImagePropertyName)
 	if err != nil {
 		writeErr(w, 500, "创建素材失败")
 		return
@@ -407,9 +566,9 @@ func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal([]byte(specRaw), &specs)
 		props := []materialProperty{}
 		for _, p := range specs {
-			props = append(props, materialProperty{Name: p.SpecKey, Value: p.RawValue, ImageURL: thumb})
+			props = append(props, materialProperty{Name: p.SpecKey, Value: p.RawValue})
 		}
-		skus = append(skus, materialSKU{SourceSKUID: skuID, PriceCents: price, Quantity: stock, Enabled: enabled != 0, Properties: props, ImageURL: thumb})
+		skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceSKUID: skuID, SourceProperties: append([]materialProperty(nil), props...), SourceImageURL: thumb, PriceCents: price, Quantity: stock, Enabled: enabled != 0, Properties: props, ImageURL: thumb})
 	}
 	var imageList []string
 	_ = json.Unmarshal([]byte(images), &imageList)
@@ -452,7 +611,7 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 	images, _ := json.Marshal(in.Images)
 	cat, _ := json.Marshal(in.Category)
 	skus, _ := json.Marshal(in.SKUs)
-	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET title=?,description=?,images_json=?,category_json=?,skus_json=?,postage_mode=?,postage_cent=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, time.Now().Unix(), id, uid)
+	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET title=?,description=?,images_json=?,category_json=?,skus_json=?,postage_mode=?,postage_cent=?,image_property_name=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, in.ImagePropertyName, time.Now().Unix(), id, uid)
 	if err != nil {
 		writeErr(w, 500, "更新素材失败")
 		return
@@ -475,6 +634,167 @@ func (s *Server) deleteMaterial(w http.ResponseWriter, r *http.Request) {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		writeErr(w, 404, "素材不存在")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"success": true})
+}
+
+func (s *Server) listMaterialPublishRecords(w http.ResponseWriter, r *http.Request) {
+	uid := auth.SessionFromContext(r.Context()).UserID
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	pendingRows, pendingErr := s.Store.DB.QueryContext(r.Context(), `SELECT id,cookie_id,published_item_id FROM material_publish_records WHERE material_id=? AND user_id=? AND status='success' AND published_item_id<>'' AND EXISTS(SELECT 1 FROM material_publish_sku_mappings WHERE publish_record_id=material_publish_records.id AND mapping_status='pending')`, id, uid)
+	if pendingErr == nil {
+		type pendingRecord struct{ id int64; cookieID, itemID string }
+		pending := []pendingRecord{}
+		for pendingRows.Next() {
+			var record pendingRecord
+			if pendingRows.Scan(&record.id, &record.cookieID, &record.itemID) == nil {
+				pending = append(pending, record)
+			}
+		}
+		_ = pendingRows.Close()
+		for _, record := range pending {
+			s.backfillPublishedSKUMappings(r, record.id, record.cookieID, record.itemID)
+		}
+	}
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,request_id,cookie_id,published_item_id,status,error_code,error_message,created_at,finished_at FROM material_publish_records WHERE material_id=? AND user_id=? ORDER BY created_at DESC`, id, uid)
+	if err != nil {
+		writeErr(w, 500, "查询发布记录失败")
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var recordID, created, finished int64
+		var requestID, cookieID, itemID, status, code, message string
+		if rows.Scan(&recordID, &requestID, &cookieID, &itemID, &status, &code, &message, &created, &finished) == nil {
+			out = append(out, map[string]any{"id": recordID, "request_id": requestID, "cookie_id": cookieID, "published_item_id": itemID, "status": status, "error_code": code, "error_message": message, "created_at": created, "finished_at": finished})
+		}
+	}
+	writeJSON(w, 200, out)
+}
+
+func (s *Server) materialSourceDiff(w http.ResponseWriter, r *http.Request) {
+	uid := auth.SessionFromContext(r.Context()).UserID
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	if err != nil || material["source_type"] != "pdd" {
+		writeErr(w, 404, "拼多多来源素材不存在")
+		return
+	}
+	current := map[string]map[string]any{}
+	for _, raw := range material["skus"].([]any) {
+		row, _ := raw.(map[string]any)
+		current[fmt.Sprint(row["source_sku_id"])] = row
+	}
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,price_cent,stock,is_onsale FROM pdd_skus WHERE goods_id=? ORDER BY id`, material["source_id"])
+	if err != nil {
+		writeErr(w, 500, "读取来源 SKU 失败")
+		return
+	}
+	defer rows.Close()
+	added, changed, seen := []any{}, []any{}, map[string]bool{}
+	for rows.Next() {
+		var skuID, specs, image string
+		var price, stock int64
+		var onSale int
+		_ = rows.Scan(&skuID, &specs, &image, &price, &stock, &onSale)
+		seen[skuID] = true
+		old := current[skuID]
+		entry := map[string]any{"source_sku_id": skuID, "source_properties": jsonValue(specs, []any{}), "source_image_url": image, "price_cent": price, "quantity": stock, "enabled": onSale != 0}
+		if old == nil {
+			added = append(added, entry)
+		} else if jsonInt64(old["price_cent"]) != price || jsonInt64(old["quantity"]) != stock || fmt.Sprint(old["source_image_url"]) != image {
+			changed = append(changed, entry)
+		}
+	}
+	removed := []string{}
+	for sourceSKU := range current {
+		if sourceSKU != "" && !seen[sourceSKU] {
+			removed = append(removed, sourceSKU)
+		}
+	}
+	writeJSON(w, 200, map[string]any{"added": added, "changed": changed, "removed": removed})
+}
+
+type syncMaterialSourceInput struct {
+	Prices         bool `json:"prices"`
+	Stock          bool `json:"stock"`
+	Images         bool `json:"images"`
+	AddNew         bool `json:"add_new"`
+	DisableRemoved bool `json:"disable_removed"`
+}
+
+func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
+	uid := auth.SessionFromContext(r.Context()).UserID
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	var input syncMaterialSourceInput
+	if decodeJSON(r, &input) != nil {
+		writeErr(w, 400, "同步选项无效")
+		return
+	}
+	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	if err != nil || material["source_type"] != "pdd" {
+		writeErr(w, 404, "拼多多来源素材不存在")
+		return
+	}
+	var skus []materialSKU
+	raw, _ := json.Marshal(material["skus"])
+	_ = json.Unmarshal(raw, &skus)
+	bySource := map[string]*materialSKU{}
+	for i := range skus {
+		bySource[skus[i].SourceSKUID] = &skus[i]
+	}
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,price_cent,stock,is_onsale FROM pdd_skus WHERE goods_id=? ORDER BY id`, material["source_id"])
+	if err != nil {
+		writeErr(w, 500, "读取来源 SKU 失败")
+		return
+	}
+	defer rows.Close()
+	seen := map[string]bool{}
+	for rows.Next() {
+		var skuID, specsRaw, image string
+		var price, stock int64
+		var onSale int
+		_ = rows.Scan(&skuID, &specsRaw, &image, &price, &stock, &onSale)
+		seen[skuID] = true
+		var specs []pddSpecInput
+		_ = json.Unmarshal([]byte(specsRaw), &specs)
+		props := []materialProperty{}
+		for _, p := range specs {
+			props = append(props, materialProperty{Name: p.SpecKey, Value: p.RawValue})
+		}
+		sku := bySource[skuID]
+		if sku == nil && input.AddNew {
+			skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceSKUID: skuID, SourceProperties: props, SourceImageURL: image, Properties: append([]materialProperty(nil), props...), PriceCents: price, Quantity: stock, Enabled: onSale != 0})
+			continue
+		}
+		if sku == nil {
+			continue
+		}
+		sku.SourceProperties = props
+		sku.SourceImageURL = image
+		if input.Prices {
+			sku.PriceCents = price
+		}
+		if input.Stock {
+			sku.Quantity = stock
+		}
+		if input.Images {
+			sku.ImageURL = image
+		}
+	}
+	if input.DisableRemoved {
+		for i := range skus {
+			if skus[i].SourceSKUID != "" && !seen[skus[i].SourceSKUID] {
+				skus[i].Enabled = false
+			}
+		}
+	}
+	encoded, _ := json.Marshal(skus)
+	_, err = s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET skus_json=?,updated_at=? WHERE id=? AND user_id=?`, string(encoded), time.Now().Unix(), id, uid)
+	if err != nil {
+		writeErr(w, 500, "同步素材失败")
 		return
 	}
 	writeJSON(w, 200, map[string]any{"success": true})
