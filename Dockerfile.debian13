@@ -37,6 +37,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node
 COPY --from=browser-install-builder /out/browser-install-host /usr/local/bin/browser-install
 COPY .docker/playwright-runtime /prebuilt-playwright-runtime
+# Playwright 下载必须使用系统 CA 验证 HTTPS，禁止关闭 TLS 证书校验。
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates; \
@@ -81,6 +82,7 @@ COPY --from=playwright-runtime /ms-playwright-go /ms-playwright-go
 COPY --from=playwright-runtime /ms-playwright /ms-playwright
 # 浏览器文件本身不包含 Linux 动态链接库。使用与 runtime 同捆的 Playwright
 # driver 只安装 Chromium 所需系统依赖，并在同一镜像层清理 apt/npm/临时缓存。
+# slim 运行镜像默认可能缺少根证书；闲鱼 HTTPS API 依赖该证书包。
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates; \
