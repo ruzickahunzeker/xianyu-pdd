@@ -16,6 +16,7 @@ RUN go mod download
 COPY . .
 COPY --from=frontend /src/internal/webui/static ./internal/webui/static
 RUN CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath -ldflags="-s -w" -o /out/xianyu-server ./cmd/server \
+	&& CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath -ldflags="-s -w" -o /out/pdd-worker ./cmd/pdd-worker \
     && CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath -ldflags="-s -w" -o /out/xianyu-dbseed ./cmd/dbseed \
     && CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" go build -trimpath -ldflags="-s -w" -o /out/xianyu-dbverify ./cmd/dbverify
 
@@ -76,6 +77,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
 COPY --from=backend /out/xianyu-server /app/xianyu-server
+COPY --from=backend /out/pdd-worker /app/pdd-worker
 COPY --from=backend /out/xianyu-dbseed /app/xianyu-dbseed
 COPY --from=backend /out/xianyu-dbverify /app/xianyu-dbverify
 COPY --from=playwright-runtime /ms-playwright-go /ms-playwright-go

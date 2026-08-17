@@ -3,7 +3,7 @@ import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
   AdminStats, DashboardStats, Card, SystemSettings, ApiResponse, OrderAnalytics,
   Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, AutomationAction, AutomationTriggerType,
-  NotificationChannel, NotificationEventType
+  NotificationChannel, NotificationEventType, PDDAccountConfig
 	, AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
 } from '../types';
 import { formatLocalDate } from '../dateRange';
@@ -13,6 +13,13 @@ const normalizeSettings = (settings: Record<string, any>): SystemSettings => {
   if ('renewal_log_retention_days' in out) {
     const parsed = Number(out.renewal_log_retention_days);
     out.renewal_log_retention_days = Number.isFinite(parsed) ? parsed : 10;
+  }
+  if ('order_sync_interval_minutes' in out) {
+    const parsed = Number(out.order_sync_interval_minutes);
+    out.order_sync_interval_minutes = Number.isFinite(parsed) ? parsed : 10;
+  }
+  if ('order_sync_enabled' in out) {
+    out.order_sync_enabled = String(out.order_sync_enabled).toLowerCase() === 'true';
   }
   return out as SystemSettings;
 };
@@ -357,6 +364,29 @@ export const syncOrders = async (cookieId?: string, status?: string): Promise<an
 	return postForm('/api/orders/refresh', formData);
 };
 
+export interface OrderSyncRun {
+	trigger_type: 'manual' | 'scheduled';
+	status: 'success' | 'partial' | 'failed';
+	started_at: number;
+	finished_at: number;
+	discovered: number;
+	updated: number;
+	soft_deleted: number;
+	fulfillment_updated: number;
+	failed: number;
+	error_message: string;
+}
+
+export interface OrderSyncStatus {
+	enabled: boolean;
+	interval_minutes: number;
+	running: boolean;
+	next_run_at: number;
+	last_run: OrderSyncRun | null;
+}
+
+export const getOrderSyncStatus = async (): Promise<OrderSyncStatus> => get('/api/orders/sync-status');
+
 export const syncSingleOrder = async (orderId: string): Promise<any> => {
   return post(`/api/orders/${orderId}/refresh`);
 };
@@ -377,6 +407,52 @@ export const importOrders = async (data: Partial<Order>[] | FormData): Promise<a
 export const getAdminStats = async (): Promise<AdminStats> => {
   return get('/admin/stats');
 };
+
+export interface FulfillmentOrder {
+  order_id:string; cookie_id:string; item_id:string; spec_name:string; spec_value:string;
+  receiver_name:string; receiver_phone:string; receiver_address:string; receiver_city:string;
+  material_id:number; material_sku_id:string; source_goods_id:string; source_sku_id:string; xianyu_sku_id:string;
+  mapping_status:'pending'|'mapped'|'unmapped'|'ambiguous'|string; pdd_ordered:boolean; pdd_paid:boolean; pdd_paid_at:number; pdd_paid_source:string; pdd_order_id:string;
+  pdd_order?: { order_id?:string; group_order_id?:string; goods_id?:string; sku_id?:string; quantity?:number; amount_cent?:number; order_time?:number; payment_deadline?:number; receiver_name?:string; province?:string; city?:string; district?:string; detail_address?:string };
+  pdd_shipped:boolean; logistics_company:string; tracking_number:string; xianyu_shipped:boolean; reminded:boolean;
+  fulfillment_exempt:boolean; reminder_exempt:boolean; manual_modified_at:number; history_repaired_at:number;
+  phone_restore_due_at:number; address_match_status:string; last_error:string; purchase_requested_at:number; updated_at:number;
+}
+export interface FulfillmentOrderFilters { pdd_ordered?:boolean; pdd_paid?:boolean; pdd_shipped?:boolean; xianyu_shipped?:boolean; reminded?:boolean; mapping_status?:string; }
+export type FulfillmentOrderPatch = Partial<Pick<FulfillmentOrder,'pdd_ordered'|'pdd_paid'|'pdd_order_id'|'pdd_shipped'|'logistics_company'|'tracking_number'|'xianyu_shipped'|'reminded'>>;
+export const reconcileFulfillments = ():Promise<{success:boolean;updated:number}> => post('/api/fulfillment/reconcile',{});
+export const getFulfillmentOrders = (filters:FulfillmentOrderFilters = {}):Promise<FulfillmentOrder[]> => get('/api/fulfillment/orders',{...filters});
+export const updateFulfillmentOrder = (orderId:string,data:FulfillmentOrderPatch):Promise<ApiResponse> => put(`/api/fulfillment/orders/${encodeURIComponent(orderId)}`,data);
+export const updateFulfillment = updateFulfillmentOrder;
+export const requestFulfillmentPurchase = (orderId:string):Promise<{success:boolean;order_id:string;status:string;purchase_requested_at:number}> => post(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/purchase-request`,{});
+export const previewFulfillmentAddress = (orderId:string):Promise<Record<string,unknown>> => post(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/address-preview`,{});
+export interface FulfillmentHistoryRepairPreview { eligible:number; active_excluded:number; manual_excluded:number; pdd_excluded:number; }
+export const previewFulfillmentHistoryRepair = ():Promise<FulfillmentHistoryRepairPreview> => get('/api/fulfillment/history-repair/preview');
+export const repairFulfillmentHistory = ():Promise<{success:boolean;updated:number}> => post('/api/fulfillment/history-repair',{});
+export interface PDDPurchaseTask {
+  id:string; order_id:string; pdd_account_id:string; attempt:number; status:string; worker_id:string; lease_expires_at:number;
+  source_goods_id:string; source_sku_id:string; quantity:number; xianyu_amount_cent:number; pdd_order_id:string; last_error:string;
+  created_at:number; updated_at:number;
+}
+export const getPDDPurchaseTasks = ():Promise<PDDPurchaseTask[]> => get('/api/fulfillment/purchase-tasks');
+export const confirmPDDPurchasePayment = (taskId:string,pddOrderId:string):Promise<ApiResponse> => post(`/api/fulfillment/purchase-tasks/${encodeURIComponent(taskId)}/confirm-payment`,{pdd_order_id:pddOrderId});
+export const confirmUnknownPurchaseCancelled = (taskId:string):Promise<ApiResponse> => post(`/api/fulfillment/purchase-tasks/${encodeURIComponent(taskId)}/confirm-cancelled`,{});
+export interface FulfillmentException { id:string; order_id:string; task_id:string; event_type:string; summary:string; status:string; notification_status:string; created_at:number; resolved_at:number; read_at:number; }
+export const getFulfillmentExceptions = ():Promise<FulfillmentException[]> => get('/api/fulfillment/exceptions');
+export const readFulfillmentExceptions = ():Promise<{success:boolean;updated:number;read_at:number}> => put('/api/fulfillment/exceptions/read',{});
+export const clearFulfillmentExceptions = (scope:'all'|'resolved'='all'):Promise<{success:boolean;deleted:number}> => del(`/api/fulfillment/exceptions?scope=${scope}`);
+export const resolveFulfillmentException = (eventId:string):Promise<ApiResponse> => put(`/api/fulfillment/exceptions/${encodeURIComponent(eventId)}/resolve`,{});
+export interface ShippingPrecheck { ready:boolean; problems:string[]; order_id:string; pdd_order_id:string; logistics_company:string; logistics_company_code:string; tracking_number:string; shipping_status:string; }
+export const shippingPrecheck = (orderId:string):Promise<ShippingPrecheck> => post(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/shipping-precheck`,{});
+export const submitPhysicalShipment = async (orderId:string,idempotencyKey:string):Promise<ApiResponse> => {
+  const response=await fetch(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/ship`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:'{}'});
+  const data=await response.json().catch(()=>({})); if(!response.ok) throw new Error(data.error||data.detail||`HTTP ${response.status}`); return data;
+};
+export interface ShippingAddressOption { contact_id:number; area_id:number; contact_name:string; mobile_phone:string; province_name:string; city_name:string; district_name:string; detail_address:string; platform_default:boolean; last_synced_at:number; }
+export interface ShippingAccountConfig { cookie_id:string; remark:string; address_id:number; address_summary:string; verified_at:number; addresses:ShippingAddressOption[]; }
+export const getShippingAccounts = ():Promise<ShippingAccountConfig[]> => get('/api/fulfillment/shipping-accounts');
+export const saveShippingAccount = (cookieId:string,addressId:number,addressSummary=''):Promise<ApiResponse> => put(`/api/fulfillment/shipping-accounts/${encodeURIComponent(cookieId)}`,{address_id:addressId,address_summary:addressSummary});
+export const syncShippingAccountAddresses = (cookieId:string):Promise<{success:boolean;count:number;selected_address_id:number}> => post(`/api/fulfillment/shipping-accounts/${encodeURIComponent(cookieId)}/sync`,{});
 
 export const getDashboardStats = async (): Promise<DashboardStats> => {
   return get('/dashboard/stats');
@@ -506,6 +582,12 @@ export const getItems = async (cookieId?: string): Promise<Item[]> => {
 
 export const getItem = async (cookieId: string, itemId: string): Promise<Item> =>
   get(`/items/${cookieId}/${itemId}`);
+
+export const saveItemPDDMapping = async (cookieId:string,itemId:string,data:{xianyu_sku_id:string;source_goods_id:string;source_sku_id:string}):Promise<{success:boolean;reconciled_orders:number}> =>
+  put(`/items/${encodeURIComponent(cookieId)}/${encodeURIComponent(itemId)}/pdd-mappings`,data);
+
+export const deleteItemPDDMapping = async (cookieId:string,itemId:string,xianyuSkuId:string):Promise<{success:boolean;reconciled_orders:number}> =>
+  del(`/items/${encodeURIComponent(cookieId)}/${encodeURIComponent(itemId)}/pdd-mappings/${encodeURIComponent(xianyuSkuId || '_default')}`);
 
 
 export const syncItemsFromAccount = async (cookieId: string): Promise<any> => {
@@ -881,6 +963,35 @@ export const updateSystemSettings = async (settings: Partial<SystemSettings>): P
 	return put('/system-settings', payload);
 };
 
+export const getPDDAccount = async (): Promise<PDDAccountConfig> => get('/api/pdd/account');
+export const savePDDAccount = async (input: {name:string;cookie?:string;default_address_id:string;user_agent?:string;enabled:boolean}): Promise<PDDAccountConfig> => put('/api/pdd/account',input);
+export const verifyPDDAccount = async (): Promise<{success:boolean;credential_status:string;pdd_uid:string;message:string}> => post('/api/pdd/account/verify',{});
+export const deletePDDAccount = async (): Promise<ApiResponse> => del('/api/pdd/account');
+
+export interface FulfillmentAPIKey {
+	id: string;
+	name: string;
+	enabled: boolean;
+	last_used_at: number;
+	created_at: number;
+}
+
+export interface CreatedFulfillmentAPIKey {
+	id: string;
+	name: string;
+	api_key: string;
+	created_at: number;
+}
+
+export const getFulfillmentAPIKeys = async (): Promise<FulfillmentAPIKey[]> =>
+	get('/api/fulfillment/keys');
+
+export const createFulfillmentAPIKey = async (name: string): Promise<CreatedFulfillmentAPIKey> =>
+	post('/api/fulfillment/keys', { name });
+
+export const revokeFulfillmentAPIKey = async (id: string): Promise<ApiResponse> =>
+	del(`/api/fulfillment/keys/${encodeURIComponent(id)}`);
+
 export const getAccountAISettings = async (cookieId: string, options?: RequestControlOptions): Promise<AIReplySettings> => {
     return get(`/ai-reply-settings/${cookieId}`, undefined, options);
 }
@@ -1063,7 +1174,7 @@ export interface PDDSpec { spec_key: string; spec_key_id?: string; spec_value_id
 export interface PDDGoodsProperty { key:string; values:string[]; ref_pid?:string; reference_id?:string }
 export interface PDDSKU {
   id: number; sku_id: string; specs: PDDSpec[]; spec_value_ids: string[]; thumb_url: string;
-  prices: Record<string, unknown>; price_cent: number; stock: number; is_onsale: boolean; last_collected_at: number;
+  prices: Record<string, unknown>; price_cent: number; stock: number; stock_exact: boolean; is_onsale: boolean; last_collected_at: number;
 }
 export interface PDDProductSummary {
   id: number; goods_id: string; mall_sn:string; final_url: string; title: string; images: string[];
@@ -1073,6 +1184,12 @@ export interface PDDProductSummary {
 export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 'onsale_sku_count' | 'min_price_cent' | 'max_price_cent'> { goods_property:PDDGoodsProperty[]; skus: PDDSKU[] }
 export const getPDDProducts = (): Promise<PDDProductSummary[]> => get('/api/pdd-collector/catalog');
 export const getPDDProduct = (goodsId: string): Promise<PDDProductDetail> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
+export interface PDDProductRefreshResult {
+  success: boolean; goods_id: string; sku_count: number; added: number; price_changed: number;
+  stock_changed: number; status_changed: number; missing_suspected: string[];
+  material_stock_updates: number; updated_at: number;
+}
+export const refreshPDDProduct = (goodsId:string):Promise<PDDProductRefreshResult> => post(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}/refresh`,{});
 export const deletePDDProduct = (goodsId:string):Promise<{draft_count:number;message:string}> => del(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
 export interface ProductMaterialSKU { material_sku_id?:string; source_goods_id?:string; source_sku_id?:string; source_properties?:Array<{name:string;value:string}>; source_image_url?:string; price_cent:number; quantity:number; enabled:boolean; image_url?:string; properties:Array<{name:string;value:string;image_url?:string}> }
 export interface ProductMaterial { id:number; source_type:string; source_id:string; source_ids?:string[]; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; image_property_name:string; status:string; updated_at:number }

@@ -106,6 +106,38 @@ func TestSetSettingBadJSON(t *testing.T) {
 	}
 }
 
+func TestSetOrderSyncSettingsValidatesValues(t *testing.T) {
+	srv, _, cleanup := newTestServer(t)
+	defer cleanup()
+	h := srv.Router()
+	cookie := loginHelper(t, h)
+
+	for _, tc := range []struct {
+		path string
+		body string
+	}{
+		{"/system-settings/order_sync_enabled", `{"value":"sometimes"}`},
+		{"/system-settings/order_sync_interval_minutes", `{"value":"4"}`},
+		{"/system-settings/order_sync_interval_minutes", `{"value":"1441"}`},
+	} {
+		req := httptest.NewRequest(http.MethodPut, tc.path, strings.NewReader(tc.body))
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status=%d body=%s", tc.path, rec.Code, rec.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/system-settings", strings.NewReader(`{"order_sync_enabled":true,"order_sync_interval_minutes":15}`))
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid settings status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSetLogLevelValidatesAndAppliesRuntimeLevel(t *testing.T) {
 	defer logging.Level.Set(slog.LevelInfo)
 

@@ -29,6 +29,7 @@
 
 # Frontend dependencies
 /frontend/node_modules/
+/.pnpm-store/
 /frontend/.env.local
 /frontend/.env.*.local
 /internal/server/data/

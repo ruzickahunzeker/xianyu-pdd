@@ -1,0 +1,10 @@
+-- +goose Up
+CREATE TABLE pdd_purchase_tasks (
+  id VARCHAR(64) PRIMARY KEY,user_id BIGINT NOT NULL,order_id VARCHAR(191) NOT NULL,pdd_account_id VARCHAR(64) NOT NULL DEFAULT '',attempt INTEGER NOT NULL DEFAULT 1,status VARCHAR(32) NOT NULL DEFAULT 'pending',worker_id VARCHAR(191) NOT NULL DEFAULT '',lease_token VARCHAR(64) NOT NULL DEFAULT '',lease_expires_at BIGINT NOT NULL DEFAULT 0,expected_goods_id VARCHAR(191) NOT NULL DEFAULT '',expected_sku_id VARCHAR(191) NOT NULL DEFAULT '',expected_quantity INTEGER NOT NULL DEFAULT 1,expected_amount_cent BIGINT NOT NULL DEFAULT 0,expected_receiver_name VARCHAR(191) NOT NULL DEFAULT '',expected_province VARCHAR(191) NOT NULL DEFAULT '',expected_city VARCHAR(191) NOT NULL DEFAULT '',expected_district VARCHAR(191) NOT NULL DEFAULT '',expected_detail_address TEXT NOT NULL,before_order_sns TEXT NOT NULL,pdd_order_id VARCHAR(191) NULL,pdd_order_json TEXT NOT NULL,last_error TEXT NOT NULL,created_at BIGINT NOT NULL,started_at BIGINT NOT NULL DEFAULT 0,submitted_at BIGINT NOT NULL DEFAULT 0,finished_at BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL,UNIQUE KEY uq_pdd_purchase_attempt(user_id,order_id,attempt),UNIQUE KEY uq_pdd_purchase_order_id(pdd_order_id),KEY idx_pdd_purchase_claim(user_id,status,lease_expires_at,created_at),CONSTRAINT fk_pdd_purchase_user FOREIGN KEY(user_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE fulfillment_exception_events (
+  id VARCHAR(64) PRIMARY KEY,user_id BIGINT NOT NULL,order_id VARCHAR(191) NOT NULL,task_id VARCHAR(64) NOT NULL DEFAULT '',event_type VARCHAR(64) NOT NULL,summary TEXT NOT NULL,detail_json TEXT NOT NULL,status VARCHAR(32) NOT NULL DEFAULT 'open',notification_status VARCHAR(32) NOT NULL DEFAULT 'pending',created_at BIGINT NOT NULL,resolved_at BIGINT NOT NULL DEFAULT 0,KEY idx_fulfillment_exception_open(user_id,status,created_at),CONSTRAINT fk_fulfillment_exception_user FOREIGN KEY(user_id) REFERENCES users(id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+-- +goose Down
+DROP TABLE IF EXISTS fulfillment_exception_events;
+DROP TABLE IF EXISTS pdd_purchase_tasks;

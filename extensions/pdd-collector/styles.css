@@ -5,6 +5,8 @@ body { margin: 0; }
 .options main { max-width: 680px; margin: 48px auto; padding: 28px; background: white; border: 1px solid #dde3ee; border-radius: 14px; }
 header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 h1 { margin: 0 0 8px; font-size: 19px; }
+h2 { margin: 14px 0 4px; font-size: 16px; }
+hr { border: 0; border-top: 1px solid #dde3ee; margin: 16px 0; }
 p { color: #5b667a; }
 button { border: 1px solid #cbd3e1; border-radius: 8px; padding: 8px 12px; background: white; cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .5; }

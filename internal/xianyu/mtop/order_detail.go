@@ -119,6 +119,9 @@ func (c *ClientImpl) fetchOrderDetailOnce(ctx context.Context, cookiesStr, order
 			}
 			result.SpecName = mtopString(itemInfo["specName"])
 			result.SpecValue = mtopString(itemInfo["specValue"])
+			if result.SpecValue == "" {
+				result.SpecName, result.SpecValue = parseOrderSKUInfo(mtopString(itemInfo["skuInfo"]))
+			}
 		}
 		if priceInfo, ok := componentData["priceInfo"].(map[string]any); ok {
 			if amount, ok := priceInfo["amount"].(map[string]any); ok {
@@ -127,6 +130,26 @@ func (c *ClientImpl) fetchOrderDetailOnce(ctx context.Context, cookiesStr, order
 		}
 	}
 	return result, decoded.Ret, updated, nil
+}
+
+// parseOrderSKUInfo 兼容新版订单详情把规格合并为 itemInfo.skuInfo 的结构。
+// 闲鱼当前返回形如“款式:红色”或“款式：红色”；没有名称时保留完整值，
+// 让单规格商品仍可按规格值完成映射。
+func parseOrderSKUInfo(raw string) (string, string) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", ""
+	}
+	for _, separator := range []string{"：", ":"} {
+		if index := strings.Index(value, separator); index >= 0 {
+			name := strings.TrimSpace(value[:index])
+			specValue := strings.TrimSpace(value[index+len(separator):])
+			if specValue != "" {
+				return name, specValue
+			}
+		}
+	}
+	return "", value
 }
 
 func buildOrderDetailQuery(t, sign string) string {

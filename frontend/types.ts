@@ -191,7 +191,11 @@ export interface Item {
   is_multi_qty_ship?: number | boolean;
   created_at?: string;
   remote_detail?: ItemRemoteDetail;
+  pdd_mapping?: ItemPDDMappingDetail;
 }
+
+export interface ItemPDDMappingRow { xianyu_sku_id:string; source_goods_id:string; source_sku_id:string; mapping_source:string; pdd_title:string; pdd_specs:Array<{spec_key?:string;raw_value?:string}>; pdd_thumb_url?:string; pdd_price_cent:number; pdd_stock:number; pdd_onsale:boolean; source_exists:boolean; }
+export interface ItemPDDMappingDetail { status:'mapped'|'partial'|'unmapped'; mapped:number; total:number; rows?:ItemPDDMappingRow[]; }
 
 export interface ItemRemoteProperty { propertyId?: number|string; propertyText?: string; valueId?: number|string; valueText?: string; actualValueText?: string; }
 export interface ItemRemoteSKU { sku_id:string; inventory_id:string; price_cent:number; quantity:number; properties:ItemRemoteProperty[]; property_image_url?:string; enabled:boolean; status:number; sort_order:number; }
@@ -301,10 +305,27 @@ export interface SystemSettings {
   log_level?: 'debug' | 'info' | 'warn' | 'error' | string;
   log_format?: 'text' | 'json' | string;
   renewal_log_retention_days?: number;
+  order_sync_enabled?: boolean | string;
+  order_sync_interval_minutes?: number;
+  pdd_product_refresh_interval_hours?: number;
   'captcha.remote_service_url'?: string;
   'captcha.remote_secret_key'?: string;
   'captcha.remote_pass_cookies'?: boolean | string;
   [key: string]: any;
+}
+
+export interface PDDAccountConfig {
+  id: string;
+  name: string;
+  pdd_uid: string;
+  default_address_id: string;
+  user_agent: string;
+  enabled: boolean;
+  configured: boolean;
+  cookie_configured: boolean;
+  credential_status: 'unconfigured' | 'unchecked' | 'valid' | 'invalid' | 'expired' | 'unknown';
+  last_verified_at: number;
+  last_error: string;
 }
 
 export interface AIReplySettings {

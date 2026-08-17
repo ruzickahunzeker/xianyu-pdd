@@ -479,8 +479,8 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
   }, [buildAutomationDraft, initialDeliveryTarget, onDeliveryTargetHandled, openAutomationRule]);
 
   const openNewAutomationRule = (trigger: AutomationTriggerType = 'order_paid') => {
-    if (!selectedAccountId) {
-      alert('请先选择账号');
+    if (accounts.length === 0) {
+      alert('暂无可用账号，请先添加闲鱼账号');
       return;
     }
     setEditingAutomationRule(buildAutomationDraft(trigger));
@@ -820,7 +820,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
           </button>
           <button
             onClick={activeTab === 'automation' ? () => openNewAutomationRule('order_paid') : activeTab === 'reply' ? handleAddReplyRule : () => void openDefaultReplyModal()}
-            disabled={!selectedAccountId}
+            disabled={accounts.length === 0 || (activeTab !== 'automation' && !selectedAccountId)}
             className="ios-btn-primary px-5 py-3 rounded-2xl text-sm font-extrabold flex items-center justify-center gap-2 whitespace-nowrap disabled:opacity-50"
           >
             <Plus className="w-4 h-4" />

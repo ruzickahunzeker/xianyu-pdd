@@ -1,13 +1,16 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -16,7 +19,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"xianyu-go/internal/auth"
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/pddproduct"
 )
 
 var pddNumericID = regexp.MustCompile(`^[0-9]+$`)
@@ -33,6 +38,7 @@ type pddSKUInput struct {
 	GoodsID      string         `json:"goods_id"`
 	ThumbURL     string         `json:"thumb_url"`
 	Stock        int64          `json:"stock"`
+	StockExact   *bool          `json:"stock_exact,omitempty"`
 	IsOnsale     bool           `json:"is_onsale"`
 	Prices       map[string]any `json:"prices"`
 	SpecValueIDs []string       `json:"spec_value_ids"`
@@ -77,7 +83,209 @@ func (s *Server) mountPDDCollectorAdmin(r interface {
 	r.Get("/api/pdd-collector/devices", s.pddListCollectorDevices)
 	r.Get("/api/pdd-collector/catalog", s.pddListProducts)
 	r.Get("/api/pdd-collector/catalog/{goodsID}", s.pddGetProduct)
+	r.Post("/api/pdd-collector/catalog/{goodsID}/refresh", s.pddRefreshProduct)
 	r.Delete("/api/pdd-collector/catalog/{goodsID}", s.pddDeleteProduct)
+}
+
+func pddProductURL(raw, goodsID string) string {
+	return pddproduct.ProductURL(raw, goodsID)
+}
+
+func validatePDDProductSnapshot(snapshot pddproduct.Snapshot) error {
+	if snapshot.GoodsID == "" || len(snapshot.SKUs) == 0 {
+		return errors.New("商品页未返回有效 SKU")
+	}
+	for _, sku := range snapshot.SKUs {
+		if sku.IsOnsale && sku.PriceCent <= 0 {
+			return fmt.Errorf("SKU %s 价格为 0，商品页仍是降级数据", sku.SKUID)
+		}
+		if len(snapshot.SKUs) > 1 && len(sku.Specs) == 0 {
+			return fmt.Errorf("SKU %s 缺少规格，商品页仍是降级数据", sku.SKUID)
+		}
+	}
+	return nil
+}
+
+func pddInputStockExact(sku pddSKUInput) bool {
+	if sku.StockExact != nil {
+		return *sku.StockExact
+	}
+	return sku.Stock < 1000
+}
+
+func fetchPDDProduct(ctx context.Context, account *db.PDDAccount, goodsID, pageURL string) (pddproduct.Snapshot, error) {
+	if account == nil || !account.Enabled || strings.TrimSpace(account.Cookie) == "" {
+		return pddproduct.Snapshot{}, errors.New("默认拼多多账号未启用或 Cookie 为空")
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, pddProductURL(pageURL, goodsID), nil)
+	req.Header.Set("Cookie", account.Cookie)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	req.Header.Set("Referer", "https://mobile.pinduoduo.com/")
+	if account.UserAgent != "" {
+		req.Header.Set("User-Agent", account.UserAgent)
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return pddproduct.Snapshot{}, fmt.Errorf("请求拼多多商品页失败: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return pddproduct.Snapshot{}, fmt.Errorf("拼多多商品页返回 HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 12<<20))
+	if err != nil {
+		return pddproduct.Snapshot{}, errors.New("读取拼多多商品页失败")
+	}
+	snapshot, err := pddproduct.ParseHTML(body)
+	if err != nil {
+		return pddproduct.Snapshot{}, err
+	}
+	if snapshot.GoodsID != goodsID {
+		return pddproduct.Snapshot{}, errors.New("拼多多返回的 goods_id 与目标商品不一致")
+	}
+	return snapshot, nil
+}
+
+func (s *Server) pddRefreshProduct(w http.ResponseWriter, r *http.Request) {
+	goodsID := chi.URLParam(r, "goodsID")
+	if !pddNumericID.MatchString(goodsID) {
+		writeErr(w, 400, "goods_id 无效")
+		return
+	}
+	var productID int64
+	var finalURL string
+	if s.Store.DB.QueryRowContext(r.Context(), `SELECT id,final_url FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&productID, &finalURL) != nil {
+		writeErr(w, 404, "采集商品不存在，请先使用扩展采集")
+		return
+	}
+	var latestCapturedURL string
+	if s.Store.DB.QueryRowContext(r.Context(), `SELECT final_url FROM pdd_collection_snapshots WHERE goods_id=? ORDER BY received_at DESC,id DESC LIMIT 1`, goodsID).Scan(&latestCapturedURL) == nil {
+		if candidate := pddProductURL(latestCapturedURL, goodsID); candidate != "https://mobile.pinduoduo.com/goods.html?goods_id="+goodsID {
+			finalURL = candidate
+		}
+	}
+	userID := auth.SessionFromContext(r.Context()).UserID
+	account, err := s.Store.PDDAccounts.Default(r.Context(), userID)
+	if err != nil {
+		writeErr(w, 422, "请先在设置中配置默认拼多多账号")
+		return
+	}
+	fetch := s.PDDProductFetch
+	var snapshot pddproduct.Snapshot
+	if fetch == nil {
+		snapshot, err = fetchPDDProduct(r.Context(), account, goodsID, finalURL)
+	} else {
+		snapshot, err = fetch(r.Context(), account, goodsID)
+	}
+	if err != nil {
+		writeErr(w, 422, err.Error()+"；可打开商品页后使用采集扩展更新")
+		return
+	}
+	if err = validatePDDProductSnapshot(snapshot); err != nil {
+		writeErr(w, 422, err.Error()+"；请用浏览器完整打开商品后使用采集扩展更新")
+		return
+	}
+	s.collectorMu.Lock()
+	defer s.collectorMu.Unlock()
+	now := time.Now().Unix()
+	tx, err := s.Store.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, 500, "启动商品更新事务失败")
+		return
+	}
+	defer tx.Rollback()
+	type oldSKU struct {
+		price, stock int64
+		onsale       int
+	}
+	old := map[string]oldSKU{}
+	rows, err := tx.QueryContext(r.Context(), `SELECT sku_id,price_cent,stock,is_onsale FROM pdd_skus WHERE goods_id=?`, goodsID)
+	if err != nil {
+		writeErr(w, 500, "读取原 SKU 失败")
+		return
+	}
+	for rows.Next() {
+		var id string
+		var row oldSKU
+		if rows.Scan(&id, &row.price, &row.stock, &row.onsale) == nil {
+			old[id] = row
+		}
+	}
+	_ = rows.Close()
+	seen, stocks := map[string]bool{}, map[string]int64{}
+	added, priceChanged, stockChanged, statusChanged := 0, 0, 0, 0
+	skuUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id", "sku_id"}, map[string]string{"specs_json": "EXCLUDED.specs_json", "spec_value_ids_json": "EXCLUDED.spec_value_ids_json", "thumb_url": "EXCLUDED.thumb_url", "prices_json": "EXCLUDED.prices_json", "price_cent": "EXCLUDED.price_cent", "stock": "EXCLUDED.stock", "is_onsale": "EXCLUDED.is_onsale", "raw_snapshot_json": "EXCLUDED.raw_snapshot_json", "last_collected_at": "EXCLUDED.last_collected_at"})
+	for _, sku := range snapshot.SKUs {
+		if sku.GoodsID != goodsID || !pddNumericID.MatchString(sku.SKUID) {
+			writeErr(w, 422, "商品页包含无效 SKU 标识")
+			return
+		}
+		seen[sku.SKUID] = true
+		if sku.StockExact {
+			stocks[sku.SKUID] = sku.Stock
+		}
+		previous, exists := old[sku.SKUID]
+		if !exists {
+			added++
+		} else {
+			if previous.price != sku.PriceCent {
+				priceChanged++
+			}
+			if previous.stock != sku.Stock {
+				stockChanged++
+			}
+			if (previous.onsale == 1) != sku.IsOnsale {
+				statusChanged++
+			}
+		}
+		specRaw, _ := json.Marshal(sku.Specs)
+		specIDs := []string{}
+		for _, spec := range sku.Specs {
+			if spec.SpecValueID != "" {
+				specIDs = append(specIDs, spec.SpecValueID)
+			}
+		}
+		specIDRaw, _ := json.Marshal(specIDs)
+		pricesRaw, _ := json.Marshal(sku.Prices)
+		raw, _ := json.Marshal(sku)
+		onSale := 0
+		if sku.IsOnsale {
+			onSale = 1
+		}
+		_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_skus(product_id,goods_id,sku_id,specs_json,spec_value_ids_json,thumb_url,prices_json,price_cent,stock,is_onsale,raw_snapshot_json,last_collected_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`+skuUpsert, productID, goodsID, sku.SKUID, string(specRaw), string(specIDRaw), sku.ThumbURL, string(pricesRaw), sku.PriceCent, sku.Stock, onSale, string(raw), now)
+		if err != nil {
+			writeErr(w, 500, "更新 SKU 失败")
+			return
+		}
+	}
+	missing := []string{}
+	for skuID := range old {
+		if !seen[skuID] {
+			missing = append(missing, skuID)
+		}
+	}
+	title := strings.TrimSpace(snapshot.Title)
+	if title == "" {
+		_, err = tx.ExecContext(r.Context(), `UPDATE pdd_products SET last_collected_at=? WHERE id=?`, now, productID)
+	} else {
+		_, err = tx.ExecContext(r.Context(), `UPDATE pdd_products SET title=?,last_collected_at=? WHERE id=?`, title, now, productID)
+	}
+	if err != nil {
+		writeErr(w, 500, "更新商品失败")
+		return
+	}
+	materialUpdates, err := syncCollectedStockToMaterials(r.Context(), tx, s.Store.Dialect, goodsID, stocks, now)
+	if err != nil {
+		writeErr(w, 500, "同步素材库存失败")
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeErr(w, 500, "提交商品更新失败")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"success": true, "goods_id": goodsID, "sku_count": len(snapshot.SKUs), "added": added, "price_changed": priceChanged, "stock_changed": stockChanged, "status_changed": statusChanged, "missing_suspected": missing, "material_stock_updates": materialUpdates, "updated_at": now})
 }
 
 func (s *Server) pddDeleteProduct(w http.ResponseWriter, r *http.Request) {
@@ -156,7 +364,7 @@ func (s *Server) pddGetProduct(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "拼多多商品不存在")
 		return
 	}
-	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,sku_id,specs_json,spec_value_ids_json,thumb_url,prices_json,price_cent,stock,is_onsale,last_collected_at FROM pdd_skus WHERE product_id=? ORDER BY is_onsale DESC,stock DESC,id`, id)
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,sku_id,specs_json,spec_value_ids_json,thumb_url,prices_json,price_cent,stock,is_onsale,raw_snapshot_json,last_collected_at FROM pdd_skus WHERE product_id=? ORDER BY is_onsale DESC,stock DESC,id`, id)
 	if err != nil {
 		writeErr(w, 500, "查询拼多多SKU失败")
 		return
@@ -165,12 +373,19 @@ func (s *Server) pddGetProduct(w http.ResponseWriter, r *http.Request) {
 	skus := make([]map[string]any, 0)
 	for rows.Next() {
 		var skuRecordID, price, stock, onSale, collectedAt int64
-		var skuID, specs, specIDs, thumbURL, prices string
-		if err := rows.Scan(&skuRecordID, &skuID, &specs, &specIDs, &thumbURL, &prices, &price, &stock, &onSale, &collectedAt); err != nil {
+		var skuID, specs, specIDs, thumbURL, prices, rawSnapshot string
+		if err := rows.Scan(&skuRecordID, &skuID, &specs, &specIDs, &thumbURL, &prices, &price, &stock, &onSale, &rawSnapshot, &collectedAt); err != nil {
 			writeErr(w, 500, "读取拼多多SKU失败")
 			return
 		}
-		skus = append(skus, map[string]any{"id": skuRecordID, "sku_id": skuID, "specs": jsonValue(specs, []any{}), "spec_value_ids": jsonValue(specIDs, []any{}), "thumb_url": thumbURL, "prices": jsonValue(prices, map[string]any{}), "price_cent": price, "stock": stock, "is_onsale": onSale != 0, "last_collected_at": collectedAt})
+		stockExact := stock < 1000
+		var raw struct {
+			StockExact *bool `json:"stock_exact"`
+		}
+		if json.Unmarshal([]byte(rawSnapshot), &raw) == nil && raw.StockExact != nil {
+			stockExact = *raw.StockExact
+		}
+		skus = append(skus, map[string]any{"id": skuRecordID, "sku_id": skuID, "specs": jsonValue(specs, []any{}), "spec_value_ids": jsonValue(specIDs, []any{}), "thumb_url": thumbURL, "prices": jsonValue(prices, map[string]any{}), "price_cent": price, "stock": stock, "stock_exact": stockExact, "is_onsale": onSale != 0, "last_collected_at": collectedAt})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "goods_id": goodsID, "mall_sn": mallSN, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "goods_property": jsonValue(properties, []any{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "skus": skus})
 }
@@ -346,6 +561,69 @@ func pddPriceCent(prices map[string]any) int64 {
 	return 0
 }
 
+// syncCollectedStockToMaterials keeps draft/material inventory aligned with
+// the latest collector payload. Identity is source goods_id + source sku_id;
+// prices, published property text and already-published Xianyu inventory are
+// intentionally outside this operation.
+func syncCollectedStockToMaterials(ctx context.Context, tx *sql.Tx, dialect db.Dialect, goodsID string, stocks map[string]int64, now int64) (int64, error) {
+	query := `SELECT id,source_id,skus_json FROM product_materials WHERE source_type='pdd' AND deleted_at IS NULL`
+	if dialect == db.DialectMySQL || dialect == db.DialectPostgres {
+		query += ` FOR UPDATE`
+	}
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	type materialRow struct {
+		id            int64
+		sourceID, raw string
+	}
+	materials := []materialRow{}
+	for rows.Next() {
+		var row materialRow
+		if err = rows.Scan(&row.id, &row.sourceID, &row.raw); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		materials = append(materials, row)
+	}
+	if err = rows.Close(); err != nil {
+		return 0, err
+	}
+	var updated int64
+	for _, row := range materials {
+		var skus []materialSKU
+		if json.Unmarshal([]byte(row.raw), &skus) != nil {
+			continue
+		}
+		changed := false
+		for i := range skus {
+			sourceGoodsID := skus[i].SourceGoodsID
+			if sourceGoodsID == "" && skus[i].SourceSKUID != "" {
+				sourceGoodsID = row.sourceID
+			}
+			if sourceGoodsID != goodsID {
+				continue
+			}
+			stock, ok := stocks[skus[i].SourceSKUID]
+			if ok && skus[i].Quantity != stock {
+				skus[i].Quantity, changed = stock, true
+			}
+		}
+		if !changed {
+			continue
+		}
+		encoded, _ := json.Marshal(skus)
+		result, updateErr := tx.ExecContext(ctx, `UPDATE product_materials SET skus_json=?,updated_at=? WHERE id=?`, string(encoded), now, row.id)
+		if updateErr != nil {
+			return updated, updateErr
+		}
+		count, _ := result.RowsAffected()
+		updated += count
+	}
+	return updated, nil
+}
+
 func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 	deviceID, err := s.authenticateCollector(r)
 	if err != nil {
@@ -361,6 +639,8 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.collectorMu.Lock()
+	defer s.collectorMu.Unlock()
 
 	payload, _ := json.Marshal(in)
 	images, _ := json.Marshal(in.Goods.Images)
@@ -386,7 +666,8 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	productUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id"}, map[string]string{"mall_sn": "EXCLUDED.mall_sn", "final_url": "EXCLUDED.final_url", "title": "EXCLUDED.title", "images_json": "EXCLUDED.images_json", "properties_json": "EXCLUDED.properties_json", "last_collected_at": "EXCLUDED.last_collected_at"})
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_products(goods_id,mall_sn,final_url,title,images_json,properties_json,first_collected_at,last_collected_at) VALUES(?,?,?,?,?,?,?,?)`+productUpsert, in.Goods.GoodsID, in.Goods.MallSN, in.FinalURL, in.Goods.Title, string(images), string(properties), collectedAt, collectedAt)
+	collectedPageURL := pddProductURL(in.FinalURL, in.Goods.GoodsID)
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_products(goods_id,mall_sn,final_url,title,images_json,properties_json,first_collected_at,last_collected_at) VALUES(?,?,?,?,?,?,?,?)`+productUpsert, in.Goods.GoodsID, in.Goods.MallSN, collectedPageURL, in.Goods.Title, string(images), string(properties), collectedAt, collectedAt)
 	if err != nil {
 		writeErr(w, 500, "保存拼多多商品失败")
 		return
@@ -408,7 +689,11 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	skuUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id", "sku_id"}, map[string]string{"product_id": "EXCLUDED.product_id", "specs_json": "EXCLUDED.specs_json", "spec_value_ids_json": "EXCLUDED.spec_value_ids_json", "thumb_url": "EXCLUDED.thumb_url", "prices_json": "EXCLUDED.prices_json", "price_cent": "EXCLUDED.price_cent", "stock": "EXCLUDED.stock", "is_onsale": "EXCLUDED.is_onsale", "raw_snapshot_json": "EXCLUDED.raw_snapshot_json", "last_collected_at": "EXCLUDED.last_collected_at"})
+	stocks := make(map[string]int64, len(in.SKUs))
 	for _, sku := range in.SKUs {
+		if pddInputStockExact(sku) {
+			stocks[sku.SKUID] = sku.Stock
+		}
 		specs, _ := json.Marshal(sku.Specs)
 		specIDs, _ := json.Marshal(sku.SpecValueIDs)
 		prices, _ := json.Marshal(sku.Prices)
@@ -434,10 +719,15 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	materialStockUpdates, err := syncCollectedStockToMaterials(r.Context(), tx, s.Store.Dialect, in.Goods.GoodsID, stocks, receivedAt)
+	if err != nil {
+		writeErr(w, 500, "同步素材库存失败")
+		return
+	}
 	_, _ = tx.ExecContext(r.Context(), `UPDATE pdd_collector_devices SET last_seen_at=?,last_collected_at=? WHERE id=?`, receivedAt, receivedAt, deviceID)
 	if err = tx.Commit(); err != nil {
 		writeErr(w, 500, "提交采集数据失败")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"status": "collected", "collection_id": in.CollectionID, "product_id": productID, "goods_id": in.Goods.GoodsID, "sku_count": len(in.SKUs)})
+	writeJSON(w, http.StatusCreated, map[string]any{"status": "collected", "collection_id": in.CollectionID, "product_id": productID, "goods_id": in.Goods.GoodsID, "sku_count": len(in.SKUs), "material_stock_updates": materialStockUpdates})
 }

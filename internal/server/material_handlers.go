@@ -50,6 +50,50 @@ type materialInput struct {
 	ImagePropertyName string         `json:"image_property_name"`
 }
 
+// normalizeCollectedMaterialSpecifications removes property dimensions that
+// have only one value across the collected SKU set. Xianyu requires every
+// submitted SKU property to contain 2-150 distinct values. The complete PDD
+// properties remain in SourceProperties, so purchasing mappings do not lose
+// any source identity.
+func normalizeCollectedMaterialSpecifications(skus []materialSKU) {
+	values := map[string]map[string]bool{}
+	for _, sku := range skus {
+		if !sku.Enabled {
+			continue
+		}
+		for _, property := range sku.Properties {
+			name, value := strings.TrimSpace(property.Name), strings.TrimSpace(property.Value)
+			if name == "" || value == "" {
+				continue
+			}
+			if values[name] == nil {
+				values[name] = map[string]bool{}
+			}
+			values[name][value] = true
+		}
+	}
+	variable := map[string]bool{}
+	for name, set := range values {
+		variable[name] = len(set) >= 2
+	}
+	if len(variable) == 0 {
+		return
+	}
+	for index := range skus {
+		properties := make([]materialProperty, 0, len(skus[index].Properties))
+		for _, property := range skus[index].Properties {
+			if variable[strings.TrimSpace(property.Name)] {
+				properties = append(properties, property)
+			}
+		}
+		// A true single-SKU product still needs one local display property. It is
+		// published through the normal single-SKU price/quantity path.
+		if len(properties) > 0 {
+			skus[index].Properties = properties
+		}
+	}
+}
+
 func (s *Server) mountMaterials(r chi.Router) {
 	r.Get("/materials", s.listMaterials)
 	r.Post("/materials", s.createMaterial)
@@ -67,6 +111,12 @@ func (s *Server) mountMaterials(r chi.Router) {
 
 type publishMaterialInput struct {
 	CookieID string `json:"cookie_id"`
+}
+
+func normalizePublishedMaterialSKU(sourceType string, row map[string]any) {
+	if sourceType == "pdd" && strings.TrimSpace(fmt.Sprint(row["source_sku_id"])) == "" {
+		row["quantity"] = int64(0)
+	}
 }
 
 // publishMaterial turns the saved draft into the same multipart contract used by
@@ -106,6 +156,10 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 		if enabled, exists := row["enabled"]; exists && enabled == false {
 			continue
 		}
+		// 闲鱼的两维规格必须发布完整笛卡尔组合。采集素材中没有
+		// source_sku_id 的行是拼多多不存在的占位组合，保留发布但库存
+		// 必须为 0，不能继承任一真实 SKU 的库存。
+		normalizePublishedMaterialSKU(fmt.Sprint(material["source_type"]), row)
 		enabledSKUs = append(enabledSKUs, raw)
 		price := jsonInt64(row["price_cent"])
 		quantity := jsonInt64(row["quantity"])
@@ -277,7 +331,7 @@ func (s *Server) backfillPublishedSKUMappings(r *http.Request, recordID int64, c
 	if len(remoteByProperties) == 0 {
 		return
 	}
-	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,published_properties_json FROM material_publish_sku_mappings WHERE publish_record_id=?`, recordID)
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,source_sku_id,published_properties_json FROM material_publish_sku_mappings WHERE publish_record_id=?`, recordID)
 	if err != nil {
 		return
 	}
@@ -290,13 +344,21 @@ func (s *Server) backfillPublishedSKUMappings(r *http.Request, recordID int64, c
 	updates := []mappingUpdate{}
 	for rows.Next() {
 		var id int64
-		var raw string
-		if rows.Scan(&id, &raw) != nil {
+		var sourceSKUID, raw string
+		if rows.Scan(&id, &sourceSKUID, &raw) != nil {
 			continue
 		}
 		var properties []materialProperty
 		_ = json.Unmarshal([]byte(raw), &properties)
 		matches := remoteByProperties[materialPropertiesKey(properties)]
+		if strings.TrimSpace(sourceSKUID) == "" {
+			if len(matches) == 1 {
+				updates = append(updates, mappingUpdate{id: id, skuID: matches[0], status: "unmapped"})
+			} else {
+				updates = append(updates, mappingUpdate{id: id, status: "unmapped"})
+			}
+			continue
+		}
 		switch len(matches) {
 		case 1:
 			updates = append(updates, mappingUpdate{id: id, skuID: matches[0], status: "mapped"})
@@ -621,6 +683,7 @@ func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 		}
 		skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: append([]materialProperty(nil), props...), SourceImageURL: thumb, PriceCents: price, Quantity: stock, Enabled: enabled != 0, Properties: props, ImageURL: thumb})
 	}
+	normalizeCollectedMaterialSpecifications(skus)
 	var imageList []string
 	_ = json.Unmarshal([]byte(images), &imageList)
 	cleanImages := []string{}

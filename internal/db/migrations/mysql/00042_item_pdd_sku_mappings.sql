@@ -1,0 +1,6 @@
+-- +goose Up
+CREATE TABLE item_pdd_sku_mappings (id BIGINT AUTO_INCREMENT PRIMARY KEY,user_id BIGINT NOT NULL,cookie_id VARCHAR(191) NOT NULL,item_id VARCHAR(191) NOT NULL,xianyu_sku_id VARCHAR(191) NOT NULL DEFAULT '',source_goods_id VARCHAR(191) NOT NULL,source_sku_id VARCHAR(191) NOT NULL,xianyu_properties_json LONGTEXT NOT NULL,mapping_source VARCHAR(32) NOT NULL DEFAULT 'manual',created_at BIGINT NOT NULL,updated_at BIGINT NOT NULL,UNIQUE KEY uq_item_pdd_mapping(user_id,cookie_id,item_id,xianyu_sku_id),KEY idx_item_pdd_mapping_item(user_id,cookie_id,item_id),CONSTRAINT fk_item_pdd_mapping_user FOREIGN KEY(user_id) REFERENCES users(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE item_pdd_sku_mapping_audits (id VARCHAR(64) PRIMARY KEY,user_id BIGINT NOT NULL,cookie_id VARCHAR(191) NOT NULL,item_id VARCHAR(191) NOT NULL,xianyu_sku_id VARCHAR(191) NOT NULL DEFAULT '',action VARCHAR(32) NOT NULL,old_mapping_json LONGTEXT NOT NULL,new_mapping_json LONGTEXT NOT NULL,created_at BIGINT NOT NULL,KEY idx_item_pdd_mapping_audit_item(user_id,cookie_id,item_id,created_at),CONSTRAINT fk_item_pdd_mapping_audit_user FOREIGN KEY(user_id) REFERENCES users(id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+-- +goose Down
+DROP TABLE IF EXISTS item_pdd_sku_mapping_audits;
+DROP TABLE IF EXISTS item_pdd_sku_mappings;

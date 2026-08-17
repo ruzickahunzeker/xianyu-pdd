@@ -19,7 +19,13 @@ import {
   retryFailedItemPublishBatch,
   updateItem,
   deleteItem,
-  getShippingRules
+  getShippingRules,
+  getPDDProducts,
+  getPDDProduct,
+  saveItemPDDMapping,
+  deleteItemPDDMapping,
+  PDDProductSummary,
+  PDDProductDetail
 } from '../services/api';
 import { ArrowRight, Box, CheckCircle2, CircleDashed, Edit, Eye, Filter, Link2, PackagePlus, Plus, RefreshCw, Save, Search, ShoppingBag, Trash2, UploadCloud, User, X } from 'lucide-react';
 
@@ -120,6 +126,15 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
   const [selectedItem, setSelectedItem] = useState<Item | null>(null);
   const [detailItem, setDetailItem] = useState<Item | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [mappingTargetSKU, setMappingTargetSKU] = useState<string | null>(null);
+  const [mappingProducts, setMappingProducts] = useState<PDDProductSummary[]>([]);
+  const [mappingProduct, setMappingProduct] = useState<PDDProductDetail | null>(null);
+  const [mappingGoodsID, setMappingGoodsID] = useState('');
+  const [mappingSKUID, setMappingSKUID] = useState('');
+  const [mappingSearch, setMappingSearch] = useState('');
+  const [mappingSaving, setMappingSaving] = useState(false);
+  const [mappingProductsLoading, setMappingProductsLoading] = useState(false);
+  const [mappingProductsError, setMappingProductsError] = useState('');
   const [editForm, setEditForm] = useState<Partial<Item>>({});
   const [addForm, setAddForm] = useState({
     cookie_id: '',
@@ -230,6 +245,37 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
     try { setDetailItem(await getItem(item.cookie_id, item.item_id)); }
     catch (error:any) { alert(error?.message || '读取商品详情失败'); setDetailItem(null); }
     finally { setDetailLoading(false); }
+  };
+
+  const reloadDetail = async () => {
+    if (!detailItem) return;
+    const fresh = await getItem(detailItem.cookie_id, detailItem.item_id);
+    setDetailItem(fresh);
+    await loadItems();
+  };
+
+  const openMapping = async (skuId: string) => {
+    setMappingTargetSKU(skuId); setMappingGoodsID(''); setMappingSKUID(''); setMappingProduct(null); setMappingSearch('');
+    setMappingProductsError(''); setMappingProductsLoading(true);
+    try { setMappingProducts(await getPDDProducts()); } catch (error:any) { setMappingProductsError(error?.message || '读取拼多多商品失败'); }
+    finally { setMappingProductsLoading(false); }
+  };
+
+  const selectMappingProduct = async (goodsId: string) => {
+    setMappingGoodsID(goodsId); setMappingSKUID('');
+    try { setMappingProduct(await getPDDProduct(goodsId)); } catch (error:any) { alert(error?.message || '读取拼多多 SKU 失败'); }
+  };
+
+  const saveMapping = async () => {
+    if (!detailItem || mappingTargetSKU === null || !mappingGoodsID || !mappingSKUID) return alert('请选择拼多多商品和 SKU');
+    setMappingSaving(true);
+    try { const result=await saveItemPDDMapping(detailItem.cookie_id,detailItem.item_id,{xianyu_sku_id:mappingTargetSKU,source_goods_id:mappingGoodsID,source_sku_id:mappingSKUID}); await reloadDetail(); setMappingTargetSKU(null); alert(`映射已保存，并重解析 ${result.reconciled_orders || 0} 个关联订单`); }
+    catch(error:any){alert(error?.message||'保存映射失败')} finally {setMappingSaving(false)}
+  };
+
+  const removeMapping = async (skuId:string) => {
+    if(!detailItem || !confirm('确认删除这条人工映射？不会删除闲鱼或拼多多商品。'))return;
+    try { await deleteItemPDDMapping(detailItem.cookie_id,detailItem.item_id,skuId); await reloadDetail(); } catch(error:any){alert(error?.message||'删除映射失败')}
   };
 
   const copyDetailToPublish = () => { if(!detailItem?.remote_detail)return; const d=detailItem.remote_detail; setPublishForm({...publishForm,cookie_id:detailItem.cookie_id,title:detailItem.item_title||'',description:d.description||detailItem.item_description||'',price:(d.min_price_cent/100).toFixed(2),quantity:String(d.total_quantity),skus:d.skus.map(s=>({price_cent:s.price_cent,quantity:s.quantity,properties:s.properties.map(p=>({name:p.propertyText||'',value:p.actualValueText||p.valueText||'',image_url:s.property_image_url||''}))})),images:[]});setDetailItem(null);setShowPublishModal(true); };
@@ -754,7 +800,8 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
                   ['价格区间', `¥${(detailItem.remote_detail.min_price_cent/100).toFixed(2)} - ¥${(detailItem.remote_detail.max_price_cent/100).toFixed(2)}`],
                   ['SKU 数量', String(detailItem.remote_detail.sku_count)], ['总库存', String(detailItem.remote_detail.total_quantity)], ['状态', detailItem.remote_detail.item_status_text || String(detailItem.remote_detail.item_status)]
                 ].map(([label,value])=><div key={label} className="rounded-xl bg-gray-50 p-3"><div className="text-[11px] text-gray-500">{label}</div><div className="mt-1 font-extrabold text-gray-900">{value}</div></div>)}</div>
-                <div className="overflow-x-auto rounded-xl border border-gray-200"><table className="min-w-[760px] w-full text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="px-4 py-3">SKU / 图片</th><th className="px-4 py-3">规格组合</th><th className="px-4 py-3">售价</th><th className="px-4 py-3">库存</th><th className="px-4 py-3">状态</th></tr></thead><tbody className="divide-y divide-gray-100">{detailItem.remote_detail.skus.map(sku=><tr key={sku.sku_id}><td className="px-4 py-3"><div className="flex items-center gap-2">{sku.property_image_url&&<img src={sku.property_image_url} className="w-10 h-10 rounded-lg object-cover" />}<code className="text-xs">{sku.sku_id}</code></div></td><td className="px-4 py-3 font-bold">{sku.properties.map(p=>`${p.propertyText}：${p.actualValueText||p.valueText}`).join(' / ')}</td><td className="px-4 py-3 font-extrabold text-rose-600">¥{(sku.price_cent/100).toFixed(2)}</td><td className="px-4 py-3 font-bold">{sku.quantity}</td><td className="px-4 py-3">{sku.enabled&&sku.status===0?'在售':'不可用'}</td></tr>)}</tbody></table></div>
+                <div className="flex items-center justify-between rounded-xl bg-blue-50 px-4 py-3"><div><div className="font-extrabold text-blue-950">拼多多 SKU 映射</div><div className="text-xs text-blue-700">已映射 {detailItem.pdd_mapping?.mapped || 0} / {detailItem.pdd_mapping?.total || detailItem.remote_detail.sku_count}</div></div><span className={`rounded-full px-3 py-1 text-xs font-bold ${detailItem.pdd_mapping?.status==='mapped'?'bg-emerald-100 text-emerald-700':'bg-amber-100 text-amber-700'}`}>{detailItem.pdd_mapping?.status==='mapped'?'映射完整':detailItem.pdd_mapping?.status==='partial'?'部分映射':'未映射'}</span></div>
+                <div className="overflow-x-auto rounded-xl border border-gray-200"><table className="min-w-[980px] w-full text-sm"><thead className="bg-gray-50 text-left text-xs text-gray-500"><tr><th className="px-4 py-3">闲鱼 SKU / 图片</th><th className="px-4 py-3">闲鱼规格</th><th className="px-4 py-3">售价 / 库存</th><th className="px-4 py-3">对应拼多多 SKU</th><th className="px-4 py-3">操作</th></tr></thead><tbody className="divide-y divide-gray-100">{detailItem.remote_detail.skus.map(sku=>{const mapping=detailItem.pdd_mapping?.rows?.find(row=>row.xianyu_sku_id===sku.sku_id);return <tr key={sku.sku_id}><td className="px-4 py-3"><div className="flex items-center gap-2">{sku.property_image_url&&<img src={sku.property_image_url} className="w-10 h-10 rounded-lg object-cover" />}<code className="text-xs">{sku.sku_id}</code></div></td><td className="px-4 py-3 font-bold">{sku.properties.map(p=>`${p.propertyText}：${p.actualValueText||p.valueText}`).join(' / ')}</td><td className="px-4 py-3"><b className="text-rose-600">¥{(sku.price_cent/100).toFixed(2)}</b><div className="text-xs text-gray-500">库存 {sku.quantity}</div></td><td className="px-4 py-3">{mapping?<div><div className="font-bold">{mapping.pdd_title||mapping.source_goods_id}</div><code className="text-xs">{mapping.source_goods_id} / {mapping.source_sku_id}</code><div className="text-xs text-gray-500">{mapping.pdd_specs?.map(p=>`${p.spec_key}:${p.raw_value}`).join(' / ')} · ¥{(mapping.pdd_price_cent/100).toFixed(2)} · 库存 {mapping.pdd_stock}</div></div>:<span className="text-amber-600">未绑定</span>}</td><td className="px-4 py-3"><div className="flex gap-2"><button onClick={()=>openMapping(sku.sku_id)} className="rounded-lg bg-blue-600 px-3 py-2 text-xs font-bold text-white">{mapping?'更换':'绑定'}</button>{mapping&&<button onClick={()=>removeMapping(sku.sku_id)} className="rounded-lg bg-gray-100 px-3 py-2 text-xs font-bold text-gray-600">删除</button>}</div></td></tr>})}</tbody></table></div>
                 <button onClick={copyDetailToPublish} className="w-full rounded-xl bg-emerald-500 px-4 py-3 font-extrabold text-white hover:bg-emerald-600">复制此商品及 SKU 到发布表单</button>
               </>}
             </div>
@@ -788,6 +835,16 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
           </div>
         </div>
       , document.body)}
+
+      {mappingTargetSKU !== null && detailItem && createPortal(
+        <div className="modal-overlay-centered" style={{zIndex:10000}}><div className="modal-container" style={{maxWidth:'760px'}}>
+          <div className="modal-header flex items-center justify-between"><div><h3 className="text-xl font-extrabold">绑定拼多多 SKU</h3><p className="mt-1 text-xs text-gray-500">闲鱼 SKU：{mappingTargetSKU || '默认单规格'}</p></div><button onClick={()=>setMappingTargetSKU(null)} className="p-2 rounded-xl hover:bg-gray-100"><X className="w-5 h-5" /></button></div>
+          <div className="modal-body space-y-4"><input value={mappingSearch} onChange={e=>setMappingSearch(e.target.value)} className="w-full ios-input rounded-xl px-4 py-3" placeholder="按拼多多标题或 goods_id 搜索" />
+            {mappingProductsError&&<div className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">{mappingProductsError}</div>}
+            <div className="max-h-48 overflow-auto rounded-xl border border-gray-200 divide-y">{mappingProductsLoading?<div className="p-6 text-center text-sm text-gray-500">正在加载采集商品…</div>:mappingProducts.filter(p=>!mappingSearch.trim()||p.title.toLowerCase().includes(mappingSearch.trim().toLowerCase())||p.goods_id.includes(mappingSearch.trim())).map(p=><button key={p.goods_id} onClick={()=>selectMappingProduct(p.goods_id)} className={`w-full p-3 text-left hover:bg-blue-50 ${mappingGoodsID===p.goods_id?'bg-blue-50':''}`}><div className="font-bold">{p.title}</div><div className="text-xs text-gray-500">goods_id {p.goods_id} · {p.sku_count} 个 SKU</div></button>)}</div>
+            {mappingProduct&&<div className="space-y-2"><div className="text-sm font-extrabold">选择真实采购 SKU</div><div className="max-h-64 overflow-auto space-y-2">{mappingProduct.skus.map(sku=><button key={sku.sku_id} onClick={()=>setMappingSKUID(sku.sku_id)} className={`w-full rounded-xl border p-3 text-left ${mappingSKUID===sku.sku_id?'border-blue-500 bg-blue-50':'border-gray-200'}`}><div className="font-bold">{sku.specs.map(s=>`${s.spec_key}：${s.raw_value}`).join(' / ')||'默认规格'}</div><div className="mt-1 text-xs text-gray-500">SKU {sku.sku_id} · ¥{(sku.price_cent/100).toFixed(2)} · 库存 {sku.stock} · {sku.is_onsale?'在售':'下架'}</div></button>)}</div></div>}
+          </div><div className="modal-footer"><button disabled={mappingSaving||!mappingSKUID} onClick={saveMapping} className="w-full ios-btn-primary rounded-xl px-6 py-3 font-bold disabled:opacity-50">{mappingSaving?'保存中…':'保存映射并重解析关联订单'}</button></div>
+        </div></div>,document.body)}
 
       {showAddModal && createPortal(
         <div className="modal-overlay-centered">

@@ -297,6 +297,33 @@ func TestReviewAutomationsDoNotRequireOrderDetail(t *testing.T) {
 	}
 }
 
+func TestOrderPaidWithoutAutomationRuleStillHydratesOrderDetail(t *testing.T) {
+	store, cleanup := newAutomationTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	calls := 0
+	center := New(store, testSenderProvider{sender: &testSender{}}, nil)
+	center.SetOrderDetailFetcher(testFetcher{calls: &calls, detail: &OrderDetail{
+		SpecName: "款式", SpecValue: "25*25cm【5条装】颜色随机",
+		Quantity: "1", Amount: "2.69", OrderStatus: "pending_ship",
+	}})
+
+	task := Task{
+		Source: "ws", AccountID: "cid", TriggerType: TriggerOrderPaid,
+		OrderID: "paid-without-rule", ItemID: "item-1", BuyerID: "buyer-1",
+	}
+	if err := center.HandleTask(ctx, task); err != nil {
+		t.Fatalf("HandleTask: %v", err)
+	}
+	order, err := store.Orders.Get(ctx, task.OrderID)
+	if err != nil {
+		t.Fatalf("Get order: %v", err)
+	}
+	if calls != 1 || order.SpecName != "款式" || order.SpecValue != "25*25cm【5条装】颜色随机" || order.Quantity != "1" || order.Amount != "2.69" || order.OrderStatus != "pending_ship" {
+		t.Fatalf("calls=%d order=%+v", calls, order)
+	}
+}
+
 func TestOrderPaidPreparationFailureIsPersistedAndRecovered(t *testing.T) {
 	store, cleanup := newAutomationTestStore(t)
 	defer cleanup()

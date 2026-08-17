@@ -11,6 +11,24 @@ type Specification = { name: string; supportImage: boolean; values: Array<{ valu
 
 const clone = <T,>(value: T): T => structuredClone(value);
 const money = (cents: number) => (cents / 100).toFixed(2);
+const PriceInput = ({ cents, onChange }: { cents: number; onChange: (cents: number) => void }) => {
+  const [text, setText] = useState(() => cents > 0 ? money(cents) : '');
+  const [editing, setEditing] = useState(false);
+  useEffect(() => { if (!editing) setText(cents > 0 ? money(cents) : ''); }, [cents, editing]);
+  return <input type="number" min="0.01" step="0.01" className="w-28 rounded-lg border p-2" value={text}
+    onFocus={() => setEditing(true)}
+    onChange={event => {
+      const next = event.target.value;
+      setText(next);
+      if (next === '') return onChange(0);
+      const value = Number(next);
+      if (Number.isFinite(value)) onChange(Math.round(value * 100));
+    }}
+    onBlur={() => {
+      setEditing(false);
+      if (cents > 0) setText(money(cents));
+    }}/>
+};
 const deriveSpecifications = (skus: ProductMaterialSKU[]): Specification[] => {
   const result: Specification[] = [];
   for (const sku of skus) for (const property of sku.properties) {
@@ -19,7 +37,8 @@ const deriveSpecifications = (skus: ProductMaterialSKU[]): Specification[] => {
     if (!specification.values.some(item => item.value === property.value)) specification.values.push({ value: property.value, image_url: property.image_url });
     if (property.image_url) specification.supportImage = true;
   }
-	const imageSpecificationIndex = result.findLastIndex(specification => specification.supportImage);
+	let imageSpecificationIndex = -1;
+	for (let index = result.length - 1; index >= 0; index--) if (result[index].supportImage) { imageSpecificationIndex = index; break; }
 	for (const [index, specification] of result.entries()) if (specification.supportImage && index !== imageSpecificationIndex) {
 		specification.supportImage = false;
 		specification.values = specification.values.map(value => ({ ...value, image_url: undefined }));
@@ -33,16 +52,30 @@ const generateSKUs = (specifications: Specification[], previous: ProductMaterial
   const previousByKey = new Map(previous.map(item => [skuKey(item.properties), item]));
   const sameShape = combinations.length === previous.length && previous.every(item => item.properties.length === specifications.length);
   return combinations.slice(0, 200).map((properties, index) => {
-    const matched = previousByKey.get(skuKey(properties)) || (sameShape ? previous[index] : undefined);
-    return matched ? { ...matched, properties } : { price_cent: previous[0]?.price_cent || 100, quantity: previous[0]?.quantity ?? 1, enabled: true, properties };
+    const projectedMatches = previous.filter(sku => properties.every(property => sku.properties.some(old => old.name === property.name && old.value === property.value)));
+    const matched = previousByKey.get(skuKey(properties)) || (projectedMatches.length === 1 ? projectedMatches[0] : undefined) || (sameShape ? previous[index] : undefined);
+    return matched ? { ...matched, properties } : { price_cent: previous[0]?.price_cent || 100, quantity: 0, enabled: true, properties };
   });
+};
+
+const upsertDescriptionSection = (description: string, title: string, lines: string[]) => {
+  const heading = `【${title}】`;
+  const section = `${heading}\n${lines.join('\n')}`;
+  const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`(?:\\n\\n)?${escaped}\\n[\\s\\S]*?(?=\\n\\n【|$)`);
+  const base = description.replace(pattern, '').trim();
+  return [base, section].filter(Boolean).join('\n\n').slice(0, 1500);
 };
 
 function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
   initial: ProductMaterial; mode: EditorMode; accounts: AccountDetail[];
   onClose: () => void; onSaved: () => Promise<void>;
 }) {
-  const [draft, setDraft] = useState(() => clone(initial));
+  const [draft, setDraft] = useState(() => {
+	const value = clone(initial);
+	if (value.source_type === 'pdd') value.skus = value.skus.map(sku => sku.source_sku_id ? sku : { ...sku, quantity: 0 });
+	return value;
+  });
   const [cookieID, setCookieID] = useState(accounts.find(account => account.enabled)?.id || '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -52,6 +85,7 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 	const [sourceDiff, setSourceDiff] = useState<{added:any[];changed:any[];removed:string[]}|null>(null);
 	const [combineGoodsID, setCombineGoodsID] = useState('');
 	const [combining, setCombining] = useState(false);
+	const [descriptionBusy, setDescriptionBusy] = useState(false);
   const [specifications, setSpecifications] = useState<Specification[]>(() => deriveSpecifications(initial.skus).map(item => ({ ...item, supportImage: item.name === initial.image_property_name, values: item.values.map(value => ({ ...value, image_url: item.name === initial.image_property_name ? value.image_url : undefined })) })));
   const dimensions = useMemo(() => specifications.map(item => item.name), [specifications]);
 	const sourceGoodsIDs = useMemo(() => Array.from(new Set(draft.skus.map(sku => sku.source_goods_id || (sku.source_sku_id ? draft.source_id : '')).filter(Boolean))), [draft.skus, draft.source_id]);
@@ -79,6 +113,43 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 	});
 	setSpecifications(next);
   };
+	const removeSpecification = (specIndex: number) => {
+		const remaining = specifications.filter((_, index) => index !== specIndex);
+		if (!remaining.length && draft.skus.length > 1) {
+			setError(`不能删除最后一个规格“${specifications[specIndex].name}”：当前仍有 ${draft.skus.length} 个 SKU，请先保留一个 SKU`);
+			return;
+		}
+		if (remaining.length) {
+			const projected = draft.skus.map(sku => skuKey(sku.properties.filter(property => remaining.some(spec => spec.name === property.name))));
+			if (new Set(projected).size !== projected.length) {
+				setError(`删除“${specifications[specIndex].name}”会合并多个不同来源 SKU，请先删除或调整冲突组合`);
+				return;
+			}
+		}
+		applySpecifications(remaining);
+		setError('');
+	};
+	const appendCollectedDetails = async () => {
+		setDescriptionBusy(true); setError('');
+		try {
+			const products = draft.source_type === 'pdd' ? await Promise.all(sourceGoodsIDs.map(getPDDProduct)) : [];
+			const attributeLines = products.flatMap(product => product.goods_property.map(property => `${products.length > 1 ? `[${product.goods_id}] ` : ''}${property.key}：${property.values.join('、')}`));
+			const propertyOrder: string[] = [];
+			const propertyValues = new Map<string, string[]>();
+			for (const sku of draft.skus) for (const property of (sku.source_properties?.length ? sku.source_properties : sku.properties)) {
+				if (!propertyValues.has(property.name)) { propertyValues.set(property.name, []); propertyOrder.push(property.name); }
+				const values = propertyValues.get(property.name)!;
+				if (property.value.trim() && !values.includes(property.value.trim())) values.push(property.value.trim());
+			}
+			const specificationLines = propertyOrder.map(name => `${name}：${propertyValues.get(name)!.join('、')}`);
+			let description = draft.description;
+			if (attributeLines.length) description = upsertDescriptionSection(description, '商品属性', attributeLines);
+			if (specificationLines.length) description = upsertDescriptionSection(description, '商品规格', specificationLines);
+			setDraft(current => ({ ...current, description }));
+			if (!attributeLines.length && !specificationLines.length) setError('当前素材没有可添加的采集属性或规格');
+		} catch (reason: any) { setError(reason?.message || '读取采集商品信息失败'); }
+		finally { setDescriptionBusy(false); }
+	};
 	const setImageSpecification = (specIndex: number, enabled: boolean) => {
 		const selectedName = specifications[specIndex].name;
 		const sourceImageByValue = new Map<string,string>();
@@ -113,7 +184,7 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 	const setAllStock = () => {
 		const quantity = Number(batchStock);
 		if (!Number.isInteger(quantity) || quantity < 0) return setError('库存必须是大于等于 0 的整数');
-		setDraft(current => ({ ...current, skus: current.skus.map(sku => ({ ...sku, quantity })) }));
+		setDraft(current => ({ ...current, skus: current.skus.map(sku => current.source_type === 'pdd' && !sku.source_sku_id ? { ...sku, quantity: 0 } : { ...sku, quantity }) }));
 		setError('');
 	};
   const setPropertyImage = (name: string, value: string, imageURL: string) => {
@@ -159,6 +230,15 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
     if (draft.skus.some(sku => sku.price_cent <= 0 || sku.quantity < 0 || !sku.properties.length)) return '请完善所有 SKU 的规格、价格和库存';
     const keys = draft.skus.map(sku => sku.properties.map(property => `${property.name}=${property.value}`).join('\0'));
     if (new Set(keys).size !== keys.length) return '存在重复的 SKU 规格组合';
+	const publishedSKUs = draft.skus.filter(sku => sku.enabled !== false);
+	if (publishedSKUs.length > 1) {
+		const values = new Map<string, Set<string>>();
+		for (const sku of publishedSKUs) for (const property of sku.properties) {
+			if (!values.has(property.name)) values.set(property.name, new Set());
+			values.get(property.name)!.add(property.value.trim());
+		}
+		for (const [name, set] of values) if (set.size < 2 || set.size > 150) return `规格“${name}”必须包含 2 到 150 个不同规格值，当前为 ${set.size} 个`;
+	}
     return '';
   };
   const save = async () => {
@@ -204,14 +284,15 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 	        <section className="rounded-2xl border bg-white p-5 shadow-sm"><h3 className="mb-4 font-black">基础信息</h3>
           <label className="mb-4 block text-sm font-bold">商品标题<input maxLength={60} className="mt-2 w-full rounded-xl border p-3 font-normal" value={draft.title} onChange={event => setDraft({ ...draft, title: event.target.value })}/></label>
           <label className="block text-sm font-bold">商品描述<textarea rows={7} maxLength={1500} className="mt-2 w-full rounded-xl border p-3 font-normal" value={draft.description} onChange={event => setDraft({ ...draft, description: event.target.value })}/></label>
+		  <div className="mt-3 flex items-center gap-3"><button type="button" disabled={descriptionBusy} className="rounded-lg border bg-white px-3 py-2 text-sm font-bold text-brand disabled:opacity-50" onClick={()=>void appendCollectedDetails()}>{descriptionBusy?'读取中…':'一键添加商品属性与规格'}</button><span className="text-xs text-slate-400">重复点击会更新对应区块，不会重复追加</span></div>
 	        </section>
 		{draft.source_type === 'pdd' && <section className="rounded-2xl border bg-white p-5 shadow-sm"><div><h3 className="font-black">组合采集商品</h3><p className="mt-1 text-xs text-slate-500">输入已采集的拼多多商品 ID，将它的 SKU 合并到当前素材；每个 SKU 保留独立的 goods_id + sku_id 映射。</p></div><div className="mt-4 flex gap-2"><input className="min-w-0 flex-1 rounded-xl border p-3" placeholder="拼多多 goods_id" value={combineGoodsID} onChange={event=>setCombineGoodsID(event.target.value)}/><button type="button" disabled={combining} className="rounded-xl bg-brand px-4 font-bold text-white disabled:opacity-50" onClick={()=>void combinePDDProduct()}>{combining?'读取中…':'合并商品'}</button></div><div className="mt-3 flex flex-wrap gap-2">{sourceGoodsIDs.map(goodsID=><span key={goodsID} className="flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1.5 text-xs"><span className="font-mono">{goodsID}</span>{sourceGoodsIDs.length>1&&<button type="button" title="从素材移除此来源及其 SKU" className="text-red-500" onClick={()=>removePDDSource(goodsID)}><X className="h-3 w-3"/></button>}</span>)}</div></section>}
 	        <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="mb-4 flex justify-between"><h3 className="font-black">商品规格</h3><span className="text-xs text-slate-400">最多添加 2 个规格类型</span></div>
-          <div className="space-y-3">{specifications.map((specification, specIndex) => <div key={specIndex} className="rounded-xl bg-slate-50 p-4"><div className="flex flex-wrap items-center gap-3"><select className="rounded-lg border bg-white p-2" value={['颜色','尺码','容量','数量','款式'].includes(specification.name) ? specification.name : '__custom'} onChange={event => { const name = event.target.value === '__custom' ? '' : event.target.value; applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, name } : item)); }}><option value="">请选择规格类型</option><option>颜色</option><option>尺码</option><option>容量</option><option>数量</option><option>款式</option><option value="__custom">自定义</option></select>{(!['颜色','尺码','容量','数量','款式'].includes(specification.name)) && <input className="w-32 rounded-lg border p-2" placeholder="规格名称" value={specification.name} onChange={event => applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, name: event.target.value } : item))}/>}<label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={specification.supportImage} onChange={event => setImageSpecification(specIndex, event.target.checked)}/>支持添加图片</label><button className="ml-auto text-red-500" onClick={() => applySpecifications(specifications.filter((_, index) => index !== specIndex))}><Trash2 className="h-4 w-4"/></button></div><div className="mt-3 flex flex-wrap gap-2">{specification.values.map((value, valueIndex) => <div key={valueIndex} className="flex items-center gap-1 rounded-lg border bg-white p-1"><input className="w-28 p-1.5" value={value.value} onChange={event => applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, values: item.values.map((entry, row) => row === valueIndex ? { ...entry, value: event.target.value } : entry) } : item))}/>{specification.supportImage && <label className="flex h-8 w-8 cursor-pointer items-center justify-center overflow-hidden rounded border">{value.image_url ? <img src={value.image_url} className="h-full w-full object-cover"/> : <ImagePlus className="h-4 w-4"/>}<input type="file" accept="image/*" className="hidden" onChange={async event => { const file = event.target.files?.[0]; if (!file) return; const result = await uploadMaterialImage(file); setPropertyImage(specification.name, value.value, result.url); }}/></label>}<button className="p-1 text-slate-400 hover:text-red-500" onClick={() => applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, values: item.values.filter((_, row) => row !== valueIndex) } : item))}><X className="h-3 w-3"/></button></div>)}<button className="rounded-lg border border-dashed px-3 py-2 text-sm text-slate-500" onClick={() => applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, values: [...item.values, { value: '' }] } : item))}>+ 输入规格值</button></div></div>)}{specifications.length < 2 && <button className="rounded-xl bg-slate-50 px-5 py-3 font-bold text-slate-600" onClick={() => applySpecifications([...specifications, { name: '', supportImage: false, values: [{ value: '' }] }])}><Plus className="mr-1 inline h-4 w-4"/>添加规格类型 ({specifications.length}/2)</button>}</div>
+          <div className="space-y-3">{specifications.map((specification, specIndex) => <div key={specIndex} className="rounded-xl bg-slate-50 p-4"><div className="flex flex-wrap items-center gap-3"><select className="rounded-lg border bg-white p-2" value={['颜色','尺码','容量','数量','款式'].includes(specification.name) ? specification.name : '__custom'} onChange={event => { const name = event.target.value === '__custom' ? '' : event.target.value; applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, name } : item)); }}><option value="">请选择规格类型</option><option>颜色</option><option>尺码</option><option>容量</option><option>数量</option><option>款式</option><option value="__custom">自定义</option></select>{(!['颜色','尺码','容量','数量','款式'].includes(specification.name)) && <input className="w-32 rounded-lg border p-2" placeholder="规格名称" value={specification.name} onChange={event => applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, name: event.target.value } : item))}/>}<label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={specification.supportImage} onChange={event => setImageSpecification(specIndex, event.target.checked)}/>支持添加图片</label><button className="ml-auto text-red-500" onClick={() => removeSpecification(specIndex)}><Trash2 className="h-4 w-4"/></button></div><div className="mt-3 flex flex-wrap gap-2">{specification.values.map((value, valueIndex) => <div key={valueIndex} className="flex items-center gap-1 rounded-lg border bg-white p-1"><input className="w-28 p-1.5" value={value.value} onChange={event => applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, values: item.values.map((entry, row) => row === valueIndex ? { ...entry, value: event.target.value } : entry) } : item))}/>{specification.supportImage && <label className="flex h-8 w-8 cursor-pointer items-center justify-center overflow-hidden rounded border">{value.image_url ? <img src={value.image_url} className="h-full w-full object-cover"/> : <ImagePlus className="h-4 w-4"/>}<input type="file" accept="image/*" className="hidden" onChange={async event => { const file = event.target.files?.[0]; if (!file) return; const result = await uploadMaterialImage(file); setPropertyImage(specification.name, value.value, result.url); }}/></label>}<button className="p-1 text-slate-400 hover:text-red-500" onClick={() => applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, values: item.values.filter((_, row) => row !== valueIndex) } : item))}><X className="h-3 w-3"/></button></div>)}<button className="rounded-lg border border-dashed px-3 py-2 text-sm text-slate-500" onClick={() => applySpecifications(specifications.map((item, index) => index === specIndex ? { ...item, values: [...item.values, { value: '' }] } : item))}>+ 输入规格值</button></div></div>)}{specifications.length < 2 && <button className="rounded-xl bg-slate-50 px-5 py-3 font-bold text-slate-600" onClick={() => applySpecifications([...specifications, { name: '', supportImage: false, values: [{ value: '' }] }])}><Plus className="mr-1 inline h-4 w-4"/>添加规格类型 ({specifications.length}/2)</button>}</div>
           <div className="my-4 flex justify-between"><h4 className="font-bold">SKU 价格与库存</h4><span className="text-xs text-slate-400">{draft.skus.length} 个组合</span></div>
 		  <div className="mb-4 flex flex-wrap gap-3 rounded-xl border bg-slate-50 p-3"><div className="flex items-center gap-2"><span className="text-sm font-bold">统一调价</span><input type="number" step="0.01" className="w-28 rounded-lg border bg-white p-2" placeholder="如 5 或 -5" value={priceAdjustment} onChange={event => setPriceAdjustment(event.target.value)}/><button type="button" className="rounded-lg bg-brand px-3 py-2 text-sm font-bold text-white" onClick={adjustAllPrices}>应用</button></div><div className="flex items-center gap-2"><span className="text-sm font-bold">统一库存</span><input type="number" min="0" step="1" className="w-28 rounded-lg border bg-white p-2" placeholder="如 100" value={batchStock} onChange={event => setBatchStock(event.target.value)}/><button type="button" className="rounded-lg border bg-white px-3 py-2 text-sm font-bold" onClick={setAllStock}>应用</button></div><p className="w-full text-xs text-slate-500">统一调价是在现有售价上加减：输入 5 表示 ¥10 → ¥15，输入 -5 表示 ¥10 → ¥5。</p></div>
           <div className="overflow-x-auto"><table className="w-full min-w-[720px] text-sm"><thead><tr>{dimensions.map(name => <th className="p-2 text-left" key={name}>{name}</th>)}<th className="p-2 text-left">售价（元）</th><th className="p-2 text-left">库存</th><th>操作</th></tr></thead>
-            <tbody>{draft.skus.map((sku, index) => <tr className="border-t" key={sku.source_sku_id || index}>{dimensions.map(name => { const property = sku.properties.find(item => item.name === name); return <td className="p-2" key={name}><input className="w-28 rounded-lg border p-2" value={property?.value || ''} onChange={event => patchSKU(index, { properties: sku.properties.map(item => item.name === name ? { ...item, value: event.target.value } : item) })}/></td>; })}<td className="p-2"><input type="number" min="0.01" step="0.01" className="w-28 rounded-lg border p-2" value={money(sku.price_cent)} onChange={event => patchSKU(index, { price_cent: Math.round(Number(event.target.value) * 100) })}/></td><td className="p-2"><input type="number" min="0" className="w-24 rounded-lg border p-2" value={sku.quantity} onChange={event => patchSKU(index, { quantity: Number(event.target.value) })}/></td><td className="p-2 text-center"><button disabled={draft.skus.length <= 1} title="删除 SKU" className="text-red-500 disabled:opacity-30" onClick={() => setDraft({ ...draft, skus: draft.skus.filter((_, row) => row !== index) })}><Trash2 className="h-4 w-4"/></button></td></tr>)}</tbody></table></div>
+            <tbody>{draft.skus.map((sku, index) => <tr className="border-t" key={sku.material_sku_id || `${sku.source_goods_id}-${sku.source_sku_id}` || index}>{dimensions.map(name => { const property = sku.properties.find(item => item.name === name); return <td className="p-2" key={name}><input className="w-28 rounded-lg border p-2" value={property?.value || ''} onChange={event => patchSKU(index, { properties: sku.properties.map(item => item.name === name ? { ...item, value: event.target.value } : item) })}/></td>; })}<td className="p-2"><PriceInput cents={sku.price_cent} onChange={price_cent => patchSKU(index, { price_cent })}/></td><td className="p-2"><input type="number" min="0" className="w-24 rounded-lg border p-2" value={sku.quantity} onChange={event => patchSKU(index, { quantity: Number(event.target.value) })}/></td><td className="p-2 text-center"><button disabled={draft.skus.length <= 1} title="删除 SKU" className="text-red-500 disabled:opacity-30" onClick={() => setDraft({ ...draft, skus: draft.skus.filter((_, row) => row !== index) })}><Trash2 className="h-4 w-4"/></button></td></tr>)}</tbody></table></div>
           <p className="mt-3 text-xs text-slate-500">每个组合可单独设置价格和库存；规格图片只在上方一个规格类型中维护。</p>
           <button className="mt-4 flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-bold" onClick={() => { const properties = dimensions.map(name => ({ name, value: '' })); setDraft({ ...draft, skus: [...draft.skus, { price_cent: draft.skus[0]?.price_cent || 100, quantity: 1, enabled: true, properties }] }); }}><Plus className="h-4 w-4"/>添加 SKU</button>
 		  <details className="mt-4 rounded-xl border bg-slate-50 p-3"><summary className="cursor-pointer font-bold">SKU 来源映射</summary><div className="mt-3 overflow-x-auto"><table className="w-full min-w-[900px] text-xs"><thead><tr><th className="p-2 text-left">本地 SKU</th><th className="p-2 text-left">拼多多商品</th><th className="p-2 text-left">拼多多 SKU</th><th className="p-2 text-left">原始规格</th><th className="p-2 text-left">发布规格</th><th className="p-2 text-left">来源图片</th></tr></thead><tbody>{draft.skus.map((sku,index)=><tr className="border-t" key={sku.material_sku_id||`${sku.source_goods_id}-${sku.source_sku_id}`||index}><td className="p-2 font-mono">{sku.material_sku_id||'保存后生成'}</td><td className="p-2 font-mono">{sku.source_goods_id||(sku.source_sku_id?draft.source_id:'手工')}</td><td className="p-2 font-mono">{sku.source_sku_id||'手工'}</td><td className="p-2">{(sku.source_properties||[]).map(p=>`${p.name}=${p.value}`).join(' / ')||'-'}</td><td className="p-2">{sku.properties.map(p=>`${p.name}=${p.value}`).join(' / ')}</td><td className="p-2">{sku.source_image_url?<img src={sku.source_image_url} className="h-10 w-10 rounded object-cover"/>:'-'}</td></tr>)}</tbody></table></div></details>

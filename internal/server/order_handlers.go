@@ -34,6 +34,7 @@ func (s *Server) mountOrdersReal(r chi.Router) {
 	r.Get("/api/orders", s.listOrders)
 	r.Get("/api/orders/{order_id}", s.getOrder)
 	r.Post("/api/orders/refresh", s.refreshOrders)
+	r.Get("/api/orders/sync-status", s.orderSyncStatus)
 	r.Post("/api/orders/{order_id}/refresh", s.refreshSingleOrder)
 	r.Post("/api/orders/manual-ship", s.manualShipOrders)
 	r.Post("/api/orders/import", s.importOrders)
@@ -171,18 +172,23 @@ func (s *Server) getOrder(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 	sess := auth.SessionFromContext(r.Context())
-	all, err := s.Store.Cookies.AllForUser(r.Context(), sess.UserID)
+	result, statusCode, err := s.executeOrderSync(r.Context(), sess.UserID, "manual", r.FormValue("cookie_id"), r.FormValue("status"))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "查询账号失败")
+		writeErr(w, statusCode, err.Error())
 		return
 	}
-	cookieID := r.FormValue("cookie_id")
-	status := r.FormValue("status")
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) runOrderRefresh(ctx context.Context, userID int64, cookieID, status string) (map[string]any, int, error) {
+	all, err := s.Store.Cookies.AllForUser(ctx, userID)
+	if err != nil {
+		return nil, http.StatusInternalServerError, errors.New("查询账号失败")
+	}
 	if cookieID != "" {
 		value, ok := all[cookieID]
 		if !ok {
-			writeErr(w, http.StatusForbidden, "Cookie不存在或无权访问")
-			return
+			return nil, http.StatusForbidden, errors.New("Cookie不存在或无权访问")
 		}
 		all = map[string]string{cookieID: value}
 	}
@@ -193,8 +199,8 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 	if fetcher, ok := s.mtopClient().(mtop.SoldOrderFetcher); ok {
 		for cid := range all {
 			credentialUnlock := s.Store.LockAccountCredentials(cid)
-			latest, latestErr := s.Store.Cookies.GetDetails(r.Context(), cid)
-			if latestErr != nil || latest == nil || latest.UserID != sess.UserID || !hasStoredCookieCredential(latest) {
+			latest, latestErr := s.Store.Cookies.GetDetails(ctx, cid)
+			if latestErr != nil || latest == nil || latest.UserID != userID || !hasStoredCookieCredential(latest) {
 				credentialUnlock()
 				if latestErr == nil {
 					latestErr = errors.New("账号凭证已变化")
@@ -206,9 +212,9 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			all[cid] = latest.Value
-			mtopCtx, cookieSession := withMTopCookieSnapshot(r.Context(), latest)
+			mtopCtx, cookieSession := withMTopCookieSnapshot(ctx, latest)
 			accountDiscovered, accountUpdated, accountNewIDs, accountRemoteIDs, discoveryErr := s.discoverSoldOrders(mtopCtx, fetcher, cid, latest.Value)
-			value, valueChanged, _, persistErr := s.persistMTopCookieSessionLocked(r.Context(), latest, cookieSession)
+			value, valueChanged, _, persistErr := s.persistMTopCookieSessionLocked(ctx, latest, cookieSession)
 			if persistErr != nil {
 				discoveryErr = errors.Join(discoveryErr, fmt.Errorf("保存订单列表响应 Cookie Jar: %w", persistErr))
 			} else if valueChanged {
@@ -216,7 +222,7 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 			}
 			credentialUnlock()
 			if persistErr == nil && valueChanged {
-				s.updateRunningCookie(r.Context(), cid, value)
+				s.updateRunningCookie(ctx, cid, value)
 			}
 			discovered += accountDiscovered
 			listUpdated += accountUpdated
@@ -228,7 +234,7 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 				"discovered": accountDiscovered, "updated": accountUpdated,
 			}
 			if discoveryErr == nil {
-				deleted, deleteErr := s.Store.Orders.SoftDeleteMissingForCookie(r.Context(), cid, accountRemoteIDs)
+				deleted, deleteErr := s.Store.Orders.SoftDeleteMissingForCookie(ctx, cid, accountRemoteIDs)
 				if deleteErr != nil {
 					discoveryErr = fmt.Errorf("标记缺失订单失败: %w", deleteErr)
 					result["success"] = false
@@ -251,7 +257,7 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 	ordersByCookie := map[string][]refreshTarget{}
 	for cid := range all {
 		for offset := 0; ; offset += 500 {
-			rows, err := s.Store.Orders.ByCookiePage(r.Context(), cid, 500, offset)
+			rows, err := s.Store.Orders.ByCookiePage(ctx, cid, 500, offset)
 			if err != nil {
 				break
 			}
@@ -286,7 +292,7 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 		if total > 0 {
 			message += fmt.Sprintf("；当前 Go MTOP 客户端不支持详情接口，已跳过 %d 个订单", total)
 		}
-		writeJSON(w, http.StatusOK, map[string]any{
+		return map[string]any{
 			"success": failed == 0,
 			"message": message,
 			"summary": map[string]int{
@@ -294,11 +300,10 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 				"total": total, "updated": 0, "no_change": 0, "failed": failed,
 			},
 			"results": results,
-		})
-		return
+		}, http.StatusOK, nil
 	}
 	if total == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{
+		return map[string]any{
 			"success": failed == 0,
 			"message": fmt.Sprintf("订单列表同步完成，发现 %d 个新订单；没有需要补全详情的订单", discovered),
 			"summary": map[string]int{
@@ -306,23 +311,22 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 				"total": 0, "updated": 0, "no_change": 0, "failed": failed,
 			},
 			"results": results,
-		})
-		return
+		}, http.StatusOK, nil
 	}
 
 	updated, noChange := 0, 0
 	for cid, targets := range ordersByCookie {
 		for _, chunk := range chunkRefreshTargets(targets, refreshOrderChunkSize) {
 			credentialUnlock := s.Store.LockAccountCredentials(cid)
-			latest, latestErr := s.Store.Cookies.GetDetails(r.Context(), cid)
-			if latestErr != nil || latest == nil || latest.UserID != sess.UserID || !hasStoredCookieCredential(latest) {
+			latest, latestErr := s.Store.Cookies.GetDetails(ctx, cid)
+			if latestErr != nil || latest == nil || latest.UserID != userID || !hasStoredCookieCredential(latest) {
 				credentialUnlock()
 				failed += len(chunk)
 				results = append(results, map[string]any{"cookie_id": cid, "success": false, "error": "账号凭证已变化"})
 				continue
 			}
-			ctx, cancel := context.WithTimeout(r.Context(), 3*time.Minute)
-			mtopCtx, cookieSession := withMTopCookieSnapshot(ctx, latest)
+			detailCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+			mtopCtx, cookieSession := withMTopCookieSnapshot(detailCtx, latest)
 			for _, target := range chunk {
 				detail, fetchErr := detailFetcher.FetchOrderDetail(mtopCtx, latest.Value, target.OrderID)
 				if fetchErr != nil || detail == nil {
@@ -342,7 +346,7 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 				if !validEditableOrderStatus(newStatus) {
 					newStatus = target.CurrentStatus
 				}
-				err := s.Store.Orders.Upsert(r.Context(), target.OrderID, db.OrderUpsertOpts{
+				err := s.Store.Orders.Upsert(ctx, target.OrderID, db.OrderUpsertOpts{
 					CookieID:    cid,
 					OrderStatus: newStatus,
 					SpecName:    detail.SpecName,
@@ -369,17 +373,17 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 				})
 			}
 			cancel()
-			value, valueChanged, _, persistErr := s.persistMTopCookieSessionLocked(r.Context(), latest, cookieSession)
+			value, valueChanged, _, persistErr := s.persistMTopCookieSessionLocked(ctx, latest, cookieSession)
 			credentialUnlock()
 			if persistErr != nil {
 				failed++
 				results = append(results, map[string]any{"cookie_id": cid, "stage": "persist_cookie", "success": false, "error": persistErr.Error()})
 			} else if valueChanged {
-				s.updateRunningCookie(r.Context(), cid, value)
+				s.updateRunningCookie(ctx, cid, value)
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"success": failed == 0,
 		"message": fmt.Sprintf("订单同步完成，发现 %d 个新订单", discovered),
 		"summary": map[string]int{
@@ -387,7 +391,7 @@ func (s *Server) refreshOrders(w http.ResponseWriter, r *http.Request) {
 			"total": total, "updated": updated, "no_change": noChange, "failed": failed,
 		},
 		"results": results,
-	})
+	}, http.StatusOK, nil
 }
 
 func (s *Server) discoverSoldOrders(ctx context.Context, fetcher mtop.SoldOrderFetcher, cookieID, cookies string) (int, int, map[string]struct{}, map[string]struct{}, error) {

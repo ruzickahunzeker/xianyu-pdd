@@ -588,6 +588,7 @@ func validatePublishSKUs(skus []PublishSKU) error {
 	seen := map[string]bool{}
 	dimensions := []string{}
 	imagePropertyNames := map[string]bool{}
+	propertyValues := map[string]map[string]bool{}
 	for idx, sku := range skus {
 		if sku.PriceCents <= 0 || sku.Quantity < 0 || sku.Quantity > 999999 || len(sku.Properties) == 0 {
 			return fmt.Errorf("第 %d 个 SKU 售价、库存或规格无效", idx+1)
@@ -603,6 +604,10 @@ func validatePublishSKUs(skus []PublishSKU) error {
 			if p.Image != nil || strings.TrimSpace(p.ImageURL) != "" {
 				imagePropertyNames[p.Name] = true
 			}
+			if propertyValues[p.Name] == nil {
+				propertyValues[p.Name] = map[string]bool{}
+			}
+			propertyValues[p.Name][p.Value] = true
 			names[p.Name] = true
 			parts = append(parts, p.Name+"="+p.Value)
 		}
@@ -627,6 +632,11 @@ func validatePublishSKUs(skus []PublishSKU) error {
 	}
 	if len(imagePropertyNames) > 1 {
 		return errors.New("多规格商品只允许一个规格类型上传图片")
+	}
+	for name, values := range propertyValues {
+		if len(values) < 2 || len(values) > 150 {
+			return fmt.Errorf("规格“%s”必须包含 2 到 150 个不同规格值，当前为 %d 个", name, len(values))
+		}
 	}
 	return nil
 }

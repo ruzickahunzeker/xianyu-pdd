@@ -24,6 +24,8 @@ import (
 	"xianyu-go/internal/chat"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/notify"
+	"xianyu-go/internal/pddaddress"
+	"xianyu-go/internal/pddproduct"
 	"xianyu-go/internal/webui"
 	"xianyu-go/internal/xianyu/mtop"
 	"xianyu-go/internal/xianyu/qrlogin"
@@ -56,18 +58,20 @@ type publishBatchWorker struct {
 // Server 聚合 HTTP 服务依赖。Automation 与 Notifier 由构造函数注入，
 // 不再允许外部直接改字段，避免运行时被替换成 nil。
 type Server struct {
-	Store       *db.Store
-	Auth        *auth.Service
-	Manager     *account.Manager
-	automation  *automation.Center
-	notifier    *notify.Notifier
-	chat        *chat.Service
-	MTop        mtop.Client
-	CookieRenew xrenew.Service
-	QRLogin     qrLoginService
-	Logger      *slog.Logger
-	WebDir      string // 前端静态资源目录（含 index.html）
-	Addr        string
+	Store             *db.Store
+	Auth              *auth.Service
+	Manager           *account.Manager
+	automation        *automation.Center
+	notifier          *notify.Notifier
+	chat              *chat.Service
+	MTop              mtop.Client
+	CookieRenew       xrenew.Service
+	QRLogin           qrLoginService
+	Logger            *slog.Logger
+	WebDir            string // 前端静态资源目录（含 index.html）
+	Addr              string
+	PDDAddressUpdater pddaddress.Updater
+	PDDProductFetch   func(context.Context, *db.PDDAccount, string) (pddproduct.Snapshot, error)
 
 	publishMu      sync.Mutex
 	publishCancels map[string]publishBatchWorker
@@ -86,6 +90,10 @@ type Server struct {
 	qrPersistLocks   sync.Map
 	loginLimiter     *loginFailureLimiter
 	initializationMu sync.Mutex
+	orderSyncMu      sync.Mutex
+	orderSyncRunning map[int64]bool
+	purchaseMu       sync.Mutex
+	collectorMu      sync.Mutex
 }
 
 // SetChatService installs the shared chat persistence and live event hub.
@@ -111,12 +119,13 @@ func New(store *db.Store, manager *account.Manager, secure bool, webDir, addr st
 		WebDir:      webDir,
 		Addr:        addr,
 
-		publishCancels: make(map[string]publishBatchWorker),
-		workersDone:    closedSignal(),
-		lifecycleCtx:   context.Background(),
-		qrPersisted:    make(map[string]qrLoginPersistence),
-		qrOwners:       make(map[string]qrLoginOwner),
-		loginLimiter:   newLoginFailureLimiter(),
+		publishCancels:   make(map[string]publishBatchWorker),
+		workersDone:      closedSignal(),
+		lifecycleCtx:     context.Background(),
+		qrPersisted:      make(map[string]qrLoginPersistence),
+		qrOwners:         make(map[string]qrLoginOwner),
+		loginLimiter:     newLoginFailureLimiter(),
+		orderSyncRunning: make(map[int64]bool),
 	}
 }
 
@@ -140,6 +149,11 @@ func (s *Server) Router() http.Handler {
 	r.Get("/health", s.health)
 
 	s.mountPDDCollectorPublic(r)
+	r.Group(func(r chi.Router) {
+		r.Use(s.Auth.Middleware)
+		r.Use(s.fulfillmentAccessMiddleware)
+		s.mountFulfillment(r)
+	})
 
 	// 认证组（无需登录的端点，但解析会话以判断登录态）。
 	r.Group(func(r chi.Router) {
@@ -169,6 +183,7 @@ func (s *Server) Router() http.Handler {
 		s.mountPasswordLogin(r)
 		// 订单
 		s.mountOrdersReal(r)
+		s.mountFulfillmentKeyAdmin(r)
 		// 订单分析（仪表盘）
 		s.mountAnalyticsReal(r)
 		// 卡密 + 发货规则
@@ -197,6 +212,7 @@ func (s *Server) Router() http.Handler {
 			r.Use(auth.RequireAdmin)
 			s.mountAdminReal(r)
 			s.mountPDDCollectorAdmin(r)
+			s.mountPDDAccountAdmin(r)
 		})
 	})
 

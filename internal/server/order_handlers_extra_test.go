@@ -59,6 +59,14 @@ func TestRefreshOrdersDiscoversNewOrdersWithoutBrowser(t *testing.T) {
 		order.Amount != "19.90" || order.Quantity != "2" || order.IsBargain != 1 || order.ReceiverName != "张三" {
 		t.Fatalf("discovered order=%+v", order)
 	}
+	var trigger, runStatus string
+	var discovered, fulfillmentUpdated int
+	if err := store.DB.QueryRowContext(context.Background(), `SELECT trigger_type,status,discovered,fulfillment_updated FROM order_sync_runs ORDER BY id DESC LIMIT 1`).Scan(&trigger, &runStatus, &discovered, &fulfillmentUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if trigger != "manual" || runStatus != "success" || discovered != 1 || fulfillmentUpdated != 1 {
+		t.Fatalf("sync run trigger=%q status=%q discovered=%d fulfillment_updated=%d", trigger, runStatus, discovered, fulfillmentUpdated)
+	}
 }
 
 func TestRefreshOrdersSoftDeletesOrdersMissingFromSellerList(t *testing.T) {

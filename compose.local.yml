@@ -1,0 +1,43 @@
+services:
+  app:
+    image: xianyu-pdd:local
+    pull_policy: never
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile.debian13
+    command: ["/app/xianyu-server", "-addr", ":59188", "-ensure-admin"]
+    env_file:
+      - .env
+    environment:
+      XIANYU_ITEM_SYNC_CAPTURE_DIR: /app/data/sync-captures
+      XIANYU_ITEM_SYNC_CAPTURE_ITEM_ID: "1073844478604"
+    ports:
+      - "127.0.0.1:59188:59188"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:59188/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 45
+      start_period: 5s
+    volumes:
+      - ./data:/app/data
+  pdd-worker:
+    profiles: ["pdd-worker"]
+    image: xianyu-pdd:local
+    pull_policy: never
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    command: ["/app/pdd-worker"]
+    env_file:
+      - .env
+    environment:
+      FULFILLMENT_API_URL: http://app:59188
+      DATABASE_URL: ${DATABASE_URL:-/app/data/xianyu_data.db}
+      PDD_PURCHASE_SUBMIT: ${PDD_PURCHASE_SUBMIT:-false}
+      PDD_HEADLESS: ${PDD_HEADLESS:-true}
+      PDD_SCREENSHOT_DIR: /app/data/pdd-screenshots
+    volumes:
+      - ./data:/app/data

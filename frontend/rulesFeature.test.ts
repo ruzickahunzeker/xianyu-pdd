@@ -26,3 +26,16 @@ describe('rules summary counts', () => {
     expect(api).toContain('trigger_counts');
   });
 });
+
+describe('automation creation account selection', () => {
+  test('opens the automation editor from the all-accounts view', () => {
+    const rules = source('components/Rules.tsx');
+    const openNew = rules.match(/const openNewAutomationRule[\s\S]*?\n  };/)?.[0] || '';
+
+    expect(openNew).toContain('accounts.length === 0');
+    expect(openNew).not.toContain('!selectedAccountId');
+    expect(openNew).toContain('setShowAutomationModal(true)');
+    expect(rules).toContain("disabled={accounts.length === 0 || (activeTab !== 'automation' && !selectedAccountId)}");
+    expect(rules).toContain('<option value="">选择账号</option>');
+  });
+});

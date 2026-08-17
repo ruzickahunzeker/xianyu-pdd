@@ -113,11 +113,15 @@ function normalizeSKU(sku, fallbackGoodsID) {
     ...asString(sku?.spec).split(",")
   ]);
 
+  const stock = asNumber(firstValue(sku, ["quantity", "stock", "initQuantity"]));
+  const limitQuantity = asNumber(firstValue(sku, ["limitQuantity", "limit_quantity"]));
+  const stockExact = !(stock >= 1000 && limitQuantity > stock);
   return {
     sku_id: skuID,
     goods_id: goodsID,
     thumb_url: asString(firstValue(sku, ["thumbUrl", "thumbURL", "thumb_url"])),
-    stock: asNumber(firstValue(sku, ["quantity", "stock", "initQuantity"])),
+    stock,
+    stock_exact: stockExact,
     is_onsale: asNumber(firstValue(sku, ["isOnsale", "is_onsale"]), 1) === 1,
     prices: {
       group_price: firstValue(sku, ["groupPrice", "group_price"]) ?? null,
@@ -170,7 +174,42 @@ export function collectMallSN(store) {
   return match ?? { value: "", path: "" };
 }
 
-export function collectPDDProduct(rawDataOverride) {
+export function isPDDAddressPage(pageURL) {
+  try {
+    const parsed = new URL(asString(pageURL));
+    return parsed.protocol === "https:"
+      && parsed.hostname === "mobile.pinduoduo.com"
+      && parsed.pathname === "/addresses.html";
+  } catch {
+    return false;
+  }
+}
+
+export function collectDefaultAddressID(rawData) {
+  const addressList = rawData?.store?.addressList;
+  if (!Array.isArray(addressList)) {
+    throw new Error("ADDRESS_DATA_MISSING: 页面中未找到地址列表，请等待地址页加载完成后重试");
+  }
+
+  const defaults = addressList.filter((address) => {
+    const value = address?.isDefault;
+    return value === "1" || value === 1 || value === true;
+  });
+  if (defaults.length === 0) {
+    throw new Error("DEFAULT_ADDRESS_MISSING: 未找到默认收货地址，请先在拼多多设置一个默认地址");
+  }
+  if (defaults.length > 1) {
+    throw new Error("DEFAULT_ADDRESS_AMBIGUOUS: 页面返回了多个默认收货地址，请刷新页面后重试");
+  }
+
+  const addressID = asString(defaults[0]?.addressId);
+  if (!/^\d+$/.test(addressID)) {
+    throw new Error("DEFAULT_ADDRESS_ID_INVALID: 默认收货地址缺少有效的地址 ID");
+  }
+  return addressID;
+}
+
+export function collectPDDProduct(rawDataOverride, pageURL = globalThis.location?.href || "") {
   const rawData = rawDataOverride ?? globalThis.rawData;
   const store = rawData?.store;
   if (!store) {
@@ -211,7 +250,7 @@ export function collectPDDProduct(rawDataOverride) {
     goods_property_source_path: propertyResult.path,
     mall_sn_source_path: mallSN.path,
     collected_at: new Date().toISOString(),
-    final_url: location.href,
+    final_url: asString(pageURL),
     goods: {
       goods_id: goodsID,
       mall_sn: mallSN.value,

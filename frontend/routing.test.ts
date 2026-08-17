@@ -53,6 +53,26 @@ describe('frontend navigation routing', () => {
     expect(settings).toContain('保存后需重启服务生效');
   });
 
+  test('settings exposes fulfillment API key management', () => {
+    const settings = readFrontendFile('components/Settings.tsx');
+    const manager = readFrontendFile('components/FulfillmentKeyManager.tsx');
+    expect(settings).toContain('FulfillmentKeyManager');
+    expect(manager).toContain('履约密钥管理');
+    expect(manager).toContain('最近使用');
+    expect(manager).toContain('revokeFulfillmentAPIKey');
+  });
+
+  test('admin navigation exposes the fulfillment workbench', () => {
+    const app = readFrontendFile('App.tsx');
+    const sidebar = readFrontendFile('components/Sidebar.tsx');
+    const workbench = readFrontendFile('components/FulfillmentWorkbench.tsx');
+    expect(app).toContain("'/app/fulfillment': 'fulfillment'");
+    expect(app).toContain('isAdmin ? <FulfillmentWorkbench /> : <Dashboard />');
+    expect(sidebar).toContain("id: 'fulfillment'");
+    expect(workbench).toContain('订单履约工作台');
+    expect(workbench).toContain('updateFulfillmentOrder');
+  });
+
   test('admin-only settings navigation is gated by session role', () => {
     const app = readFrontendFile('App.tsx');
     const sidebar = readFrontendFile('components/Sidebar.tsx');

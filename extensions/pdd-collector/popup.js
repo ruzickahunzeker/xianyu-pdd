@@ -12,6 +12,7 @@ const elements = {
   title: document.querySelector("#title"),
   skuCount: document.querySelector("#sku-count")
 };
+let accountPayload = null;
 
 function status(text, kind = "") {
   elements.status.textContent = text;
@@ -32,7 +33,11 @@ function showPayload(data) {
 
 async function call(message) {
   const response = await chrome.runtime.sendMessage(message);
-  if (!response?.ok) throw new Error(response?.error || "扩展后台无响应");
+  if (!response?.ok) {
+    const error = new Error(response?.error || "扩展后台无响应");
+    error.code = response?.code || "";
+    throw error;
+  }
   return response.data;
 }
 
@@ -61,8 +66,9 @@ elements.upload.addEventListener("click", async () => {
   elements.upload.disabled = true;
   status("正在上传服务端…");
   try {
-    await call({ type: "UPLOAD", payload });
-    status("上传成功", "success");
+    const result = await call({ type: "UPLOAD", payload });
+    const stock = Number(result?.material_stock_updates || 0);
+    status(`上传/更新成功：${Number(result?.sku_count || payload.skus.length)} 个 SKU${stock ? `，同步 ${stock} 个素材库存` : ""}`, "success");
   } catch (error) {
     status(error.message, "error");
   } finally {
@@ -71,6 +77,35 @@ elements.upload.addEventListener("click", async () => {
 });
 
 document.querySelector("#open-options").addEventListener("click", () => chrome.runtime.openOptionsPage());
+
+document.querySelector("#capture-account").addEventListener("click", async () => {
+  const button = document.querySelector("#capture-account");
+  const addressButton = document.querySelector("#open-address-page");
+  button.disabled = true; addressButton.classList.add("hidden"); status("正在读取拼多多账号配置…");
+  try {
+    const data = await call({ type: "CAPTURE_ACCOUNT" }); accountPayload = data;
+    document.querySelector("#pdd-uid").textContent = data.pdd_uid;
+    document.querySelector("#pdd-address-id").textContent = data.default_address_id || "当前页面未找到";
+    document.querySelector("#pdd-cookie").textContent = data.cookie_masked;
+    document.querySelector("#account-summary").classList.remove("hidden");
+    document.querySelector("#copy-account").disabled = false;
+    status("账号配置读取成功", "success");
+  } catch (error) {
+    if (error.code === "ADDRESS_PAGE_REQUIRED") addressButton.classList.remove("hidden");
+    status(error.message, "error");
+  } finally { button.disabled = false; }
+});
+document.querySelector("#open-address-page").addEventListener("click", async () => {
+  try {
+    await call({ type: "OPEN_ADDRESS_PAGE" });
+    window.close();
+  } catch (error) { status(error.message, "error"); }
+});
+document.querySelector("#copy-account").addEventListener("click", async () => {
+  if (!accountPayload) return;
+  const { cookie_masked: _, ...data } = accountPayload;
+  await navigator.clipboard.writeText(JSON.stringify(data, null, 2)); status("账号配置已复制，请妥善保管 Cookie", "success");
+});
 
 const { lastCollection } = await chrome.storage.local.get("lastCollection");
 if (lastCollection) showPayload(lastCollection);

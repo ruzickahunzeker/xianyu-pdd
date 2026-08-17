@@ -60,6 +60,24 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"notification_outbox", "worker_token"},
 		{"material_publish_sku_mappings", "source_goods_id"},
 		{"pdd_products", "mall_sn"},
+		{"order_fulfillments", "pdd_ordered"},
+		{"order_fulfillments", "pdd_paid"},
+		{"order_fulfillments", "pdd_paid_source"},
+		{"order_fulfillments", "address_match_status"},
+		{"order_fulfillments", "history_repaired_at"},
+		{"order_fulfillments", "manual_modified_at"},
+		{"item_pdd_sku_mappings", "source_sku_id"},
+		{"fulfillment_api_keys", "token_hash"},
+		{"order_sync_runs", "trigger_type"},
+		{"pdd_address_operations", "idempotency_key"},
+		{"pdd_address_operations", "pdd_account_id"},
+		{"pdd_accounts", "cookie_encrypted"},
+		{"order_fulfillments", "pdd_account_id"},
+		{"pdd_account_locks", "expires_at"},
+		{"pdd_purchase_goods_snapshots", "snapshot_json"},
+		{"pdd_purchase_tasks", "lease_token"},
+		{"pdd_purchase_tasks", "pdd_order_json"},
+		{"fulfillment_exception_events", "notification_status"},
 	}
 	for _, c := range checks {
 		if !columnExists(t, db, c.table, c.col) {
@@ -84,6 +102,10 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 	err = db.QueryRow(`SELECT value FROM system_settings WHERE key='renewal_log_retention_days'`).Scan(&val)
 	if err != nil || val != "10" {
 		t.Errorf("renewal_log_retention_days 默认设置异常: val=%q err=%v", val, err)
+	}
+	err = db.QueryRow(`SELECT value FROM system_settings WHERE key='order_sync_enabled'`).Scan(&val)
+	if err != nil || val != "false" {
+		t.Errorf("order_sync_enabled 默认设置异常: val=%q err=%v", val, err)
 	}
 
 	// 二次 Open 应幂等（迁移不重复执行、不报错）。

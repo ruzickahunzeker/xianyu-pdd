@@ -2,6 +2,7 @@ package mtop
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -96,6 +97,17 @@ func TestValidatePublishSKUsRejectsDuplicateCombination(t *testing.T) {
 	skus := []PublishSKU{{PriceCents: 100, Quantity: 1, Properties: []PublishSKUProperty{{Name: "颜色", Value: "黑"}}}, {PriceCents: 200, Quantity: 1, Properties: []PublishSKUProperty{{Name: "颜色", Value: "黑"}}}}
 	if err := validatePublishSKUs(skus); err == nil {
 		t.Fatal("expected duplicate error")
+	}
+}
+
+func TestValidatePublishSKUsRejectsSingleValueDimension(t *testing.T) {
+	skus := []PublishSKU{
+		{PriceCents: 100, Quantity: 1, Properties: []PublishSKUProperty{{Name: "口味", Value: "牛肉"}, {Name: "包装", Value: "90支"}}},
+		{PriceCents: 200, Quantity: 1, Properties: []PublishSKUProperty{{Name: "口味", Value: "鸡肉"}, {Name: "包装", Value: "90支"}}},
+	}
+	err := validatePublishSKUs(skus)
+	if err == nil || !strings.Contains(err.Error(), "包装") {
+		t.Fatalf("validate error=%v, want single-value 包装 error", err)
 	}
 }
 

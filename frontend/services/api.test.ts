@@ -5,6 +5,7 @@ import {
   deleteItemPublishBatch,
   checkPasswordLoginStatus,
   completeQRVerification,
+  createFulfillmentAPIKey,
   createNotificationChannel,
   getAccountDetails,
 	getAutomationIssues,
@@ -17,6 +18,8 @@ import {
   getShippingRules,
   getShippingRulesPage,
   getSystemSettings,
+  getFulfillmentAPIKeys,
+  getFulfillmentOrders,
   getValidOrders,
   logout,
 	importOrders,
@@ -39,6 +42,8 @@ import {
 	markChatRead,
 	updateAccountTaskSettings,
 	runAccountTask,
+	revokeFulfillmentAPIKey,
+	updateFulfillmentOrder,
 } from './api';
 
 afterEach(() => {
@@ -53,6 +58,40 @@ test('updateSystemSettings uses one atomic bulk request', async () => {
 	expect(fetchMock).toHaveBeenCalledTimes(1);
 	expect(fetchMock).toHaveBeenCalledWith('/system-settings', expect.objectContaining({ method: 'PUT', credentials: 'include' }));
 	expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ theme_color: 'blue', renewal_log_retention_days: 15 });
+});
+
+test('fulfillment key management uses authenticated admin endpoints', async () => {
+	const fetchMock = vi.fn()
+		.mockResolvedValueOnce(jsonResponse([{ id: 'key-1', name: '本地脚本', enabled: true, last_used_at: 0, created_at: 1 }]))
+		.mockResolvedValueOnce(new Response(JSON.stringify({ id: 'key-2', name: '订单脚本', api_key: 'xyf_secret', created_at: 2 }), { status: 201, headers: { 'content-type': 'application/json' } }))
+		.mockResolvedValueOnce(jsonResponse({ success: true }));
+	vi.stubGlobal('fetch', fetchMock);
+
+	await getFulfillmentAPIKeys();
+	const created = await createFulfillmentAPIKey('订单脚本');
+	await revokeFulfillmentAPIKey('key/2');
+
+	expect(created.api_key).toBe('xyf_secret');
+	expect(fetchMock.mock.calls[0][0]).toBe('/api/fulfillment/keys');
+	expect(fetchMock.mock.calls[1][1]).toEqual(expect.objectContaining({ method: 'POST', credentials: 'include' }));
+	expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ name: '订单脚本' });
+	expect(fetchMock.mock.calls[2][0]).toBe('/api/fulfillment/keys/key%2F2');
+	expect(fetchMock.mock.calls[2][1]).toEqual(expect.objectContaining({ method: 'DELETE', credentials: 'include' }));
+});
+
+test('fulfillment workbench reads filters and updates one order', async () => {
+	const fetchMock = vi.fn()
+		.mockResolvedValueOnce(jsonResponse([]))
+		.mockResolvedValueOnce(jsonResponse({ success: true }));
+	vi.stubGlobal('fetch', fetchMock);
+
+	await getFulfillmentOrders({ pdd_ordered: false, mapping_status: 'mapped' });
+	await updateFulfillmentOrder('xy/order 1', { pdd_ordered: true, pdd_order_id: 'pdd-1' });
+
+	expect(fetchMock.mock.calls[0][0]).toBe('/api/fulfillment/orders?pdd_ordered=false&mapping_status=mapped');
+	expect(fetchMock.mock.calls[1][0]).toBe('/api/fulfillment/orders/xy%2Forder%201');
+	expect(fetchMock.mock.calls[1][1]).toEqual(expect.objectContaining({ method: 'PUT', credentials: 'include' }));
+	expect(JSON.parse(fetchMock.mock.calls[1][1].body)).toEqual({ pdd_ordered: true, pdd_order_id: 'pdd-1' });
 });
 
 test('chat APIs preserve account and conversation scope', async () => {

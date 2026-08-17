@@ -30,6 +30,7 @@ type Store struct {
 	RiskLogs       *RiskControlLogs
 	Chats          *ChatStore
 	AccountTasks   *AccountTaskStore
+	PDDAccounts    *PDDAccountStore
 
 	credentialMu    sync.Mutex
 	credentialLocks map[string]*sync.Mutex
@@ -62,6 +63,7 @@ func NewStore(db *sql.DB, dialect Dialect) *Store {
 		RiskLogs:        &RiskControlLogs{DB: db, Dialect: dialect},
 		Chats:           &ChatStore{DB: db, Dialect: dialect},
 		AccountTasks:    &AccountTaskStore{DB: db, Dialect: dialect},
+		PDDAccounts:     &PDDAccountStore{DB: db, Dialect: dialect, codec: codec},
 		credentialLocks: make(map[string]*sync.Mutex),
 	}
 }

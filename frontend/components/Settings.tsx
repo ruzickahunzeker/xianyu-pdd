@@ -7,6 +7,9 @@ import {
   verifySession,
 } from '../services/api';
 import { SystemSettings } from '../types';
+import FulfillmentKeyManager from './FulfillmentKeyManager';
+import OrderSyncSettings from './OrderSyncSettings';
+import PDDAccountSettings from './PDDAccountSettings';
 import {
   Save, Sparkles, Settings as SettingsIcon,
   Eye, EyeOff, RefreshCw, Database, ChevronDown, Check,
@@ -263,6 +266,30 @@ const Settings: React.FC = () => {
                 />
                 <p className="text-xs text-gray-500">0 表示不自动清理续期日志</p>
               </div>
+            </div>
+          </section>
+
+          <OrderSyncSettings settings={settings} onChange={setSettings} />
+
+          <section className="space-y-4">
+            <h3 className="text-lg font-extrabold text-gray-800">拼多多物流与闲鱼发货</h3>
+            <div className="ios-card rounded-xl p-6 bg-white space-y-5">
+              <label className="flex items-center justify-between gap-4"><span><span className="block text-sm font-bold">自动同步拼多多物流</span><span className="text-xs text-gray-500">由 pdd-worker 定时读取待收货页与订单详情。</span></span><input type="checkbox" checked={String(settings.pdd_logistics_sync_enabled).toLowerCase()==='true'} onChange={e=>setSettings({...settings,pdd_logistics_sync_enabled:e.target.checked})} className="w-5 h-5"/></label>
+              <div className="grid sm:grid-cols-2 gap-4"><div><label className="block text-sm font-bold mb-2">16:00–22:00 间隔（分钟）</label><input type="number" min="1" max="1440" value={settings.pdd_logistics_peak_interval_minutes??2} onChange={e=>setSettings({...settings,pdd_logistics_peak_interval_minutes:Math.max(1,Number(e.target.value)||2)})} className="w-full ios-input px-4 py-3 rounded-xl"/></div><div><label className="block text-sm font-bold mb-2">08:00–16:00、22:00–24:00 间隔</label><input type="number" min="1" max="1440" value={settings.pdd_logistics_normal_interval_minutes??10} onChange={e=>setSettings({...settings,pdd_logistics_normal_interval_minutes:Math.max(1,Number(e.target.value)||10)})} className="w-full ios-input px-4 py-3 rounded-xl"/></div></div>
+              <label className="flex items-center justify-between gap-4"><span><span className="block text-sm font-bold">00:00–08:00 夜间同步</span><span className="text-xs text-gray-500">默认关闭；开启后默认每 30 分钟。</span></span><input type="checkbox" checked={String(settings.pdd_logistics_night_enabled).toLowerCase()==='true'} onChange={e=>setSettings({...settings,pdd_logistics_night_enabled:e.target.checked})} className="w-5 h-5"/></label>
+              <label className="flex items-center justify-between gap-4 rounded-xl bg-gray-50 p-4"><span><span className="block text-sm font-bold">自动闲鱼发货</span><span className="text-xs text-gray-500">实物发货接口验证前保持关闭；保存为开启也不会绕过服务端安全锁。</span></span><input type="checkbox" checked={String(settings.shipping_auto_enabled).toLowerCase()==='true'} onChange={e=>setSettings({...settings,shipping_auto_enabled:e.target.checked})} className="w-5 h-5"/></label>
+            </div>
+          </section>
+
+          <section className="space-y-4">
+            <h3 className="text-lg font-extrabold text-gray-800">拼多多采购预检</h3>
+            <div className="ios-card rounded-xl p-6 bg-white space-y-3">
+              <label className="block text-sm font-bold text-gray-800">商品信息刷新间隔（小时）</label>
+              <input type="number" min="1" max="720"
+                value={settings.pdd_product_refresh_interval_hours ?? 72}
+                onChange={event => setSettings({...settings, pdd_product_refresh_interval_hours: parseInt(event.target.value) || 1})}
+                className="w-full ios-input px-4 py-3 rounded-xl" />
+              <p className="text-xs text-gray-500">默认 72 小时。缓存过期后 curl 商品页；解析失败自动用 Chromium 回退。每次下单仍以结算页金额和最低 0.5 元利润为最终准入条件。</p>
             </div>
           </section>
 
@@ -537,6 +564,10 @@ const Settings: React.FC = () => {
               </button>
             </form>
           </section>
+
+          <FulfillmentKeyManager />
+
+          <PDDAccountSettings />
 
           {/* SMTP 配置已移至「通知设置」页面 */}
         </div>

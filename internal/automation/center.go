@@ -195,6 +195,18 @@ func (c *Center) handleTask(ctx context.Context, task Task) (bool, error) {
 		}
 	}
 	if len(rules) == 0 {
+		// 履约采购同样依赖付款订单的规格、数量和实付金额。即使用户没有配置
+		// 自动化规则，也要在付款事件到达时补齐订单事实，避免履约工作台先把
+		// 空规格占位记录误判为“未匹配 SKU”。详情抓取失败时保留占位记录，
+		// 后续定时/手动订单同步仍可继续恢复。
+		if task.TriggerType == TriggerOrderPaid {
+			if hydrated, hydrateErr := c.prepareTask(ctx, task); hydrateErr != nil {
+				c.logger.Warn("付款订单详情补全失败，等待订单同步恢复", "account", task.AccountID,
+					"order_id", task.OrderID, "err", hydrateErr)
+			} else {
+				task = hydrated
+			}
+		}
 		c.logger.Info("无匹配自动化规则，忽略事件", "trigger", task.TriggerType, "order_id", task.OrderID, "item_id", task.ItemID)
 		return false, nil
 	}

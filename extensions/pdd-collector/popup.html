@@ -26,6 +26,13 @@
     <summary>查看采集 JSON</summary>
     <pre id="preview"></pre>
   </details>
+  <hr>
+  <section>
+    <h2>拼多多账号配置</h2>
+    <p>从拼多多收货地址页读取当前登录账号的 Cookie、账号 ID 和默认收货地址 ID，仅保存在扩展本地。</p>
+    <div class="actions"><button id="capture-account" class="primary">读取账号配置</button><button id="open-address-page" class="hidden">前往地址页</button><button id="copy-account" disabled>复制配置</button></div>
+    <div id="account-summary" class="summary hidden"><div><span>账号</span><strong id="pdd-uid"></strong></div><div><span>地址 ID</span><strong id="pdd-address-id"></strong></div><div><span>Cookie</span><strong id="pdd-cookie"></strong></div></div>
+  </section>
   <script type="module" src="popup.js"></script>
 </body>
 </html>

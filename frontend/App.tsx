@@ -10,6 +10,8 @@ import PDDCollector from './components/PDDCollector';
 import Rules from './components/Rules';
 import Notifications from './components/Notifications';
 import Chat from './components/Chat';
+import FulfillmentWorkbench from './components/FulfillmentWorkbench';
+import ShippingWorkbench from './components/ShippingWorkbench';
 import { readSidebarCollapsed, writeSidebarCollapsed } from './components/sidebarState';
 import { YdisksBrandIcon } from './components/YdisksLogo';
 import { initializeAdmin, login, logout, verifySession } from './services/api';
@@ -29,6 +31,8 @@ const ROUTES: Record<string, string> = {
   '/app/accounts': 'accounts',
 	'/app/chat': 'chat',
   '/app/orders': 'orders',
+  '/app/fulfillment': 'fulfillment',
+  '/app/shipping': 'shipping',
   '/app/cards': 'cards',
   '/app/items': 'items',
   '/app/rules': 'rules',
@@ -60,7 +64,7 @@ const App: React.FC = () => {
 
   // 切换 tab 并同步 URL。若 tab 没有对应 path（不应发生）则只切 tab。
   const navigate = (tab: string) => {
-    const nextTab = tab === 'settings' && !isAdmin ? 'dashboard' : tab;
+    const nextTab = (tab === 'settings' || tab === 'fulfillment' || tab === 'shipping') && !isAdmin ? 'dashboard' : tab;
     const path = TAB_TO_PATH[nextTab];
     if (path && path !== window.location.pathname) {
       window.history.pushState({}, '', path);
@@ -109,7 +113,7 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (!checkingAuth && isLoggedIn && !isAdmin && activeTab === 'settings') {
+    if (!checkingAuth && isLoggedIn && !isAdmin && (activeTab === 'settings' || activeTab === 'fulfillment' || activeTab === 'shipping')) {
       window.history.replaceState({}, '', TAB_TO_PATH.dashboard);
       setActiveTab('dashboard');
     }
@@ -329,6 +333,8 @@ const App: React.FC = () => {
       case 'accounts': return <AccountList />;
 	  case 'chat': return <Chat />;
       case 'orders': return <OrderList />;
+      case 'fulfillment': return isAdmin ? <FulfillmentWorkbench /> : <Dashboard />;
+      case 'shipping': return isAdmin ? <ShippingWorkbench /> : <Dashboard />;
       case 'cards': return <CardList />;
       case 'items': return <ItemList onConfigureDelivery={(item) => {
         setDeliveryRuleTarget({ cookieId: item.cookie_id, itemId: item.item_id, requestId: Date.now() });

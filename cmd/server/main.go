@@ -269,6 +269,7 @@ func runServer(parent context.Context, opts serverOptions) error {
 	srv := server.New(store, mgr, opts.secure, opts.webDir, opts.addr, logger, autoCenter, notifier)
 	srv.SetChatService(chatService)
 	srv.StartPublishBatchRecovery(ctx)
+	srv.StartOrderSyncScheduler(ctx)
 	runErr := srv.Run(ctx)
 	if runErr != nil {
 		logger.Error("HTTP 服务退出", "err", runErr)

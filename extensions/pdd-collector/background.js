@@ -1,4 +1,6 @@
-import { collectPDDProduct } from "./collector.js";
+import { collectDefaultAddressID, collectPDDProduct, isPDDAddressPage } from "./collector.js";
+
+const PDD_ADDRESS_URL = "https://mobile.pinduoduo.com/addresses.html";
 
 const DEFAULT_SETTINGS = {
   serverURL: "http://127.0.0.1:8080",
@@ -23,7 +25,7 @@ async function capture() {
     world: "MAIN",
     func: () => JSON.stringify(globalThis.rawData)
   });
-  const normalized = { ...collectPDDProduct(JSON.parse(result)), collection_id: crypto.randomUUID() };
+  const normalized = { ...collectPDDProduct(JSON.parse(result), tab.url), collection_id: crypto.randomUUID() };
   await chrome.storage.local.set({ lastCollection: normalized });
   return normalized;
 }
@@ -54,11 +56,38 @@ async function upload(payload) {
   return body;
 }
 
+async function captureAccount() {
+  const tab = await activeTab();
+  if (!isPDDAddressPage(tab.url)) {
+    const error = new Error("请先打开拼多多收货地址页");
+    error.code = "ADDRESS_PAGE_REQUIRED";
+    throw error;
+  }
+  const cookies = await chrome.cookies.getAll({ domain: ".pinduoduo.com" });
+  const extraCookies = await chrome.cookies.getAll({ domain: ".yangkeduo.com" });
+  const unique = new Map([...cookies, ...extraCookies].map(item => [`${item.name};${item.domain};${item.path}`, item]));
+  const cookie = [...unique.values()].map(item => `${item.name}=${item.value}`).join("; ");
+  const pddUID = [...unique.values()].find(item => item.name === "pdd_user_id")?.value || "";
+  if (!pddUID) throw new Error("未读取到 pdd_user_id，请确认拼多多已登录");
+  const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: () => ({ rawData: globalThis.rawData || null, userAgent: navigator.userAgent }) });
+  const data = { cookie, pdd_uid: pddUID, default_address_id: collectDefaultAddressID(result?.rawData), user_agent: result?.userAgent || "", captured_at: new Date().toISOString() };
+  await chrome.storage.local.set({ lastPDDAccount: data });
+  return { ...data, cookie_masked: `${cookie.slice(0, 18)}…（${unique.size} 项）` };
+}
+
+async function openAddressPage() {
+  const tab = await activeTab();
+  await chrome.tabs.update(tab.id, { url: PDD_ADDRESS_URL });
+  return { url: PDD_ADDRESS_URL };
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const action = message?.type === "CAPTURE" ? capture()
-    : message?.type === "UPLOAD" ? upload(message.payload)
+      : message?.type === "UPLOAD" ? upload(message.payload)
+      : message?.type === "CAPTURE_ACCOUNT" ? captureAccount()
+        : message?.type === "OPEN_ADDRESS_PAGE" ? openAddressPage()
       : Promise.reject(new Error("未知操作"));
   action.then((data) => sendResponse({ ok: true, data }))
-    .catch((error) => sendResponse({ ok: false, error: error?.message || String(error) }));
+    .catch((error) => sendResponse({ ok: false, error: error?.message || String(error), code: error?.code || "" }));
   return true;
 });

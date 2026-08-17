@@ -29,6 +29,38 @@ func TestFetchOrderDetailSuccessWithSpecAndStatus(t *testing.T) {
 	}
 }
 
+func TestFetchOrderDetailParsesCombinedSKUInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"components":[{"render":"orderInfoVO","data":{"itemInfo":{"buyAmount":"1","skuInfo":"款式:25*25cm【1条装】颜色随机"}}}]}}`)
+	}))
+	defer server.Close()
+
+	client := &ClientImpl{HTTPClient: server.Client(), OrderDetailURL: server.URL + "/"}
+	res, err := client.FetchOrderDetail(context.Background(), consignCookies, "order-new-sku-info")
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if res.SpecName != "款式" || res.SpecValue != "25*25cm【1条装】颜色随机" || res.Quantity != "1" {
+		t.Fatalf("res=%+v", res)
+	}
+}
+
+func TestFetchOrderDetailPrefersStructuredSpecOverSKUInfo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"components":[{"render":"orderInfoVO","data":{"itemInfo":{"specName":"颜色","specValue":"红色","skuInfo":"款式:蓝色"}}}]}}`)
+	}))
+	defer server.Close()
+
+	client := &ClientImpl{HTTPClient: server.Client(), OrderDetailURL: server.URL + "/"}
+	res, err := client.FetchOrderDetail(context.Background(), consignCookies, "order-old-spec")
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if res.SpecName != "颜色" || res.SpecValue != "红色" {
+		t.Fatalf("res=%+v", res)
+	}
+}
+
 // TestFetchOrderDetailMissingBuyAmountDefaultsTo1: components 无 buyAmount 时 Quantity 默认 "1"。
 func TestFetchOrderDetailMissingBuyAmountDefaultsTo1(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

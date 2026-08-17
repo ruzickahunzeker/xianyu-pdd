@@ -35,6 +35,8 @@ func (s *Server) mountItemsReal(r chi.Router) {
 	r.Get("/items/cookie/{cookie_id}", s.listItemsByCookie)
 	r.Post("/items/{cookie_id}", s.createItem)
 	r.Get("/items/{cookie_id}/{item_id}", s.getItem)
+	r.Put("/items/{cookie_id}/{item_id}/pdd-mappings", s.upsertItemPDDMapping)
+	r.Delete("/items/{cookie_id}/{item_id}/pdd-mappings/{xianyu_sku_id}", s.deleteItemPDDMapping)
 	r.Put("/items/{cookie_id}/{item_id}", s.updateItem)
 	r.Delete("/items/{cookie_id}/{item_id}", s.deleteItem)
 	r.Put("/items/{cookie_id}/{item_id}/multi-spec", s.setItemMultiSpec)
@@ -357,7 +359,9 @@ func (s *Server) listItems(w http.ResponseWriter, r *http.Request) {
 	for cid := range all {
 		items, _ := s.Store.Items.AllForCookie(r.Context(), cid)
 		for _, it := range items {
-			result = append(result, itemToMap(it))
+			row := itemToMap(it)
+			row["pdd_mapping"] = s.itemPDDMappingSummary(r.Context(), sess.UserID, cid, it.ItemID)
+			result = append(result, row)
 		}
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -630,10 +634,8 @@ func (s *Server) enrichSyncedItemDetails(ctx context.Context, client mtop.Client
 		return 0, 0
 	}
 	for index := range items {
-		// P0 只强制丰富多规格商品；列表明确标记或本地历史状态为 true 都需要详情。
-		if !items[index].IsMultiSpec && !s.Store.Items.IsMultiSpec(ctx, cookieID, items[index].ID) {
-			continue
-		}
+		// 列表接口可能不返回多规格标记；必须读取详情后才能可靠识别并保存 SKU。
+		knownMultiSpec := items[index].IsMultiSpec || s.Store.Items.IsMultiSpec(ctx, cookieID, items[index].ID)
 		detail, err := fetcher.FetchItemDetail(ctx, cookies, items[index].ID)
 		if err != nil {
 			failed++
@@ -649,8 +651,8 @@ func (s *Server) enrichSyncedItemDetails(ctx context.Context, client mtop.Client
 			}
 			continue
 		}
-		items[index].IsMultiSpec = detail.IsMultiSpec
-		_ = s.Store.Items.SetMultiSpec(ctx, cookieID, items[index].ID, detail.IsMultiSpec)
+		items[index].IsMultiSpec = knownMultiSpec || detail.IsMultiSpec
+		_ = s.Store.Items.SetMultiSpec(ctx, cookieID, items[index].ID, items[index].IsMultiSpec)
 		saved++
 	}
 	return saved, failed
@@ -693,7 +695,8 @@ func (s *Server) listItemsByCookie(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getItem(w http.ResponseWriter, r *http.Request) {
 	cid := chi.URLParam(r, "cookie_id")
-	if _, ok := s.requireCookieOwner(w, r, cid); !ok {
+	detail, ok := s.requireCookieOwner(w, r, cid)
+	if !ok {
 		return
 	}
 	itemID := chi.URLParam(r, "item_id")
@@ -711,6 +714,7 @@ func (s *Server) getItem(w http.ResponseWriter, r *http.Request) {
 	if remote, remoteErr := s.Store.Items.RemoteDetailWithSKUs(r.Context(), cid, itemID); remoteErr == nil {
 		out["remote_detail"] = remoteDetailToMap(remote)
 	}
+	out["pdd_mapping"] = s.itemPDDMappingDetail(r.Context(), detail.UserID, cid, itemID)
 	writeJSON(w, http.StatusOK, out)
 }
 

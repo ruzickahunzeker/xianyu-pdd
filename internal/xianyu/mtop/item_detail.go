@@ -106,7 +106,11 @@ func (c *ClientImpl) FetchItemDetail(ctx context.Context, cookies, itemID string
 	if !hasMTopSuccess(decoded.Ret) {
 		return nil, fmt.Errorf("商品详情接口返回非成功: ret=%v", decoded.Ret)
 	}
-	return parseItemRemoteDetail(decoded.Data), nil
+	detail := parseItemRemoteDetail(decoded.Data)
+	if detail.ItemID == "" {
+		detail.ItemID = itemID
+	}
+	return detail, nil
 }
 
 func parseItemRemoteDetail(data map[string]any) *ItemRemoteDetail {

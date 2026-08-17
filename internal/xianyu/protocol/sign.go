@@ -15,7 +15,11 @@ const SignAppKey = "34839810"
 
 // GenerateSign 生成 mtop API 签名：MD5(token + "&" + t + "&" + appKey + "&" + data)。
 func GenerateSign(t, token, data string) string {
-	msg := token + "&" + t + "&" + SignAppKey + "&" + data
+	return GenerateSignWithAppKey(t, token, SignAppKey, data)
+}
+
+func GenerateSignWithAppKey(t, token, appKey, data string) string {
+	msg := token + "&" + t + "&" + appKey + "&" + data
 	// #nosec G401 -- MTOP 协议明确要求 MD5，不能替换为其他摘要算法。
 	sum := md5.Sum([]byte(msg))
 	return hex.EncodeToString(sum[:])

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -57,6 +58,43 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if enabled, ok := values["order_sync_enabled"]; ok && enabled != "true" && enabled != "false" {
+		writeErr(w, http.StatusBadRequest, "订单自动同步开关无效")
+		return
+	}
+	for _, key := range []string{"pdd_logistics_sync_enabled", "shipping_auto_enabled"} {
+		if value, ok := values[key]; ok && value != "true" && value != "false" {
+			writeErr(w, http.StatusBadRequest, "发货自动化开关无效")
+			return
+		}
+	}
+	for _, key := range []string{"pdd_logistics_peak_interval_minutes", "pdd_logistics_normal_interval_minutes", "pdd_logistics_night_interval_minutes"} {
+		if interval, ok := values[key]; ok {
+			minutes, e := strconv.Atoi(interval)
+			if e != nil || minutes < 1 || minutes > 1440 {
+				writeErr(w, http.StatusBadRequest, "物流同步间隔必须为 1 到 1440 分钟")
+				return
+			}
+		}
+	}
+	if value, ok := values["pdd_logistics_night_enabled"]; ok && value != "true" && value != "false" {
+		writeErr(w, http.StatusBadRequest, "夜间物流同步开关无效")
+		return
+	}
+	if interval, ok := values["order_sync_interval_minutes"]; ok {
+		minutes, parseErr := strconv.Atoi(interval)
+		if parseErr != nil || minutes < minOrderSyncInterval || minutes > maxOrderSyncInterval {
+			writeErr(w, http.StatusBadRequest, "订单同步间隔必须为 5 到 1440 分钟")
+			return
+		}
+	}
+	if interval, ok := values["pdd_product_refresh_interval_hours"]; ok {
+		hours, parseErr := strconv.Atoi(interval)
+		if parseErr != nil || hours < 1 || hours > 720 {
+			writeErr(w, http.StatusBadRequest, "拼多多商品刷新间隔必须为 1 到 720 小时")
+			return
+		}
+	}
 	if err := s.Store.Settings.SetMany(r.Context(), values); err != nil {
 		writeErr(w, http.StatusInternalServerError, "保存失败")
 		return
@@ -97,6 +135,24 @@ func (s *Server) setSetting(w http.ResponseWriter, r *http.Request) {
 	if key == "log_level" {
 		if err := logging.SetLevel(req.Value); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if key == "order_sync_enabled" && req.Value != "true" && req.Value != "false" {
+		writeErr(w, http.StatusBadRequest, "订单自动同步开关无效")
+		return
+	}
+	if key == "order_sync_interval_minutes" {
+		minutes, err := strconv.Atoi(req.Value)
+		if err != nil || minutes < minOrderSyncInterval || minutes > maxOrderSyncInterval {
+			writeErr(w, http.StatusBadRequest, "订单同步间隔必须为 5 到 1440 分钟")
+			return
+		}
+	}
+	if key == "pdd_product_refresh_interval_hours" {
+		hours, err := strconv.Atoi(req.Value)
+		if err != nil || hours < 1 || hours > 720 {
+			writeErr(w, http.StatusBadRequest, "拼多多商品刷新间隔必须为 1 到 720 小时")
 			return
 		}
 	}

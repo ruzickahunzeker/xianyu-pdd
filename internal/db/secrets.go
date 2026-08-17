@@ -150,6 +150,35 @@ func (s *Store) EncryptLegacySecrets(ctx context.Context) error {
 		}
 	}
 
+	type pddSecret struct{ id, cookie string }
+	rows, err = tx.QueryContext(ctx, `SELECT id,cookie_encrypted FROM pdd_accounts`)
+	if err != nil {
+		return err
+	}
+	var pddAccounts []pddSecret
+	for rows.Next() {
+		var row pddSecret
+		if err := rows.Scan(&row.id, &row.cookie); err != nil {
+			rows.Close()
+			return err
+		}
+		pddAccounts = append(pddAccounts, row)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, row := range pddAccounts {
+		encrypted, err := codec.encrypt("pdd-cookie", row.id, row.cookie)
+		if err != nil {
+			return err
+		}
+		if encrypted != row.cookie {
+			if _, err := tx.ExecContext(ctx, `UPDATE pdd_accounts SET cookie_encrypted=? WHERE id=?`, encrypted, row.id); err != nil {
+				return err
+			}
+		}
+	}
+
 	keyCol := dialectQuote(s.Dialect, "key")
 	rows, err = tx.QueryContext(ctx, `SELECT `+keyCol+`,value FROM system_settings`)
 	if err != nil {
