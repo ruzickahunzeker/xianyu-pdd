@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowUp, Copy, ImagePlus, PackagePlus, Plus, Save, Search, Send, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Copy, ImagePlus, PackagePlus, Play, Plus, Save, Search, Send, Trash2, X } from 'lucide-react';
 import {
   deleteMaterial, getAccountDetails, getMaterials, getMaterialPublishRecords, getMaterialSourceDiff, MaterialPublishRecord, ProductMaterial, ProductMaterialSKU,
-  getPDDProduct, publishMaterial, syncMaterialSource, updateMaterial, uploadMaterialImage,
+  getPDDProduct, getPDDReviewMedia, PDDReviewMedia, ProductMaterialVideo, publishMaterial, syncMaterialSource, updateMaterial, uploadMaterialImage,
 } from '../services/api';
 import type { AccountDetail } from '../types';
 
@@ -86,6 +86,14 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 	const [combineGoodsID, setCombineGoodsID] = useState('');
 	const [combining, setCombining] = useState(false);
 	const [descriptionBusy, setDescriptionBusy] = useState(false);
+	const [productImageChoices, setProductImageChoices] = useState<Array<{url:string;goods_id:string}>>([]);
+	const [reviewImageChoices, setReviewImageChoices] = useState<PDDReviewMedia[]>([]);
+	const [reviewVideoChoices, setReviewVideoChoices] = useState<PDDReviewMedia[]>([]);
+	const [mediaPicker, setMediaPicker] = useState<null|{kind:'product-image'|'review-image'|'review-video';selected:Set<string>}>(null);
+	const [mediaPreview, setMediaPreview] = useState<null|{key?:string;type:'image'|'video';url:string;cover?:string}>(null);
+	const [mediaGoodsFilter, setMediaGoodsFilter] = useState('');
+	const [mediaSKUFilter, setMediaSKUFilter] = useState('');
+	const [mediaSourceFilter, setMediaSourceFilter] = useState('');
   const [specifications, setSpecifications] = useState<Specification[]>(() => deriveSpecifications(initial.skus).map(item => ({ ...item, supportImage: item.name === initial.image_property_name, values: item.values.map(value => ({ ...value, image_url: item.name === initial.image_property_name ? value.image_url : undefined })) })));
   const dimensions = useMemo(() => specifications.map(item => item.name), [specifications]);
 	const sourceGoodsIDs = useMemo(() => Array.from(new Set(draft.skus.map(sku => sku.source_goods_id || (sku.source_sku_id ? draft.source_id : '')).filter(Boolean))), [draft.skus, draft.source_id]);
@@ -94,6 +102,56 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 		setDraft(current => ({ ...current, skus: current.skus.map(sku => ({ ...sku, properties: sku.properties.map(property => property.name === imageName ? property : { ...property, image_url: undefined }) })) }));
 	}, []);
 	useEffect(() => { void getMaterialPublishRecords(initial.id).then(setPublishRecords); }, [initial.id]);
+	useEffect(() => { setMediaGoodsFilter(''); setMediaSKUFilter(''); setMediaSourceFilter(''); }, [mediaPicker?.kind]);
+	useEffect(() => {
+		if (initial.source_type !== 'pdd') return;
+		void Promise.all(sourceGoodsIDs.map(async goodsID => {
+			const [product, images, videos] = await Promise.all([getPDDProduct(goodsID), getPDDReviewMedia(goodsID,'image'), getPDDReviewMedia(goodsID,'video')]);
+			return { goodsID, product, images, videos };
+		})).then(rows => {
+			setProductImageChoices(Array.from(new Map(rows.flatMap(row => row.product.images.map(url => [url,{url,goods_id:row.goodsID}] as const))).values()));
+			setReviewImageChoices(rows.flatMap(row=>row.images)); setReviewVideoChoices(rows.flatMap(row=>row.videos));
+		}).catch(reason=>setError(reason?.message||'读取采集媒体失败'));
+	}, []);
+	const unfilteredPickerChoices = mediaPicker?.kind === 'product-image' ? productImageChoices.map(item=>({key:item.url,url:item.url,label:item.goods_id,goodsID:item.goods_id,skuID:'',sourceType:'',type:'image' as const})) : mediaPicker?.kind === 'review-image' ? reviewImageChoices.map(item=>({key:String(item.id),url:item.url,label:`${item.source_type==='additional'?'追评':'评价'} · SKU ${item.sku_id||'-'}`,goodsID:item.goods_id,skuID:item.sku_id,sourceType:item.source_type,type:'image' as const})) : reviewVideoChoices.map(item=>({key:String(item.id),url:item.url,cover:item.cover_url,label:`${item.source_type==='additional'?'追评':'评价'} · SKU ${item.sku_id||'-'}`,goodsID:item.goods_id,skuID:item.sku_id,sourceType:item.source_type,type:'video' as const}));
+	const pickerChoices = unfilteredPickerChoices.filter(item=>(!mediaGoodsFilter||item.goodsID===mediaGoodsFilter)&&(!mediaSKUFilter||item.skuID===mediaSKUFilter)&&(!mediaSourceFilter||item.sourceType===mediaSourceFilter));
+	const pickerGoodsIDs = Array.from(new Set(unfilteredPickerChoices.map(item=>item.goodsID).filter(Boolean)));
+	const pickerSKUIds = Array.from(new Set(unfilteredPickerChoices.filter(item=>!mediaGoodsFilter||item.goodsID===mediaGoodsFilter).map(item=>item.skuID).filter(Boolean)));
+	const toggleMediaSelection = (key:string) => setMediaPicker(current=>{
+		if (!current) return current;
+		const selected = new Set(current.selected);
+		selected.has(key) ? selected.delete(key) : selected.add(key);
+		return {...current,selected};
+	});
+	const moveMediaPreview = (direction:-1|1) => {
+		if (!mediaPreview?.key || pickerChoices.length < 2) return;
+		const index = pickerChoices.findIndex(item=>item.key===mediaPreview.key);
+		if (index < 0) return;
+		const next = pickerChoices[(index + direction + pickerChoices.length) % pickerChoices.length];
+		setMediaPreview({key:next.key,type:next.type,url:next.url,cover:'cover' in next?next.cover:''});
+	};
+	useEffect(() => {
+		if (!mediaPreview) return;
+		const onKeyDown = (event:KeyboardEvent) => {
+			if (event.key === 'Escape') setMediaPreview(null);
+			else if (event.key === 'ArrowLeft') { event.preventDefault(); moveMediaPreview(-1); }
+			else if (event.key === 'ArrowRight') { event.preventDefault(); moveMediaPreview(1); }
+			else if ((event.key === 'Enter' || event.key === ' ') && mediaPreview.key) { event.preventDefault(); toggleMediaSelection(mediaPreview.key); }
+		};
+		window.addEventListener('keydown',onKeyDown);
+		return () => window.removeEventListener('keydown',onKeyDown);
+	}, [mediaPreview,pickerChoices]);
+	const confirmMediaPicker = () => {
+		if (!mediaPicker) return;
+		const selected = unfilteredPickerChoices.filter(item=>mediaPicker.selected.has(item.key));
+		if (mediaPicker.kind === 'review-video') {
+			const byID = new Map(reviewVideoChoices.map(item=>[String(item.id),item]));
+			setDraft(current=>({...current,videos:Array.from(new Map([...(current.videos||[]),...selected.map(item=>{const source=byID.get(item.key)!;return {source:'review',source_goods_id:source.goods_id,review_id:source.review_id,sku_id:source.sku_id,url:source.url,cover_url:source.cover_url,duration_ms:source.duration_ms} as ProductMaterialVideo;})].map(item=>[item.url,item])).values())}));
+		} else {
+			setDraft(current=>({...current,images:Array.from(new Set([...current.images,...selected.map(item=>item.url)])).slice(0,9)}));
+		}
+		setMediaPicker(null);
+	};
 
   const applySpecifications = (next: Specification[]) => {
 	setDraft(current => {
@@ -250,6 +308,7 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
         category: draft.category, skus: draft.skus, postage_mode: draft.postage_mode,
         postage_cent: draft.postage_cent,
 		image_property_name: draft.image_property_name || '',
+		video_enabled: draft.video_enabled !== false, videos: draft.videos || [],
       });
       await onSaved();
       if (mode === 'edit') onClose();
@@ -266,6 +325,7 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
         category: draft.category, skus: draft.skus, postage_mode: draft.postage_mode,
         postage_cent: draft.postage_cent,
 		image_property_name: draft.image_property_name || '',
+		video_enabled: draft.video_enabled !== false, videos: draft.videos || [],
       });
       const result = await publishMaterial(draft.id, cookieID);
       alert(`商品发布成功${result?.item_id ? `，ID：${result.item_id}` : ''}`);
@@ -301,13 +361,16 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 		{draft.source_type === 'pdd' && <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><h3 className="font-black">采集来源更新</h3><p className="text-xs text-slate-500">检查并同步全部 {sourceGoodsIDs.length} 个来源商品；不会覆盖发布规格文字。</p></div><button className="rounded-lg border px-3 py-2 text-sm font-bold" onClick={async()=>setSourceDiff(await getMaterialSourceDiff(draft.id))}>检查差异</button></div>{sourceDiff&&<div className="mt-3 rounded-xl bg-slate-50 p-3 text-sm"><p>新增 {sourceDiff.added.length} · 变化 {sourceDiff.changed.length} · 下架 {sourceDiff.removed.length}</p><div className="mt-3 flex flex-wrap gap-2"><button className="rounded-lg bg-brand px-3 py-2 font-bold text-white" onClick={async()=>{await syncMaterialSource(draft.id,{prices:true,stock:true,images:true,add_new:true,disable_removed:true});await onSaved();setError('全部来源数据已同步，请关闭后重新打开素材查看');}}>同步价格、库存、图片及新 SKU</button><button className="rounded-lg border bg-white px-3 py-2 font-bold" onClick={async()=>{await syncMaterialSource(draft.id,{prices:false,stock:true,images:false,add_new:false,disable_removed:true});await onSaved();setError('全部来源库存与下架状态已同步，请关闭后重新打开素材查看');}}>仅同步库存/下架</button></div></div>}</section>}
       </div>
       <aside className="space-y-5">
-        <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="mb-4 flex justify-between"><h3 className="font-black">商品图片</h3><span className="text-xs text-slate-400">{draft.images.length}/9</span></div><div className="grid grid-cols-3 gap-2">{draft.images.map((url, index) => <div className="group relative aspect-square" key={`${url}-${index}`}><img src={url} referrerPolicy="no-referrer" className="h-full w-full rounded-xl object-cover"/>{index === 0 && <span className="absolute bottom-1 left-1 rounded bg-brand px-1.5 py-0.5 text-[10px] text-white">主图</span>}<div className="absolute right-1 top-1 hidden gap-1 group-hover:flex"><button disabled={index === 0} className="rounded bg-black/60 p-1 text-white disabled:opacity-30" onClick={() => { const images = [...draft.images]; [images[index - 1], images[index]] = [images[index], images[index - 1]]; setDraft({ ...draft, images }); }}><ArrowUp className="h-3 w-3"/></button><button disabled={index === draft.images.length - 1} className="rounded bg-black/60 p-1 text-white disabled:opacity-30" onClick={() => { const images = [...draft.images]; [images[index + 1], images[index]] = [images[index], images[index + 1]]; setDraft({ ...draft, images }); }}><ArrowDown className="h-3 w-3"/></button><button className="rounded bg-red-500 p-1 text-white" onClick={() => setDraft({ ...draft, images: draft.images.filter((_, row) => row !== index) })}><Trash2 className="h-3 w-3"/></button></div></div>)}{draft.images.length < 9 && <label className="flex aspect-square cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed text-xs font-bold text-slate-500"><ImagePlus className="mb-1 h-5 w-5"/>上传<input type="file" accept="image/*" multiple className="hidden" onChange={async event => { const files = Array.from(event.target.files || []).slice(0, 9 - draft.images.length); const urls = await Promise.all(files.map(async file => (await uploadMaterialImage(file)).url)); setDraft(current => ({ ...current, images: [...current.images, ...urls] })); }}/></label>}</div></section>
+        <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="mb-4 flex justify-between"><h3 className="font-black">商品图片</h3><span className="text-xs text-slate-400">{draft.images.length}/9</span></div><div className="grid grid-cols-3 gap-2">{draft.images.map((url, index) => <div className="group relative aspect-square" key={`${url}-${index}`}><img src={url} referrerPolicy="no-referrer" className="h-full w-full rounded-xl object-cover"/>{index === 0 && <span className="absolute bottom-1 left-1 rounded bg-brand px-1.5 py-0.5 text-[10px] text-white">主图</span>}<div className="absolute inset-x-1 top-1 hidden flex-wrap gap-1 group-hover:flex"><button className="rounded bg-brand px-1.5 py-1 text-[10px] text-white" onClick={()=>setDraft({...draft,images:[url,...draft.images.filter((_,row)=>row!==index)]})}>设为主图</button><button className="rounded bg-black/60 p-1 text-white" onClick={()=>setMediaPreview({type:'image',url})}>预览</button><button disabled={index === 0} className="rounded bg-black/60 p-1 text-white disabled:opacity-30" onClick={() => { const images = [...draft.images]; [images[index - 1], images[index]] = [images[index], images[index - 1]]; setDraft({ ...draft, images }); }}><ArrowUp className="h-3 w-3"/></button><button disabled={index === draft.images.length - 1} className="rounded bg-black/60 p-1 text-white disabled:opacity-30" onClick={() => { const images = [...draft.images]; [images[index + 1], images[index]] = [images[index], images[index + 1]]; setDraft({ ...draft, images }); }}><ArrowDown className="h-3 w-3"/></button><button className="rounded bg-red-500 p-1 text-white" onClick={() => setDraft({ ...draft, images: draft.images.filter((_, row) => row !== index) })}><Trash2 className="h-3 w-3"/></button></div></div>)}</div><div className="mt-3 flex flex-wrap gap-2">{productImageChoices.length>0&&<button className="rounded-lg border px-3 py-2 text-xs font-bold" onClick={()=>setMediaPicker({kind:'product-image',selected:new Set()})}>商品采集图 {productImageChoices.length}</button>}{reviewImageChoices.length>0&&<button className="rounded-lg border px-3 py-2 text-xs font-bold" onClick={()=>setMediaPicker({kind:'review-image',selected:new Set()})}>评论图片 {reviewImageChoices.length}</button>}{draft.images.length < 9 && <label className="cursor-pointer rounded-lg border px-3 py-2 text-xs font-bold">本地上传<input type="file" accept="image/*" multiple className="hidden" onChange={async event => { const files = Array.from(event.target.files || []).slice(0, 9 - draft.images.length); const urls = await Promise.all(files.map(async file => (await uploadMaterialImage(file)).url)); setDraft(current => ({ ...current, images: [...current.images, ...urls] })); }}/></label>}</div></section>
+        <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><h3 className="font-black">视频</h3><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.video_enabled!==false} onChange={e=>setDraft({...draft,video_enabled:e.target.checked})}/>发布视频（默认开启）</label></div><div className="mt-3 grid grid-cols-2 gap-2">{(draft.videos||[]).map((video,index)=><div key={`${video.url}-${index}`} className="relative overflow-hidden rounded-xl border bg-black"><video src={video.url} poster={video.cover_url} controls preload="metadata" className="aspect-video w-full"/><button className="absolute right-1 top-1 rounded bg-red-500 p-1 text-white" onClick={()=>setDraft({...draft,videos:draft.videos.filter((_,row)=>row!==index)})}><Trash2 className="h-3 w-3"/></button></div>)}</div>{reviewVideoChoices.length>0&&<button className="mt-3 rounded-lg border px-3 py-2 text-xs font-bold" onClick={()=>setMediaPicker({kind:'review-video',selected:new Set()})}><Play className="mr-1 inline h-3 w-3"/>评论视频 {reviewVideoChoices.length}</button>}<p className="mt-2 text-xs text-amber-600">视频可保存多个；当前闲鱼发布协议尚未接入，启用且已选视频时会阻止发布并明确提示。</p></section>
         {mode === 'publish' && <section className="rounded-2xl border bg-white p-5 shadow-sm"><label className="text-sm font-bold">发布账号<select className="mt-2 w-full rounded-xl border p-3 font-normal" value={cookieID} onChange={event => setCookieID(event.target.value)}><option value="">请选择账号</option>{accounts.map(account => <option key={account.id} value={account.id}>{account.nickname || account.remark || account.id}{account.enabled ? '' : '（未启用）'}</option>)}</select></label></section>}
 		<section className="rounded-2xl border bg-white p-5 shadow-sm"><h3 className="font-black">发布记录</h3>{publishRecords.length===0?<p className="mt-2 text-xs text-slate-500">暂无发布记录</p>:<div className="mt-3 space-y-2">{publishRecords.slice(0,5).map(record=><div key={record.id} className="rounded-lg bg-slate-50 p-2 text-xs"><b>{record.status==='success'?'成功':'失败'}</b> · {record.cookie_id}<br/>{record.published_item_id&&<>闲鱼商品：{record.published_item_id}<br/></>}{record.mapping_counts&&<>SKU 映射：成功 {record.mapping_counts.mapped||0} / 待处理 {record.mapping_counts.pending||0} / 未匹配 {record.mapping_counts.unmapped||0} / 冲突 {record.mapping_counts.ambiguous||0}<br/></>}{new Date(record.created_at*1000).toLocaleString()}</div>)}</div>}</section>
         {error && <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-bold text-red-600">{error}</div>}
         <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="space-y-3"><button disabled={busy} onClick={() => void save()} className="flex w-full items-center justify-center gap-2 rounded-xl border p-3 font-black disabled:opacity-50"><Save className="h-4 w-4"/>保存素材</button>{mode === 'publish' && <button disabled={busy} onClick={() => void publish()} className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand p-3 font-black text-white disabled:opacity-50"><Send className="h-4 w-4"/>{busy ? '正在发布…' : '保存并发布'}</button>}</div></section>
       </aside>
     </main>
+    {mediaPicker&&<div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-6"><div className="max-h-[85vh] w-full max-w-5xl overflow-auto rounded-2xl bg-white p-5"><div className="flex items-center justify-between"><h3 className="text-lg font-black">{mediaPicker.kind==='product-image'?'选择商品采集图':mediaPicker.kind==='review-image'?'选择评论图片':'选择评论视频'}</h3><button onClick={()=>setMediaPicker(null)}><X/></button></div><div className="mt-4 flex flex-wrap gap-2">{pickerGoodsIDs.length>1&&<select className="rounded-lg border px-3 py-2 text-sm" value={mediaGoodsFilter} onChange={event=>{setMediaGoodsFilter(event.target.value);setMediaSKUFilter('');}}><option value="">全部商品</option>{pickerGoodsIDs.map(id=><option key={id}>{id}</option>)}</select>}{mediaPicker.kind!=='product-image'&&<><select className="rounded-lg border px-3 py-2 text-sm" value={mediaSKUFilter} onChange={event=>setMediaSKUFilter(event.target.value)}><option value="">全部 SKU</option>{pickerSKUIds.map(id=><option key={id}>{id}</option>)}</select><select className="rounded-lg border px-3 py-2 text-sm" value={mediaSourceFilter} onChange={event=>setMediaSourceFilter(event.target.value)}><option value="">普通评价和追评</option><option value="initial">普通评价</option><option value="additional">追评</option></select></>}<span className="self-center text-xs text-slate-500">显示 {pickerChoices.length} / {unfilteredPickerChoices.length}，已选 {mediaPicker.selected.size}</span></div><div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">{pickerChoices.map(item=><article key={item.key} className={`rounded-xl border-2 p-2 ${mediaPicker.selected.has(item.key)?'border-brand':'border-slate-200'}`}><button className="block w-full" onClick={()=>setMediaPreview({key:item.key,type:item.type,url:item.url,cover:'cover' in item?item.cover:''})}>{item.type==='video'?<video src={item.url} poster={'cover' in item?item.cover:''} preload="metadata" className="aspect-square w-full rounded-lg bg-black object-contain"/>:<img src={item.url} referrerPolicy="no-referrer" className="aspect-square w-full rounded-lg object-cover"/>}</button><button className="mt-2 w-full rounded-lg border px-2 py-1 text-xs font-bold" onClick={()=>toggleMediaSelection(item.key)}>{mediaPicker.selected.has(item.key)?'已选择':'选择'}</button><p className="mt-1 truncate text-[10px] text-slate-500">{item.label}</p></article>)}</div><div className="sticky bottom-0 mt-4 flex justify-end gap-2 bg-white py-2"><button className="rounded-lg border px-4 py-2" onClick={()=>setMediaPicker(null)}>取消</button><button className="rounded-lg bg-brand px-4 py-2 font-bold text-white" onClick={confirmMediaPicker}>加入所选媒体（{mediaPicker.selected.size}）</button></div></div></div>}
+    {mediaPreview&&<div role="dialog" aria-modal="true" aria-label="媒体预览" className="fixed inset-0 z-[70] flex items-center justify-center bg-black/90 p-6" onClick={()=>setMediaPreview(null)}>{mediaPreview.key&&pickerChoices.length>1&&<><button type="button" aria-label="上一项" className="absolute left-4 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/25" onClick={event=>{event.stopPropagation();moveMediaPreview(-1);}}><ArrowLeft/></button><button type="button" aria-label="下一项" className="absolute right-4 z-10 rounded-full bg-white/15 p-3 text-white hover:bg-white/25" onClick={event=>{event.stopPropagation();moveMediaPreview(1);}}><ArrowRight/></button></>}{mediaPreview.type==='video'?<video key={mediaPreview.url} src={mediaPreview.url} poster={mediaPreview.cover} controls autoPlay className="max-h-[82vh] max-w-full" onClick={e=>e.stopPropagation()}/>:<img src={mediaPreview.url} referrerPolicy="no-referrer" className="max-h-[82vh] max-w-full object-contain" onClick={e=>e.stopPropagation()}/>}<button aria-label="关闭预览" className="absolute right-6 top-6 text-white" onClick={()=>setMediaPreview(null)}><X/></button>{mediaPreview.key&&<div className="absolute bottom-5 left-1/2 flex -translate-x-1/2 items-center gap-3 rounded-full bg-black/70 px-4 py-2 text-sm text-white" onClick={event=>event.stopPropagation()}><span>{Math.max(0,pickerChoices.findIndex(item=>item.key===mediaPreview.key))+1} / {pickerChoices.length}</span><button type="button" className={`rounded-full px-3 py-1 font-bold ${mediaPicker?.selected.has(mediaPreview.key)?'bg-brand':'bg-white/20'}`} onClick={()=>toggleMediaSelection(mediaPreview.key!)}>{mediaPicker?.selected.has(mediaPreview.key)?'已选择':'选择'}</button><span className="hidden text-xs text-white/60 sm:inline">← → 切换 · Enter/空格选择 · Esc 关闭</span></div>}</div>}
   </div>;
 }
 

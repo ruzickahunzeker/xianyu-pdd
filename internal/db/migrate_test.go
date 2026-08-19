@@ -72,12 +72,16 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"pdd_address_operations", "idempotency_key"},
 		{"pdd_address_operations", "pdd_account_id"},
 		{"pdd_accounts", "cookie_encrypted"},
+		{"pdd_message_tasks", "message_fingerprint"},
 		{"order_fulfillments", "pdd_account_id"},
 		{"pdd_account_locks", "expires_at"},
 		{"pdd_purchase_goods_snapshots", "snapshot_json"},
 		{"pdd_purchase_tasks", "lease_token"},
 		{"pdd_purchase_tasks", "pdd_order_json"},
 		{"fulfillment_exception_events", "notification_status"},
+		{"product_materials", "video_enabled"},
+		{"product_materials", "videos_json"},
+		{"pdd_review_media", "media_type"},
 	}
 	for _, c := range checks {
 		if !columnExists(t, db, c.table, c.col) {

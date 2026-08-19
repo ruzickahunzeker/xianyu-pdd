@@ -404,6 +404,13 @@ func (s *Server) discoverSoldOrders(ctx context.Context, fetcher mtop.SoldOrderF
 			return discovered, updated, newOrderIDs, remoteOrderIDs, err
 		}
 		for _, remote := range page.Items {
+			// The seller endpoint can still include an order where the current
+			// account is the buyer (for example, accounts that trade with each
+			// other). Such orders are fulfilled by the other seller and must not
+			// enter this account's order or fulfillment workbench.
+			if sameXianyuAccountID(remote.BuyerID, cookieID) {
+				continue
+			}
 			remoteOrderIDs[remote.OrderID] = struct{}{}
 			if normalizedAmount, ok := db.NormalizeOrderAmount(remote.Amount); ok {
 				remote.Amount = normalizedAmount
@@ -444,6 +451,10 @@ func (s *Server) discoverSoldOrders(ctx context.Context, fetcher mtop.SoldOrderF
 		}
 	}
 	return discovered, updated, newOrderIDs, remoteOrderIDs, fmt.Errorf("订单列表超过 %d 页，已停止继续同步", maxSoldOrderPages)
+}
+
+func sameXianyuAccountID(left, right string) bool {
+	return strings.TrimSpace(left) != "" && strings.TrimSpace(left) == strings.TrimSpace(right)
 }
 
 func soldOrderChanged(existing *db.Order, remote mtop.SoldOrder) bool {

@@ -51,6 +51,20 @@ func TestValidatePDDCollectionFiltersBrandAndShippingOrigin(t *testing.T) {
 	}
 }
 
+func TestValidatePDDReviewMediaAllowsMultipleMediaAndRejectsUntrustedHosts(t *testing.T) {
+	input := pddReviewMediaInput{SchemaVersion: 1, CollectionID: "0d2858ce-43ad-4d1e-b953-01ff9492983a", GoodsID: "977731220380", Media: []pddReviewMediaItemInput{
+		{ReviewID: "767869329074058140", SKUID: "1932571528029", MediaKey: "image:abc", MediaType: "image", SourceType: "initial", RemoteURL: "https://review.pddpic.com/a.jpg", IsLivePhotoImage: true},
+		{ReviewID: "767302508852573084", SKUID: "1932571528030", MediaKey: "video:def", MediaType: "video", SourceType: "additional", RemoteURL: "https://video2.pddpic.com/v.mp4"},
+	}}
+	if err := validatePDDReviewMedia(&input); err != nil {
+		t.Fatal(err)
+	}
+	input.Media[1].RemoteURL = "https://example.com/v.mp4"
+	if err := validatePDDReviewMedia(&input); err == nil {
+		t.Fatal("expected an untrusted media host to be rejected")
+	}
+}
+
 func TestPDDPriceCentFallbackOrder(t *testing.T) {
 	tests := []struct {
 		name   string

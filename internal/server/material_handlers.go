@@ -40,14 +40,26 @@ type materialProperty struct {
 	ImageURL string `json:"image_url,omitempty"`
 }
 type materialInput struct {
-	Title             string         `json:"title"`
-	Description       string         `json:"description"`
-	Images            []string       `json:"images"`
-	Category          map[string]any `json:"category"`
-	SKUs              []materialSKU  `json:"skus"`
-	PostageMode       string         `json:"postage_mode"`
-	PostageCents      int64          `json:"postage_cent"`
-	ImagePropertyName string         `json:"image_property_name"`
+	Title             string          `json:"title"`
+	Description       string          `json:"description"`
+	Images            []string        `json:"images"`
+	Category          map[string]any  `json:"category"`
+	SKUs              []materialSKU   `json:"skus"`
+	PostageMode       string          `json:"postage_mode"`
+	PostageCents      int64           `json:"postage_cent"`
+	ImagePropertyName string          `json:"image_property_name"`
+	VideoEnabled      *bool           `json:"video_enabled"`
+	Videos            []materialVideo `json:"videos"`
+}
+
+type materialVideo struct {
+	Source        string `json:"source"`
+	SourceGoodsID string `json:"source_goods_id,omitempty"`
+	ReviewID      string `json:"review_id,omitempty"`
+	SKUID         string `json:"sku_id,omitempty"`
+	URL           string `json:"url"`
+	CoverURL      string `json:"cover_url,omitempty"`
+	DurationMS    int64  `json:"duration_ms,omitempty"`
 }
 
 // normalizeCollectedMaterialSpecifications removes property dimensions that
@@ -130,7 +142,7 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请选择发布账号")
 		return
 	}
-	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "素材不存在")
 		return
@@ -138,6 +150,10 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 	images := stringSlice(material["images"])
 	if len(images) == 0 || len(images) > 9 {
 		writeErr(w, http.StatusBadRequest, "素材图片必须为 1 到 9 张")
+		return
+	}
+	if material["video_enabled"] == true && len(material["videos"].([]any)) > 0 {
+		writeErr(w, http.StatusUnprocessableEntity, "素材已启用视频，但当前闲鱼视频发布协议尚未接入；请取消“发布视频”后重试")
 		return
 	}
 	var body bytes.Buffer
@@ -549,6 +565,18 @@ func validateMaterial(in *materialInput) error {
 	if len(in.Images) == 0 || len(in.Images) > 9 {
 		return errors.New("素材图片必须为 1 到 9 张")
 	}
+	if in.VideoEnabled == nil {
+		enabled := true
+		in.VideoEnabled = &enabled
+	}
+	if len(in.Videos) > 100 {
+		return errors.New("素材视频不能超过 100 个")
+	}
+	for i := range in.Videos {
+		if strings.TrimSpace(in.Videos[i].URL) == "" {
+			return errors.New("素材视频地址不能为空")
+		}
+	}
 	if len(in.SKUs) == 0 || len(in.SKUs) > 200 {
 		return errors.New("素材必须包含 1 到 200 个 SKU")
 	}
@@ -584,21 +612,22 @@ func validateMaterial(in *materialInput) error {
 	return nil
 }
 
-func materialMap(id, userID int64, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName string, postage, created, updated int64) map[string]any {
-	material := map[string]any{"id": id, "user_id": userID, "source_type": sourceType, "source_id": sourceID, "title": title, "description": description, "images": jsonValue(images, []string{}), "category": jsonValue(category, map[string]any{}), "skus": jsonValue(skus, []any{}), "postage_mode": postageMode, "postage_cent": postage, "status": status, "image_property_name": imagePropertyName, "created_at": created, "updated_at": updated}
+func materialMap(id, userID int64, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos string, postage, created, updated int64, videoEnabled int) map[string]any {
+	material := map[string]any{"id": id, "user_id": userID, "source_type": sourceType, "source_id": sourceID, "title": title, "description": description, "images": jsonValue(images, []string{}), "category": jsonValue(category, map[string]any{}), "skus": jsonValue(skus, []any{}), "postage_mode": postageMode, "postage_cent": postage, "status": status, "image_property_name": imagePropertyName, "video_enabled": videoEnabled != 0, "videos": jsonValue(videos, []any{}), "created_at": created, "updated_at": updated}
 	material["source_ids"] = materialSourceGoodsIDs(material)
 	return material
 }
 func scanMaterial(row interface{ Scan(...any) error }) (map[string]any, error) {
 	var id, userID, postage, created, updated int64
-	var sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName string
-	err := row.Scan(&id, &userID, &sourceType, &sourceID, &title, &description, &images, &category, &skus, &postageMode, &postage, &status, &created, &updated, &imagePropertyName)
-	return materialMap(id, userID, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, postage, created, updated), err
+	var videoEnabled int
+	var sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos string
+	err := row.Scan(&id, &userID, &sourceType, &sourceID, &title, &description, &images, &category, &skus, &postageMode, &postage, &status, &created, &updated, &imagePropertyName, &videoEnabled, &videos)
+	return materialMap(id, userID, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos, postage, created, updated, videoEnabled), err
 }
 
 func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
-	query := `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE user_id=? AND deleted_at IS NULL`
+	query := `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE user_id=? AND deleted_at IS NULL`
 	args := []any{uid}
 	if keyword := strings.TrimSpace(r.URL.Query().Get("q")); keyword != "" {
 		query += ` AND (title LIKE ? OR source_id LIKE ? OR skus_json LIKE ?)`
@@ -626,7 +655,7 @@ func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 func (s *Server) getMaterial(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	m, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	m, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil {
 		writeErr(w, 404, "素材不存在")
 		return
@@ -646,8 +675,13 @@ func (s *Server) insertMaterial(w http.ResponseWriter, r *http.Request, sourceTy
 	images, _ := json.Marshal(in.Images)
 	cat, _ := json.Marshal(in.Category)
 	skus, _ := json.Marshal(in.SKUs)
+	videos, _ := json.Marshal(in.Videos)
+	videoEnabled := 0
+	if in.VideoEnabled != nil && *in.VideoEnabled {
+		videoEnabled = 1
+	}
 	now := time.Now().Unix()
-	res, err := s.Store.DB.ExecContext(r.Context(), `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now, in.ImagePropertyName)
+	res, err := s.Store.DB.ExecContext(r.Context(), `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now, in.ImagePropertyName, videoEnabled, string(videos))
 	if err != nil {
 		writeErr(w, 500, "创建素材失败")
 		return
@@ -732,7 +766,12 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 	images, _ := json.Marshal(in.Images)
 	cat, _ := json.Marshal(in.Category)
 	skus, _ := json.Marshal(in.SKUs)
-	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET title=?,description=?,images_json=?,category_json=?,skus_json=?,postage_mode=?,postage_cent=?,image_property_name=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, in.ImagePropertyName, time.Now().Unix(), id, uid)
+	videos, _ := json.Marshal(in.Videos)
+	videoEnabled := 0
+	if in.VideoEnabled != nil && *in.VideoEnabled {
+		videoEnabled = 1
+	}
+	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET title=?,description=?,images_json=?,category_json=?,skus_json=?,postage_mode=?,postage_cent=?,image_property_name=?,video_enabled=?,videos_json=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, in.ImagePropertyName, videoEnabled, string(videos), time.Now().Unix(), id, uid)
 	if err != nil {
 		writeErr(w, 500, "更新素材失败")
 		return
@@ -813,7 +852,7 @@ func (s *Server) listMaterialPublishRecords(w http.ResponseWriter, r *http.Reque
 func (s *Server) materialSourceDiff(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil || len(materialSourceGoodsIDs(material)) == 0 {
 		writeErr(w, 404, "拼多多来源素材不存在")
 		return
@@ -876,7 +915,7 @@ func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "同步选项无效")
 		return
 	}
-	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil || len(materialSourceGoodsIDs(material)) == 0 {
 		writeErr(w, 404, "拼多多来源素材不存在")
 		return

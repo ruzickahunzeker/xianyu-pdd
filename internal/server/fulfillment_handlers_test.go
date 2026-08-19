@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -126,6 +127,53 @@ func TestFulfillmentRoutesRequireDedicatedAPIKey(t *testing.T) {
 	server.Router().ServeHTTP(sessionResponse, sessionRequest)
 	if sessionResponse.Code != http.StatusOK || !strings.Contains(sessionResponse.Body.String(), `"order_id":"fulfillment-order"`) {
 		t.Fatalf("admin session should use unified fulfillment API: status=%d body=%s", sessionResponse.Code, sessionResponse.Body.String())
+	}
+}
+
+func TestShippingPrecheckNormalizesNumericStatusAndShipmentDoesNotRegress(t *testing.T) {
+	server, store, cleanup := newTestServer(t)
+	defer cleanup()
+	admin, err := store.Users.GetByUsername(t.Context(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO cookies(id,value,user_id) VALUES('shipping-account','unb=1; _m_h5_tk=t_1;',?)`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO orders(order_id,item_id,cookie_id,order_status,system_shipped) VALUES('shipping-order','item-1','shipping-account','2',0)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO order_fulfillments(order_id,user_id,cookie_id,item_id,pdd_order_id,pdd_shipped,logistics_company,logistics_company_code,tracking_number,xianyu_shipped,created_at,updated_at) VALUES('shipping-order',?,'shipping-account','item-1','pdd-1',1,'申通快递','STO','TRACK-1',0,1,1)`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO xianyu_shipping_accounts(cookie_id,user_id,address_id,address_summary,verified_at,created_at,updated_at) VALUES('shipping-account',?,123,'test',1,1,1)`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	server.MTop = withMTopTransport(roundTripFunc(func(_ *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"ret":["SUCCESS::调用成功"],"data":{"addressId":"25152147714"}}`))}, nil
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/fulfillment/orders/shipping-order/shipping-precheck", strings.NewReader(`{}`))
+	req.AddCookie(loginHelper(t, server.Router()))
+	rec := httptest.NewRecorder()
+	server.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ready":true`) {
+		t.Fatalf("numeric pending-ship status should pass: %d %s", rec.Code, rec.Body.String())
+	}
+
+	if _, err = store.DB.Exec(`UPDATE order_fulfillments SET xianyu_shipped=1,xianyu_shipped_at=10 WHERE order_id='shipping-order'`); err != nil {
+		t.Fatal(err)
+	}
+	order, err := store.Orders.Get(t.Context(), "shipping-order")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = server.ensureFulfillment(httptest.NewRequest(http.MethodGet, "/", nil), *order, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	var shipped int
+	if err = store.DB.QueryRow(`SELECT xianyu_shipped FROM order_fulfillments WHERE order_id='shipping-order'`).Scan(&shipped); err != nil || shipped != 1 {
+		t.Fatalf("successful shipment regressed: shipped=%d err=%v", shipped, err)
 	}
 }
 

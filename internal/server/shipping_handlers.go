@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -17,11 +18,15 @@ import (
 )
 
 type offlineConsigner interface {
-	ConsignOfflineContext(context.Context, string, mtop.ConsignOfflineRequest) (bool, []string, string, error)
+	ConsignOfflineContext(context.Context, string, mtop.ConsignOfflineRequest) (bool, []string, json.RawMessage, string, error)
 }
 
 type shippingAddressLister interface {
 	FetchShippingAddressesContext(context.Context, string) ([]mtop.ShippingAddress, []string, string, error)
+}
+
+type consignAddressResolver interface {
+	FetchConsignAddressContext(context.Context, string, string) (int64, []string, string, error)
 }
 
 var officialHotCarriers = map[string]string{"邮政快递包裹": "POSTB", "中通快递": "ZTO", "顺丰速运": "SF", "申通快递": "STO", "韵达快递": "YUNDA", "极兔速递": "HTKY", "圆通速递": "YTO", "EMS": "EMS"}
@@ -186,33 +191,9 @@ func (s *Server) syncShippingAddresses(w http.ResponseWriter, r *http.Request) {
 	}
 	var selected int64
 	_ = tx.QueryRowContext(r.Context(), `SELECT address_id FROM xianyu_shipping_accounts WHERE cookie_id=? AND user_id=?`, cid, uid).Scan(&selected)
-	found := false
-	for _, address := range addresses {
-		if address.ContactID == selected {
-			found = true
-		}
-	}
-	if !found {
-		selected = addresses[0].ContactID
-		for _, address := range addresses {
-			if address.DefaultAddr {
-				selected = address.ContactID
-				break
-			}
-		}
-	}
-	var summary string
-	for _, address := range addresses {
-		if address.ContactID == selected {
-			summary = shippingAddressSummary(address)
-			break
-		}
-	}
-	prefix, suffix := db.DialectInsertIgnorePrefix(s.Store.Dialect), db.DialectInsertIgnore(s.Store.Dialect, []string{"cookie_id"})
-	_, err = tx.ExecContext(r.Context(), prefix+` INTO xianyu_shipping_accounts(cookie_id,user_id,address_id,address_summary,verified_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`+suffix, cid, uid, selected, summary, now, now, now)
-	if err == nil {
-		_, err = tx.ExecContext(r.Context(), `UPDATE xianyu_shipping_accounts SET address_id=?,address_summary=?,verified_at=?,updated_at=? WHERE cookie_id=? AND user_id=?`, selected, summary, now, now, cid, uid)
-	}
+	// The address-list API returns contactId, while the consign API requires a
+	// different addressId. Keep the manually verified addressId unchanged.
+	// Contact rows are reference data only and must never overwrite it.
 	if err != nil || tx.Commit() != nil {
 		writeErr(w, 500, "保存地址失败")
 		return
@@ -263,7 +244,7 @@ func (s *Server) shippingPrecheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	problems := []string{}
-	if order.OrderStatus != "pending_ship" && order.OrderStatus != "paid" {
+	if db.NormalizeOrderStatus(strings.TrimSpace(order.OrderStatus)) != "pending_ship" {
 		problems = append(problems, "闲鱼订单不是待发货状态")
 	}
 	if pddID == "" {
@@ -278,10 +259,12 @@ func (s *Server) shippingPrecheck(w http.ResponseWriter, r *http.Request) {
 	if xianyuShipped != 0 {
 		problems = append(problems, "闲鱼订单已经发货")
 	}
-	var addressID int64
-	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT address_id FROM xianyu_shipping_accounts WHERE cookie_id=? AND user_id=?`, order.CookieID, userID).Scan(&addressID)
+	addressID, addressErr := s.resolveConsignAddressID(r.Context(), order.CookieID, orderID, userID)
+	if addressErr != nil {
+		problems = append(problems, addressErr.Error())
+	}
 	if addressID <= 0 {
-		problems = append(problems, "该闲鱼账号未设置卖家发货地址")
+		problems = append(problems, "未取得闲鱼发货 addressId")
 	}
 	writeJSON(w, 200, map[string]any{"ready": len(problems) == 0, "problems": problems, "order_id": orderID, "pdd_order_id": pddID, "logistics_company": company, "logistics_company_code": code, "tracking_number": tracking, "shipping_status": status, "address_id": addressID})
 }
@@ -322,13 +305,15 @@ func (s *Server) createShippingOperation(w http.ResponseWriter, r *http.Request)
 	if xianyuShipped != 0 {
 		problems = append(problems, "订单已经发货")
 	}
-	if order.OrderStatus != "pending_ship" && order.OrderStatus != "paid" {
+	if db.NormalizeOrderStatus(strings.TrimSpace(order.OrderStatus)) != "pending_ship" {
 		problems = append(problems, "闲鱼订单不是待发货状态")
 	}
-	var addressID int64
-	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT address_id FROM xianyu_shipping_accounts WHERE cookie_id=? AND user_id=?`, order.CookieID, userID).Scan(&addressID)
+	addressID, addressErr := s.resolveConsignAddressID(r.Context(), order.CookieID, orderID, userID)
+	if addressErr != nil {
+		problems = append(problems, addressErr.Error())
+	}
 	if addressID <= 0 {
-		problems = append(problems, "该闲鱼账号未设置卖家发货地址")
+		problems = append(problems, "未取得闲鱼发货 addressId")
 	}
 	request, _ := json.Marshal(map[string]any{"order_id": orderID, "company": company, "cp_code": code, "tracking_number": tracking, "address_id": addressID})
 	opID := uuid.NewString()
@@ -359,10 +344,10 @@ func (s *Server) createShippingOperation(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.purchaseMu.Lock()
-	okResult, ret, updated, callErr := client.ConsignOfflineContext(r.Context(), cookie, mtop.ConsignOfflineRequest{TradeID: orderID, MailNo: tracking, CPCode: code, AddressID: addressID})
+	okResult, ret, responseData, updated, callErr := client.ConsignOfflineContext(r.Context(), cookie, mtop.ConsignOfflineRequest{TradeID: orderID, MailNo: tracking, CPCode: code, AddressID: addressID})
 	s.purchaseMu.Unlock()
 	finished := time.Now().Unix()
-	responseJSON, _ := json.Marshal(map[string]any{"ret": ret})
+	responseJSON, _ := json.Marshal(map[string]any{"ret": ret, "data": json.RawMessage(responseData)})
 	status, errMessage, httpStatus := "failed", "", http.StatusBadGateway
 	if callErr != nil {
 		status = "result_unknown"
@@ -379,9 +364,51 @@ func (s *Server) createShippingOperation(w http.ResponseWriter, r *http.Request)
 	}
 	_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE fulfillment_ship_operations SET status=?,response_json=?,error_message=?,finished_at=? WHERE id=?`, status, string(responseJSON), errMessage, finished, opID)
 	if status == "success" {
-		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET xianyu_shipped=1,xianyu_shipped_at=?,shipping_status='xianyu_shipped',shipping_last_error='',shipping_attempts=shipping_attempts+1,updated_at=? WHERE order_id=? AND user_id=?`, finished, finished, orderID, userID)
+		s.markPhysicalShipmentSuccess(r.Context(), order, userID, finished)
 	} else {
 		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET shipping_status=?,shipping_last_error=?,shipping_attempts=shipping_attempts+1,updated_at=? WHERE order_id=? AND user_id=?`, status, errMessage, finished, orderID, userID)
 	}
 	writeJSON(w, httpStatus, map[string]any{"operation_id": opID, "status": status, "success": status == "success", "ret": ret, "error": errMessage})
+}
+
+func (s *Server) markPhysicalShipmentSuccess(ctx context.Context, order *db.Order, userID, finished int64) {
+	_, _ = s.Store.DB.ExecContext(ctx, `UPDATE order_fulfillments SET xianyu_shipped=1,xianyu_shipped_at=CASE WHEN xianyu_shipped_at=0 THEN ? ELSE xianyu_shipped_at END,shipping_status='xianyu_shipped',shipping_last_error='',shipping_attempts=shipping_attempts+1,updated_at=? WHERE order_id=? AND user_id=?`, finished, finished, order.OrderID, userID)
+	shipped := true
+	if err := s.Store.Orders.Upsert(ctx, order.OrderID, db.OrderUpsertOpts{
+		CookieID: order.CookieID, OrderStatus: "shipped", SystemShipped: &shipped,
+		ItemID: order.ItemID, BuyerID: order.BuyerID, ReceiverName: order.ReceiverName,
+		ReceiverPhone: order.ReceiverPhone, ReceiverAddr: order.ReceiverAddr,
+		ReceiverCity: order.ReceiverCity, ChatID: order.ChatID, SpecName: order.SpecName,
+		SpecValue: order.SpecValue, Quantity: order.Quantity, Amount: order.Amount,
+	}); err != nil {
+		s.Logger.Error("保存闲鱼实物发货状态失败", "order_id", order.OrderID, "err", err)
+	}
+}
+
+func (s *Server) resolveConsignAddressID(ctx context.Context, cookieID, orderID string, userID int64) (int64, error) {
+	cookie, err := s.Store.Cookies.GetValue(ctx, cookieID)
+	if err != nil {
+		return 0, fmt.Errorf("读取闲鱼账号 Cookie 失败")
+	}
+	resolver, ok := s.MTop.(consignAddressResolver)
+	if !ok {
+		return 0, fmt.Errorf("闲鱼发货页地址解析不可用")
+	}
+	addressID, _, updated, err := resolver.FetchConsignAddressContext(ctx, cookie, orderID)
+	if updated != "" && updated != cookie {
+		_ = s.Store.Cookies.UpdateValueOwned(ctx, cookieID, updated, userID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	now := time.Now().Unix()
+	prefix, suffix := db.DialectInsertIgnorePrefix(s.Store.Dialect), db.DialectInsertIgnore(s.Store.Dialect, []string{"cookie_id"})
+	_, err = s.Store.DB.ExecContext(ctx, prefix+` INTO xianyu_shipping_accounts(cookie_id,user_id,address_id,address_summary,verified_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`+suffix, cookieID, userID, addressID, "闲鱼发货页自动获取", now, now, now)
+	if err == nil {
+		_, err = s.Store.DB.ExecContext(ctx, `UPDATE xianyu_shipping_accounts SET address_id=?,address_summary=?,verified_at=?,updated_at=? WHERE cookie_id=? AND user_id=?`, addressID, "闲鱼发货页自动获取", now, now, cookieID, userID)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("保存闲鱼发货 addressId 失败")
+	}
+	return addressID, nil
 }

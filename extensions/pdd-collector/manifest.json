@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "闲鱼助手 · 拼多多采集器",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "从当前拼多多商品页提取商品和 SKU 白名单数据，并首次采集或更新到闲鱼助手。",
   "permissions": [
     "activeTab",

@@ -272,6 +272,13 @@ const Settings: React.FC = () => {
           <OrderSyncSettings settings={settings} onChange={setSettings} />
 
           <section className="space-y-4">
+            <h3 className="text-lg font-extrabold text-gray-800">拼多多商家消息</h3>
+            <div className="ios-card rounded-xl bg-white p-6">
+              <label className="flex items-center justify-between gap-4 rounded-xl bg-red-50 p-4"><span><span className="block text-sm font-bold text-red-900">允许真实发送商家消息</span><span className="text-xs text-red-700">默认关闭。开启后，仍必须在“拼多多消息”工作台逐条人工确认，Worker 才会点击发送。</span></span><input type="checkbox" checked={String(settings.pdd_message_real_send_enabled).toLowerCase()==='true'} onChange={e=>setSettings({...settings,pdd_message_real_send_enabled:e.target.checked})} className="h-5 w-5"/></label>
+            </div>
+          </section>
+
+          <section className="space-y-4">
             <h3 className="text-lg font-extrabold text-gray-800">拼多多物流与闲鱼发货</h3>
             <div className="ios-card rounded-xl p-6 bg-white space-y-5">
               <label className="flex items-center justify-between gap-4"><span><span className="block text-sm font-bold">自动同步拼多多物流</span><span className="text-xs text-gray-500">由 pdd-worker 定时读取待收货页与订单详情。</span></span><input type="checkbox" checked={String(settings.pdd_logistics_sync_enabled).toLowerCase()==='true'} onChange={e=>setSettings({...settings,pdd_logistics_sync_enabled:e.target.checked})} className="w-5 h-5"/></label>

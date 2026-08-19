@@ -36,6 +36,11 @@ type task struct {
 	RecoveryOnly                                          bool
 }
 
+type messageTask struct {
+	ID, LeaseToken, PDDAccountID, GoodsID, SKUID, MallSN, CapturedChatURL string
+	TaskType, Message, Action, PDDOrderID                                 string
+}
+
 type worker struct {
 	baseURL, apiKey, screenshotDir string
 	submit, once, logisticsOnly    bool
@@ -83,8 +88,13 @@ func main() {
 	for {
 		err := w.runOne()
 		if errors.Is(err, errNoTask) {
-			if syncErr := w.syncLogistics(); syncErr != nil {
-				log.Printf("物流同步失败: %v", syncErr)
+			messageErr := w.runMessageOne()
+			if errors.Is(messageErr, errNoTask) {
+				if syncErr := w.syncLogistics(); syncErr != nil {
+					log.Printf("物流同步失败: %v", syncErr)
+				}
+			} else if messageErr != nil {
+				log.Printf("商家消息任务失败: %v", messageErr)
 			}
 		} else if err != nil {
 			log.Printf("采购任务失败: %v", err)
@@ -94,6 +104,112 @@ func main() {
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func (w *worker) runMessageOne() error {
+	t, err := w.claimMessage()
+	if err != nil {
+		return err
+	}
+	ctx, err := w.taskContext(task{PDDAccountID: t.PDDAccountID})
+	if err != nil {
+		return w.messageResult(t, "failed", err.Error(), nil)
+	}
+	defer ctx.Close()
+	page, err := ctx.NewPage()
+	if err != nil {
+		return w.messageResult(t, "failed", err.Error(), nil)
+	}
+	defer page.Close()
+	chatURL := "https://mobile.pinduoduo.com/chat_detail.html?goods_id=" + url.QueryEscape(t.GoodsID) + "&mall_sn=" + url.QueryEscape(t.MallSN) + "&from=goods&page_from=101"
+	if _, err = page.Goto(chatURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil && t.CapturedChatURL != "" {
+		_, err = page.Goto(t.CapturedChatURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
+	}
+	if err != nil {
+		return w.messageResult(t, "failed", "打开商家聊天失败: "+err.Error(), nil)
+	}
+	_ = w.messageHeartbeat(t)
+	body, _ := page.Locator("body").InnerText()
+	normalized := strings.ToLower(body)
+	if strings.Contains(normalized, "登录") && !strings.Contains(normalized, "发送") {
+		return w.messageResult(t, "failed", "login_required", nil)
+	}
+	if strings.Contains(normalized, "验证码") || strings.Contains(normalized, "安全验证") {
+		return w.messageResult(t, "failed", "captcha_required", nil)
+	}
+	current, _ := url.Parse(page.URL())
+	if current != nil && current.Query().Get("mall_sn") != "" && current.Query().Get("mall_sn") != t.MallSN {
+		return w.messageResult(t, "failed", "merchant_mismatch", nil)
+	}
+	input := page.Locator("textarea#input-content, textarea.input-content").First()
+	if count, _ := input.Count(); count != 1 {
+		return w.messageResult(t, "failed", "input_not_found", nil)
+	}
+	button := page.Locator("div.send-button").Filter(playwright.LocatorFilterOptions{HasText: "发送"}).First()
+	if t.Action == "preflight" {
+		// The send button is rendered only after text exists. A preflight must not
+		// mutate the input, so input visibility is the safe readiness boundary.
+		_ = w.screenshot(page, "message-"+t.ID+"-preflight.png")
+		_, err = w.jsonRequest(http.MethodPost, "/api/pdd/messages/"+t.ID+"/preflight", map[string]any{"lease_token": t.LeaseToken}, nil)
+		return err
+	}
+	if err = input.Fill(t.Message); err != nil {
+		return w.messageResult(t, "failed", "填写消息失败: "+err.Error(), nil)
+	}
+	if actual, readErr := input.InputValue(); readErr != nil || actual != t.Message {
+		return w.messageResult(t, "failed", "消息正文回读不一致", nil)
+	}
+	if count, _ := button.Count(); count != 1 {
+		return w.messageResult(t, "failed", "send_button_not_found", nil)
+	}
+	_ = w.screenshot(page, "message-"+t.ID+"-before-send.png")
+	clicked := false
+	if err = button.Click(); err != nil {
+		return w.messageResult(t, "failed", "点击发送失败: "+err.Error(), nil)
+	}
+	clicked = true
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		value, _ := input.InputValue()
+		pageBody, _ := page.Locator("body").InnerText()
+		if value == "" && strings.Contains(pageBody, t.Message) {
+			_ = w.screenshot(page, "message-"+t.ID+"-verified.png")
+			return w.messageResult(t, "verified", "", map[string]any{"url": page.URL(), "input_cleared": true, "message_visible": true})
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	if clicked {
+		return w.messageResult(t, "result_unknown", "点击发送后无法确认消息是否出现", map[string]any{"url": page.URL(), "clicked": true})
+	}
+	return w.messageResult(t, "failed", "发送未执行", nil)
+}
+
+func (w *worker) claimMessage() (messageTask, error) {
+	var raw map[string]any
+	status, err := w.jsonRequest(http.MethodPost, "/api/pdd/messages/claim", map[string]any{"worker_id": "pdd-worker", "lease_seconds": 180}, &raw)
+	if status == http.StatusNotFound {
+		return messageTask{}, errNoTask
+	}
+	if err != nil {
+		return messageTask{}, err
+	}
+	text := func(k string) string { v, _ := raw[k].(string); return v }
+	return messageTask{ID: text("id"), LeaseToken: text("lease_token"), PDDAccountID: text("pdd_account_id"), GoodsID: text("goods_id"), SKUID: text("sku_id"), MallSN: text("mall_sn"), CapturedChatURL: text("captured_chat_url"), TaskType: text("task_type"), Message: text("message"), Action: text("action"), PDDOrderID: text("pdd_order_id")}, nil
+}
+
+func (w *worker) messageHeartbeat(t messageTask) error {
+	_, err := w.jsonRequest(http.MethodPost, "/api/pdd/messages/"+t.ID+"/heartbeat", map[string]any{"lease_token": t.LeaseToken}, nil)
+	return err
+}
+func (w *worker) messageResult(t messageTask, status, reason string, result map[string]any) error {
+	_, err := w.jsonRequest(http.MethodPost, "/api/pdd/messages/"+t.ID+"/result", map[string]any{"lease_token": t.LeaseToken, "status": status, "error": reason, "result": result}, nil)
+	if err != nil {
+		return fmt.Errorf("%s（回传失败: %v）", reason, err)
+	}
+	if status != "verified" {
+		return errors.New(reason)
+	}
+	return nil
 }
 
 var errNoTask = errors.New("没有可领取任务")

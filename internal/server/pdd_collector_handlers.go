@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -68,10 +69,35 @@ type pddCollectionInput struct {
 	SKUs []pddSKUInput `json:"skus"`
 }
 
+type pddReviewMediaItemInput struct {
+	ReviewID         string `json:"review_id"`
+	SKUID            string `json:"sku_id"`
+	MediaKey         string `json:"media_key"`
+	MediaType        string `json:"media_type"`
+	SourceType       string `json:"source_type"`
+	RemoteURL        string `json:"remote_url"`
+	CoverURL         string `json:"cover_url"`
+	MediaMD5         string `json:"media_md5"`
+	Width            int    `json:"width"`
+	Height           int    `json:"height"`
+	DurationMS       int64  `json:"duration_ms"`
+	IsLivePhotoImage bool   `json:"is_live_photo_image"`
+}
+
+type pddReviewMediaInput struct {
+	SchemaVersion int                       `json:"schema_version"`
+	CollectionID  string                    `json:"collection_id"`
+	GoodsID       string                    `json:"goods_id"`
+	FinalURL      string                    `json:"final_url"`
+	CollectedAt   string                    `json:"collected_at"`
+	Media         []pddReviewMediaItemInput `json:"media"`
+}
+
 func (s *Server) mountPDDCollectorPublic(r interface {
 	Post(string, http.HandlerFunc)
 }) {
 	r.Post("/api/pdd-collector/products", s.pddCollectorUpload)
+	r.Post("/api/pdd-collector/review-media", s.pddReviewMediaUpload)
 }
 
 func (s *Server) mountPDDCollectorAdmin(r interface {
@@ -83,8 +109,147 @@ func (s *Server) mountPDDCollectorAdmin(r interface {
 	r.Get("/api/pdd-collector/devices", s.pddListCollectorDevices)
 	r.Get("/api/pdd-collector/catalog", s.pddListProducts)
 	r.Get("/api/pdd-collector/catalog/{goodsID}", s.pddGetProduct)
+	r.Get("/api/pdd-collector/catalog/{goodsID}/review-media", s.pddListReviewMedia)
+	r.Get("/api/pdd-collector/catalog/{goodsID}/media-summary", s.pddMediaSummary)
 	r.Post("/api/pdd-collector/catalog/{goodsID}/refresh", s.pddRefreshProduct)
 	r.Delete("/api/pdd-collector/catalog/{goodsID}", s.pddDeleteProduct)
+}
+
+func validPDDMediaURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "pddpic.com" || strings.HasSuffix(host, ".pddpic.com") || host == "yangkeduo.com" || strings.HasSuffix(host, ".yangkeduo.com") || host == "pinduoduo.com" || strings.HasSuffix(host, ".pinduoduo.com")
+}
+
+func validatePDDReviewMedia(in *pddReviewMediaInput) error {
+	if in.SchemaVersion != 1 || !pddNumericID.MatchString(in.GoodsID) {
+		return errors.New("评论媒体数据版本或 goods_id 无效")
+	}
+	if _, err := uuid.Parse(in.CollectionID); err != nil {
+		return errors.New("collection_id 必须是 UUID")
+	}
+	if len(in.Media) > 5000 {
+		return errors.New("单次评论媒体不能超过 5000 个")
+	}
+	seen := map[string]bool{}
+	for i := range in.Media {
+		item := &in.Media[i]
+		item.ReviewID, item.SKUID, item.MediaKey = strings.TrimSpace(item.ReviewID), strings.TrimSpace(item.SKUID), strings.TrimSpace(item.MediaKey)
+		if item.ReviewID == "" || item.MediaKey == "" || len(item.MediaKey) > 255 || (item.MediaType != "image" && item.MediaType != "video") || !validPDDMediaURL(item.RemoteURL) {
+			return fmt.Errorf("第 %d 个评论媒体无效", i+1)
+		}
+		if item.SKUID != "" && !pddNumericID.MatchString(item.SKUID) {
+			return fmt.Errorf("第 %d 个评论媒体 sku_id 无效", i+1)
+		}
+		if item.SourceType != "initial" && item.SourceType != "additional" {
+			return fmt.Errorf("第 %d 个评论媒体来源无效", i+1)
+		}
+		if seen[item.MediaKey] {
+			return fmt.Errorf("评论媒体 %s 重复", item.MediaKey)
+		}
+		seen[item.MediaKey] = true
+	}
+	return nil
+}
+
+func (s *Server) pddReviewMediaUpload(w http.ResponseWriter, r *http.Request) {
+	deviceID, err := s.authenticateCollector(r)
+	if err != nil {
+		writeErr(w, 401, "设备 Token 无效或已停用")
+		return
+	}
+	var in pddReviewMediaInput
+	if decodeJSON(r, &in) != nil {
+		writeErr(w, 400, "请求格式错误")
+		return
+	}
+	if err = validatePDDReviewMedia(&in); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	collectedAt := time.Now().Unix()
+	if parsed, e := time.Parse(time.RFC3339, in.CollectedAt); e == nil {
+		collectedAt = parsed.Unix()
+	}
+	now := time.Now().Unix()
+	upsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id", "media_key"}, map[string]string{"review_id": "EXCLUDED.review_id", "sku_id": "EXCLUDED.sku_id", "media_type": "EXCLUDED.media_type", "source_type": "EXCLUDED.source_type", "remote_url": "EXCLUDED.remote_url", "cover_url": "EXCLUDED.cover_url", "media_md5": "EXCLUDED.media_md5", "width": "EXCLUDED.width", "height": "EXCLUDED.height", "duration_ms": "EXCLUDED.duration_ms", "is_live_photo_image": "EXCLUDED.is_live_photo_image", "last_seen_at": "EXCLUDED.last_seen_at"})
+	tx, err := s.Store.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, 500, "启动评论媒体事务失败")
+		return
+	}
+	defer tx.Rollback()
+	for _, item := range in.Media {
+		live := 0
+		if item.IsLivePhotoImage {
+			live = 1
+		}
+		if _, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_review_media(goods_id,review_id,sku_id,media_key,media_type,source_type,remote_url,cover_url,media_md5,width,height,duration_ms,is_live_photo_image,collected_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`+upsert, in.GoodsID, item.ReviewID, item.SKUID, item.MediaKey, item.MediaType, item.SourceType, item.RemoteURL, item.CoverURL, item.MediaMD5, item.Width, item.Height, item.DurationMS, live, collectedAt, now); err != nil {
+			writeErr(w, 500, "保存评论媒体失败")
+			return
+		}
+	}
+	_, _ = tx.ExecContext(r.Context(), `UPDATE pdd_collector_devices SET last_seen_at=?,last_collected_at=? WHERE id=?`, now, now, deviceID)
+	if err = tx.Commit(); err != nil {
+		writeErr(w, 500, "提交评论媒体失败")
+		return
+	}
+	writeJSON(w, 201, map[string]any{"status": "collected", "goods_id": in.GoodsID, "saved_count": len(in.Media)})
+}
+
+func (s *Server) pddListReviewMedia(w http.ResponseWriter, r *http.Request) {
+	goodsID := chi.URLParam(r, "goodsID")
+	if !pddNumericID.MatchString(goodsID) {
+		writeErr(w, 400, "goods_id 无效")
+		return
+	}
+	mediaType := strings.TrimSpace(r.URL.Query().Get("type"))
+	if mediaType != "" && mediaType != "image" && mediaType != "video" {
+		writeErr(w, 400, "媒体类型无效")
+		return
+	}
+	query := `SELECT id,review_id,sku_id,media_type,source_type,remote_url,cover_url,media_md5,width,height,duration_ms,is_live_photo_image,collected_at,last_seen_at FROM pdd_review_media WHERE goods_id=?`
+	args := []any{goodsID}
+	if mediaType != "" {
+		query += ` AND media_type=?`
+		args = append(args, mediaType)
+	}
+	query += ` ORDER BY last_seen_at DESC,id DESC`
+	rows, err := s.Store.DB.QueryContext(r.Context(), query, args...)
+	if err != nil {
+		writeErr(w, 500, "查询评论媒体失败")
+		return
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var id, collected, last, duration int64
+		var reviewID, skuID, typ, source, remote, cover, md5 string
+		var width, height, live int
+		if rows.Scan(&id, &reviewID, &skuID, &typ, &source, &remote, &cover, &md5, &width, &height, &duration, &live, &collected, &last) != nil {
+			writeErr(w, 500, "读取评论媒体失败")
+			return
+		}
+		out = append(out, map[string]any{"id": id, "goods_id": goodsID, "review_id": reviewID, "sku_id": skuID, "media_type": typ, "source_type": source, "url": remote, "cover_url": cover, "media_md5": md5, "width": width, "height": height, "duration_ms": duration, "is_live_photo_image": live != 0, "collected_at": collected, "last_seen_at": last})
+	}
+	writeJSON(w, 200, out)
+}
+
+func (s *Server) pddMediaSummary(w http.ResponseWriter, r *http.Request) {
+	goodsID := chi.URLParam(r, "goodsID")
+	if !pddNumericID.MatchString(goodsID) {
+		writeErr(w, 400, "goods_id 无效")
+		return
+	}
+	var productImages string
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT images_json FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&productImages)
+	var imageCount, videoCount int64
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM pdd_review_media WHERE goods_id=? AND media_type='image'`, goodsID).Scan(&imageCount)
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM pdd_review_media WHERE goods_id=? AND media_type='video'`, goodsID).Scan(&videoCount)
+	writeJSON(w, 200, map[string]any{"goods_id": goodsID, "product_image_count": len(stringSlice(map[string]any{"images": jsonValue(productImages, []string{})}["images"])), "review_image_count": imageCount, "review_video_count": videoCount})
 }
 
 func pddProductURL(raw, goodsID string) string {

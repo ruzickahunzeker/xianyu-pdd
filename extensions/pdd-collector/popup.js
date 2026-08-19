@@ -13,6 +13,7 @@ const elements = {
   skuCount: document.querySelector("#sku-count")
 };
 let accountPayload = null;
+let reviewMediaPayload = null;
 
 function status(text, kind = "") {
   elements.status.textContent = text;
@@ -74,6 +75,25 @@ elements.upload.addEventListener("click", async () => {
   } finally {
     elements.upload.disabled = false;
   }
+});
+
+document.querySelector("#capture-review-media").addEventListener("click", async () => {
+  const button = document.querySelector("#capture-review-media"); button.disabled = true; status("正在读取评论媒体…");
+  try {
+    const data = await call({ type: "CAPTURE_REVIEW_MEDIA" }); reviewMediaPayload = data;
+    document.querySelector("#review-goods-id").textContent = data.goods_id;
+    document.querySelector("#review-image-count").textContent = String(data.media.filter(item => item.media_type === "image").length);
+    document.querySelector("#review-video-count").textContent = String(data.media.filter(item => item.media_type === "video").length);
+    document.querySelector("#review-media-summary").classList.remove("hidden");
+    document.querySelector("#upload-review-media").disabled = false;
+    status(`采集成功：${data.media.length} 个评论媒体`, "success");
+  } catch (error) { status(error.message.replace(/^\w+:\s*/, ""), "error"); } finally { button.disabled = false; }
+});
+document.querySelector("#upload-review-media").addEventListener("click", async () => {
+  if (!reviewMediaPayload) return;
+  const button = document.querySelector("#upload-review-media"); button.disabled = true; status("正在上传评论媒体…");
+  try { const result = await call({ type: "UPLOAD_REVIEW_MEDIA", payload: reviewMediaPayload }); status(`上传成功：保存 ${result.saved_count || 0} 个媒体`, "success"); }
+  catch (error) { status(error.message, "error"); } finally { button.disabled = false; }
 });
 
 document.querySelector("#open-options").addEventListener("click", () => chrome.runtime.openOptionsPage());

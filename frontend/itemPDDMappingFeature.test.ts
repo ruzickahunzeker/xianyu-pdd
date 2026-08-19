@@ -24,4 +24,14 @@ describe('item PDD SKU mapping UI', () => {
     expect(materials).toContain('quantity: 0, enabled: true, properties');
     expect(materials).toContain("current.source_type === 'pdd' && !sku.source_sku_id");
   });
+
+  test('supports keyboard navigation and selection in collected media preview', () => {
+    const materials = source('components/ProductMaterials.tsx');
+    expect(materials).toContain("event.key === 'ArrowLeft'");
+    expect(materials).toContain("event.key === 'ArrowRight'");
+    expect(materials).toContain("event.key === 'Enter' || event.key === ' '");
+    expect(materials).toContain("event.key === 'Escape'");
+    expect(materials).toContain('toggleMediaSelection(mediaPreview.key)');
+    expect(materials).toContain('pickerChoices[(index + direction + pickerChoices.length) % pickerChoices.length]');
+  });
 });

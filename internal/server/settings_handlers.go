@@ -62,7 +62,7 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "订单自动同步开关无效")
 		return
 	}
-	for _, key := range []string{"pdd_logistics_sync_enabled", "shipping_auto_enabled"} {
+	for _, key := range []string{"pdd_logistics_sync_enabled", "shipping_auto_enabled", "pdd_message_real_send_enabled"} {
 		if value, ok := values[key]; ok && value != "true" && value != "false" {
 			writeErr(w, http.StatusBadRequest, "发货自动化开关无效")
 			return

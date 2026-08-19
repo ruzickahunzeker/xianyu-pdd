@@ -29,6 +29,7 @@ type fulfillmentPatch struct {
 }
 
 func (s *Server) mountFulfillment(r chi.Router) {
+	s.mountPDDMessages(r)
 	r.Get("/api/fulfillment/orders", s.listFulfillments)
 	r.Post("/api/fulfillment/reconcile", s.reconcileFulfillments)
 	r.Get("/api/fulfillment/history-repair/preview", s.previewFulfillmentHistoryRepair)
@@ -66,7 +67,9 @@ func (s *Server) ensureFulfillment(r *http.Request, order db.Order, userID int64
 	if _, err := s.Store.DB.ExecContext(r.Context(), insertPrefix+` INTO order_fulfillments(order_id,user_id,cookie_id,item_id,created_at,updated_at) VALUES(?,?,?,?,?,?)`+insertSuffix, order.OrderID, userID, order.CookieID, order.ItemID, now, now); err != nil {
 		return err
 	}
-	_, err := s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET cookie_id=?,item_id=?,xianyu_shipped=?,xianyu_shipped_at=CASE WHEN ?=1 AND xianyu_shipped_at=0 THEN ? ELSE xianyu_shipped_at END,updated_at=? WHERE order_id=? AND user_id=?`, order.CookieID, order.ItemID, boolInt(order.SystemShipped), boolInt(order.SystemShipped), now, now, order.OrderID, userID)
+	// Successful physical shipping is irreversible locally. A later order refresh
+	// may advance this flag, but stale platform data must never reset it.
+	_, err := s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET cookie_id=?,item_id=?,xianyu_shipped=CASE WHEN xianyu_shipped=1 OR ?=1 THEN 1 ELSE 0 END,xianyu_shipped_at=CASE WHEN ?=1 AND xianyu_shipped_at=0 THEN ? ELSE xianyu_shipped_at END,updated_at=? WHERE order_id=? AND user_id=?`, order.CookieID, order.ItemID, boolInt(order.SystemShipped), boolInt(order.SystemShipped), now, now, order.OrderID, userID)
 	if err == nil {
 		s.resolveFulfillmentSKU(r, order, userID)
 	}

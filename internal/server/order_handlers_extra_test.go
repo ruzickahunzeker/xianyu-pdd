@@ -102,6 +102,44 @@ func TestRefreshOrdersSoftDeletesOrdersMissingFromSellerList(t *testing.T) {
 	}
 }
 
+func TestRefreshOrdersExcludesOrdersBoughtByCurrentAccount(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO orders (order_id,item_id,buyer_id,cookie_id,order_status) VALUES ('self-purchase-old','buy-item','acc1','acc1','pending_ship')`)
+	_, _ = store.DB.ExecContext(ctx, `INSERT INTO order_fulfillments (order_id,user_id,cookie_id,item_id) VALUES ('self-purchase-old',1,'acc1','buy-item')`)
+	srv.MTop = withMTopTransport(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{"ret":["SUCCESS::调用成功"],"data":{"module":{"nextPage":"false","totalCount":"2","items":[{` +
+			`"commonData":{"orderId":"self-purchase-old","itemId":"buy-item","orderStatus":"待发货"},` +
+			`"buyerInfoVO":{"buyerId":"acc1"},"priceVO":{"totalPrice":"10.00","buyNum":"1"}},{` +
+			`"commonData":{"orderId":"self-purchase-new","itemId":"buy-item-2","orderStatus":"待发货"},` +
+			`"buyerInfoVO":{"buyerId":" acc1 "},"priceVO":{"totalPrice":"20.00","buyNum":"1"}}]}}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	}))
+	h := srv.Router()
+	cookie := loginHelper(t, h)
+	req := httptest.NewRequest(http.MethodPost, "/api/orders/refresh", nil)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"discovered":0`) || !strings.Contains(rec.Body.String(), `"soft_deleted":1`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := store.Orders.Get(ctx, "self-purchase-old"); err == nil {
+		t.Fatal("历史买入订单应在完整同步后从活动订单中移除")
+	}
+	if _, err := store.Orders.Get(ctx, "self-purchase-new"); err == nil {
+		t.Fatal("新发现的买入订单不应写入订单表")
+	}
+	var visibleFulfillments int
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM order_fulfillments f JOIN orders o ON o.order_id=f.order_id WHERE f.order_id='self-purchase-old' AND o.deleted_at IS NULL`).Scan(&visibleFulfillments); err != nil {
+		t.Fatal(err)
+	}
+	if visibleFulfillments != 0 {
+		t.Fatalf("买入订单不应出现在履约工作台，visible=%d", visibleFulfillments)
+	}
+}
+
 func TestMissingRefreshResultsAreCounted(t *testing.T) {
 	targets := []refreshTarget{{OrderID: "a"}, {OrderID: "b"}, {OrderID: "c"}}
 	missing := missingRefreshTargetIDs(targets, map[string]struct{}{"b": {}})

@@ -1,9 +1,9 @@
-import { collectDefaultAddressID, collectPDDProduct, isPDDAddressPage } from "./collector.js";
+import { collectDefaultAddressID, collectPDDProduct, collectPDDReviewMedia, isPDDAddressPage } from "./collector.js";
 
 const PDD_ADDRESS_URL = "https://mobile.pinduoduo.com/addresses.html";
 
 const DEFAULT_SETTINGS = {
-  serverURL: "http://127.0.0.1:8080",
+  serverURL: "http://127.0.0.1:59188",
   deviceToken: "",
  };
 
@@ -35,6 +35,10 @@ function endpoint(baseURL) {
   return `${base}/api/pdd-collector/products`;
 }
 
+function reviewMediaEndpoint(baseURL) {
+  return `${baseURL.replace(/\/+$/, "")}/api/pdd-collector/review-media`;
+}
+
 async function upload(payload) {
   const config = await settings();
   if (!config.serverURL) throw new Error("请先配置服务端地址");
@@ -56,6 +60,27 @@ async function upload(payload) {
   return body;
 }
 
+async function captureReviewMedia() {
+  const tab = await activeTab();
+  const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: () => JSON.stringify(globalThis.rawData || null) });
+  const data = collectPDDReviewMedia(JSON.parse(result), tab.url);
+  await chrome.storage.local.set({ lastReviewMedia: data });
+  return data;
+}
+
+async function uploadReviewMedia(payload) {
+  const config = await settings();
+  if (!config.serverURL) throw new Error("请先配置服务端地址");
+  if (!config.deviceToken) throw new Error("请先配置设备 Token");
+  const target = reviewMediaEndpoint(config.serverURL);
+  const response = await fetch(target, { method: "POST", headers: { "Authorization": `Bearer ${config.deviceToken}`, "Content-Type": "application/json", "X-Collector-Version": chrome.runtime.getManifest().version }, body: JSON.stringify(payload) });
+  const text = await response.text();
+  let body;
+  try { body = text ? JSON.parse(text) : {}; } catch { body = { message: text }; }
+  if (!response.ok) throw new Error(body?.detail || body?.message || `上传失败：HTTP ${response.status}（${target}）`);
+  return body;
+}
+
 async function captureAccount() {
   const tab = await activeTab();
   if (!isPDDAddressPage(tab.url)) {
@@ -69,7 +94,18 @@ async function captureAccount() {
   const cookie = [...unique.values()].map(item => `${item.name}=${item.value}`).join("; ");
   const pddUID = [...unique.values()].find(item => item.name === "pdd_user_id")?.value || "";
   if (!pddUID) throw new Error("未读取到 pdd_user_id，请确认拼多多已登录");
-  const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: () => ({ rawData: globalThis.rawData || null, userAgent: navigator.userAgent }) });
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tab.id },
+    world: "MAIN",
+    func: async () => {
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        if (globalThis.rawData && typeof globalThis.rawData === "object") break;
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      return { rawData: globalThis.rawData || null, userAgent: navigator.userAgent };
+    }
+  });
   const data = { cookie, pdd_uid: pddUID, default_address_id: collectDefaultAddressID(result?.rawData), user_agent: result?.userAgent || "", captured_at: new Date().toISOString() };
   await chrome.storage.local.set({ lastPDDAccount: data });
   return { ...data, cookie_masked: `${cookie.slice(0, 18)}…（${unique.size} 项）` };
@@ -86,6 +122,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       : message?.type === "UPLOAD" ? upload(message.payload)
       : message?.type === "CAPTURE_ACCOUNT" ? captureAccount()
         : message?.type === "OPEN_ADDRESS_PAGE" ? openAddressPage()
+          : message?.type === "CAPTURE_REVIEW_MEDIA" ? captureReviewMedia()
+            : message?.type === "UPLOAD_REVIEW_MEDIA" ? uploadReviewMedia(message.payload)
       : Promise.reject(new Error("未知操作"));
   action.then((data) => sendResponse({ ok: true, data }))
     .catch((error) => sendResponse({ ok: false, error: error?.message || String(error), code: error?.code || "" }));

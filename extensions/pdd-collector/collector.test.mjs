@@ -1,7 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { collectDefaultAddressID, collectMallSN, collectPDDProduct, isPDDAddressPage } from "./collector.js";
+import { collectDefaultAddressID, collectMallSN, collectPDDProduct, collectPDDReviewMedia, isPDDAddressPage } from "./collector.js";
+
+test("collectPDDReviewMedia stores live photos only as images and keeps normal videos separate", () => {
+  const url = "https://mobile.pinduoduo.com/goods_comments.html?goods_id=977731220380";
+  const result = collectPDDReviewMedia({ store: { goodsId: "977731220380", pageNumber: 2, noMoreComments: false, commentsList: [{ reviewId: "r1", skuId: 12, pictures: [{ url: "https://review/a.jpg", picMd5: "a" }], picAndVideo: [{ type: 1, url: "https://review/a.jpg", pic_md5: "a" }, { type: 0, src: "https://video/v.mp4" }, { type: 1, url: "https://review/live.jpg", live_photo: true, live_photo_video: { url: "https://video/live.mp4" } }] }] } }, url);
+  assert.deepEqual(result.media.map(item => [item.media_type, item.remote_url]), [["image", "https://review/a.jpg"], ["video", "https://video/v.mp4"], ["image", "https://review/live.jpg"]]);
+  assert.equal(result.media[2].is_live_photo_image, true);
+  assert.equal(result.media.some(item => item.remote_url === "https://video/live.mp4"), false);
+});
+
+test("collectPDDReviewMedia supports camelCase live-photo fields from pictures", () => {
+  const url = "https://mobile.pinduoduo.com/goods_comments.html?goods_id=920525700280";
+  const result = collectPDDReviewMedia({ store: { goodsId: "920525700280", commentsList: [{
+    reviewId: "r2", skuId: 34,
+    pictures: [{ url: "https://review/live-camel.jpg", livePhoto: true, livePhotoVideo: { url: "https://video/live-camel.mp4" } }],
+    picAndVideo: []
+  }] } }, url);
+  assert.deepEqual(result.media.map(item => [item.media_type, item.remote_url]), [["image", "https://review/live-camel.jpg"]]);
+  assert.equal(result.media[0].is_live_photo_image, true);
+});
 
 test("isPDDAddressPage accepts only the canonical address page", () => {
   assert.equal(isPDDAddressPage("https://mobile.pinduoduo.com/addresses.html?refer_page=personal"), true);
@@ -22,6 +41,24 @@ test("collectDefaultAddressID accepts supported default flag representations", (
   for (const isDefault of ["1", 1, true]) {
     assert.equal(collectDefaultAddressID({ store: { addressList: [{ addressId: "60984097534", isDefault }] } }), "60984097534");
   }
+});
+
+test("collectDefaultAddressID supports nested address stores and snake_case fields", () => {
+  const rawData = {
+    addressesStore: {
+      loaded: true,
+      addresses: [
+        { address_id: 60984097533, is_default: 0 },
+        { address_id: 60984097534, is_default: 1 }
+      ]
+    }
+  };
+  assert.equal(collectDefaultAddressID(rawData), "60984097534");
+});
+
+test("collectDefaultAddressID de-duplicates the same default address across page stores", () => {
+  const address = { addressId: "60984097534", isDefault: true };
+  assert.equal(collectDefaultAddressID({ store: { addressList: [address] }, addressStore: { addresses: [address] } }), "60984097534");
 });
 
 test("collectDefaultAddressID rejects missing, ambiguous and invalid defaults", () => {

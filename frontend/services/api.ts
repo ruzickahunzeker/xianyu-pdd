@@ -444,7 +444,7 @@ export const clearFulfillmentExceptions = (scope:'all'|'resolved'='all'):Promise
 export const resolveFulfillmentException = (eventId:string):Promise<ApiResponse> => put(`/api/fulfillment/exceptions/${encodeURIComponent(eventId)}/resolve`,{});
 export interface ShippingPrecheck { ready:boolean; problems:string[]; order_id:string; pdd_order_id:string; logistics_company:string; logistics_company_code:string; tracking_number:string; shipping_status:string; }
 export const shippingPrecheck = (orderId:string):Promise<ShippingPrecheck> => post(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/shipping-precheck`,{});
-export const submitPhysicalShipment = async (orderId:string,idempotencyKey:string):Promise<ApiResponse> => {
+export const submitPhysicalShipment = async (orderId:string,idempotencyKey:string):Promise<ApiResponse & {status?:string;error?:string;replayed?:boolean}> => {
   const response=await fetch(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/ship`,{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:'{}'});
   const data=await response.json().catch(()=>({})); if(!response.ok) throw new Error(data.error||data.detail||`HTTP ${response.status}`); return data;
 };
@@ -453,6 +453,14 @@ export interface ShippingAccountConfig { cookie_id:string; remark:string; addres
 export const getShippingAccounts = ():Promise<ShippingAccountConfig[]> => get('/api/fulfillment/shipping-accounts');
 export const saveShippingAccount = (cookieId:string,addressId:number,addressSummary=''):Promise<ApiResponse> => put(`/api/fulfillment/shipping-accounts/${encodeURIComponent(cookieId)}`,{address_id:addressId,address_summary:addressSummary});
 export const syncShippingAccountAddresses = (cookieId:string):Promise<{success:boolean;count:number;selected_address_id:number}> => post(`/api/fulfillment/shipping-accounts/${encodeURIComponent(cookieId)}/sync`,{});
+
+export interface PDDMessageTask { id:string;pdd_account_id:string;goods_id:string;sku_id:string;mall_sn:string;task_type:string;message:string;business_id:string;xianyu_order_id:string;pdd_order_id:string;send_mode:string;status:string;attempts:number;sent_at:number;verified_at:number;last_error:string;created_at:number; }
+export interface PDDMessageInput { pdd_account_id?:string;goods_id:string;sku_id?:string;mall_sn?:string;task_type:string;business_id?:string;xianyu_order_id?:string;pdd_order_id?:string;message:string;send_mode:'manual_confirm';metadata?:Record<string,unknown>; }
+export const getPDDMessages = (status=''):Promise<PDDMessageTask[]> => get(`/api/pdd/messages${status?`?status=${encodeURIComponent(status)}`:''}`);
+export const createPDDMessage = async (input:PDDMessageInput,idempotencyKey:string):Promise<PDDMessageTask> => { const response=await fetch('/api/pdd/messages',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','Idempotency-Key':idempotencyKey},body:JSON.stringify(input)});const data=await response.json().catch(()=>({}));if(!response.ok)throw new Error(data.error||data.detail||`HTTP ${response.status}`);return data; };
+export const confirmPDDMessage = (id:string):Promise<ApiResponse> => post(`/api/pdd/messages/${encodeURIComponent(id)}/confirm`,{});
+export const cancelPDDMessage = (id:string):Promise<ApiResponse> => post(`/api/pdd/messages/${encodeURIComponent(id)}/cancel`,{});
+export const retryPDDMessage = (id:string):Promise<ApiResponse> => post(`/api/pdd/messages/${encodeURIComponent(id)}/retry`,{});
 
 export const getDashboardStats = async (): Promise<DashboardStats> => {
   return get('/dashboard/stats');
@@ -1192,13 +1200,16 @@ export interface PDDProductRefreshResult {
 export const refreshPDDProduct = (goodsId:string):Promise<PDDProductRefreshResult> => post(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}/refresh`,{});
 export const deletePDDProduct = (goodsId:string):Promise<{draft_count:number;message:string}> => del(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
 export interface ProductMaterialSKU { material_sku_id?:string; source_goods_id?:string; source_sku_id?:string; source_properties?:Array<{name:string;value:string}>; source_image_url?:string; price_cent:number; quantity:number; enabled:boolean; image_url?:string; properties:Array<{name:string;value:string;image_url?:string}> }
-export interface ProductMaterial { id:number; source_type:string; source_id:string; source_ids?:string[]; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; image_property_name:string; status:string; updated_at:number }
+export interface ProductMaterialVideo { source:'review'|'product'|'upload';source_goods_id?:string;review_id?:string;sku_id?:string;url:string;cover_url?:string;duration_ms?:number }
+export interface ProductMaterial { id:number; source_type:string; source_id:string; source_ids?:string[]; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; image_property_name:string; video_enabled:boolean; videos:ProductMaterialVideo[]; status:string; updated_at:number }
+export interface PDDReviewMedia { id:number;goods_id:string;review_id:string;sku_id:string;media_type:'image'|'video';source_type:'initial'|'additional';url:string;cover_url:string;width:number;height:number;duration_ms:number;is_live_photo_image:boolean }
 export interface MaterialPublishRecord { id:number; cookie_id:string; published_item_id:string; status:string; error_message:string; created_at:number; finished_at:number; mapping_counts?:Record<'pending'|'mapped'|'unmapped'|'ambiguous',number> }
 export const createMaterialFromPDD = (goodsId:string):Promise<{id:number}> => post(`/materials/from-pdd/${encodeURIComponent(goodsId)}`,{});
 export const getMaterials = (query = ''):Promise<ProductMaterial[]> => get(`/materials${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''}`);
 export const updateMaterial = (id:number,data:Omit<ProductMaterial,'id'|'source_type'|'source_id'|'status'|'updated_at'>) => put(`/materials/${id}`,data);
 export const deleteMaterial = (id:number) => del(`/materials/${id}`);
 export const uploadMaterialImage = (file:File):Promise<{url:string}> => { const body=new FormData();body.append('image',file);return postForm('/materials/images',body) };
+export const getPDDReviewMedia = (goodsId:string,type:'image'|'video'):Promise<PDDReviewMedia[]> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}/review-media?type=${type}`);
 export const publishMaterial = (id:number,cookieId:string):Promise<any> => post(`/materials/${id}/publish`,{cookie_id:cookieId},{timeoutMs:120_000});
 export const getMaterialPublishRecords = (id:number):Promise<MaterialPublishRecord[]> => get(`/materials/${id}/publish-records`);
 export const getMaterialSourceDiff = (id:number):Promise<{added:any[];changed:any[];removed:string[]}> => get(`/materials/${id}/source-diff`);
