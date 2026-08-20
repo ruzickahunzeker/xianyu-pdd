@@ -1,20 +1,9 @@
-import { collectDefaultAddressID, collectPDDProduct, collectPDDReviewMedia, isPDDAddressPage } from "./collector.js";
-
-const PDD_SITES = {
-  "mobile.pinduoduo.com": { site: "pinduoduo", cookieDomain: ".pinduoduo.com" },
-  "mobile.yangkeduo.com": { site: "yangkeduo", cookieDomain: ".yangkeduo.com" }
-};
-
-function siteFromURL(rawURL) {
-  const parsed = new URL(rawURL);
-  const site = PDD_SITES[parsed.hostname];
-  if (!site || parsed.protocol !== "https:") throw new Error("当前页面不是支持的拼多多移动站点");
-  return { ...site, host: parsed.hostname, baseURL: `https://${parsed.hostname}` };
-}
+import { collectDefaultAddressID, collectPDDProduct, collectPDDReviewMedia, detectPDDSite, isPDDAddressPage } from "./collector.js";
 
 const DEFAULT_SETTINGS = {
   serverURL: "http://127.0.0.1:59188",
   deviceToken: "",
+  preferredSite: "pinduoduo"
  };
 
 async function settings() {
@@ -35,7 +24,7 @@ async function capture() {
     world: "MAIN",
     func: () => JSON.stringify(globalThis.rawData)
   });
-  const currentSite = siteFromURL(tab.url);
+  const currentSite = detectPDDSite(tab.url);
   const normalized = { ...collectPDDProduct(JSON.parse(result), tab.url), site: currentSite.site, collection_id: crypto.randomUUID() };
   await chrome.storage.local.set({ lastCollection: normalized });
   return normalized;
@@ -73,7 +62,7 @@ async function upload(payload) {
 
 async function captureReviewMedia() {
   const tab = await activeTab();
-  siteFromURL(tab.url);
+  detectPDDSite(tab.url);
   const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: () => JSON.stringify(globalThis.rawData || null) });
   const data = collectPDDReviewMedia(JSON.parse(result), tab.url);
   await chrome.storage.local.set({ lastReviewMedia: data });
@@ -95,7 +84,7 @@ async function uploadReviewMedia(payload) {
 
 async function captureAccount() {
   const tab = await activeTab();
-  const currentSite = siteFromURL(tab.url);
+  const currentSite = detectPDDSite(tab.url);
   if (!isPDDAddressPage(tab.url)) {
     const error = new Error("请先打开拼多多收货地址页");
     error.code = "ADDRESS_PAGE_REQUIRED";
@@ -103,7 +92,7 @@ async function captureAccount() {
   }
 	// Never merge credentials from the two domains. A captured account belongs
 	// to exactly one site and the server enforces the same boundary.
-  const cookies = await chrome.cookies.getAll({ domain: currentSite.cookieDomain });
+  const cookies = await chrome.cookies.getAll({ domain: currentSite.cookie_domain });
   const unique = new Map(cookies.map(item => [`${item.name};${item.domain};${item.path}`, item]));
   const cookie = [...unique.values()].map(item => `${item.name}=${item.value}`).join("; ");
   const pddUID = [...unique.values()].find(item => item.name === "pdd_user_id")?.value || "";
@@ -120,16 +109,19 @@ async function captureAccount() {
       return { rawData: globalThis.rawData || null, userAgent: navigator.userAgent };
     }
   });
-  const data = { site: currentSite.site, base_url: currentSite.baseURL, cookie_domain: currentSite.cookieDomain, cookie, pdd_uid: pddUID, default_address_id: collectDefaultAddressID(result?.rawData), user_agent: result?.userAgent || "", captured_at: new Date().toISOString() };
-  await chrome.storage.local.set({ lastPDDAccount: data });
+  const data = { site: currentSite.site, base_url: currentSite.base_url, cookie_domain: currentSite.cookie_domain, cookie, pdd_uid: pddUID, default_address_id: collectDefaultAddressID(result?.rawData), user_agent: result?.userAgent || "", captured_at: new Date().toISOString() };
+  await chrome.storage.local.set({ lastPDDAccount: data, preferredSite: currentSite.site });
   return { ...data, cookie_masked: `${cookie.slice(0, 18)}…（${unique.size} 项）` };
 }
 
 async function openAddressPage() {
   const tab = await activeTab();
   let currentSite;
-  try { currentSite = siteFromURL(tab.url); } catch { currentSite = { baseURL: "https://mobile.pinduoduo.com" }; }
-  const addressURL = `${currentSite.baseURL}/addresses.html`;
+  try { currentSite = detectPDDSite(tab.url); } catch {
+    const config = await settings();
+    currentSite = detectPDDSite(config.preferredSite === "yangkeduo" ? "https://mobile.yangkeduo.com" : "https://mobile.pinduoduo.com");
+  }
+  const addressURL = `${currentSite.base_url}/addresses.html`;
   await chrome.tabs.update(tab.id, { url: addressURL });
   return { url: addressURL };
 }

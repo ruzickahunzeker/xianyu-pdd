@@ -3,6 +3,15 @@ function asString(value) {
   return String(value);
 }
 
+export function detectPDDSite(pageURL) {
+  let parsed;
+  try { parsed = new URL(asString(pageURL)); } catch { throw new Error("PDD_SITE_INVALID: 当前页面网址无效"); }
+  if (parsed.protocol !== "https:") throw new Error("PDD_SITE_INVALID: 拼多多页面必须使用 HTTPS");
+  if (parsed.hostname === "mobile.pinduoduo.com") return { site: "pinduoduo", host: parsed.hostname, base_url: "https://mobile.pinduoduo.com", cookie_domain: ".pinduoduo.com" };
+  if (parsed.hostname === "mobile.yangkeduo.com") return { site: "yangkeduo", host: parsed.hostname, base_url: "https://mobile.yangkeduo.com", cookie_domain: ".yangkeduo.com" };
+  throw new Error("PDD_SITE_UNSUPPORTED: 当前页面不是支持的拼多多移动站点");
+}
+
 function asNumber(value, fallback = 0) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;

@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { collectDefaultAddressID, collectMallSN, collectPDDProduct, collectPDDReviewMedia, isPDDAddressPage } from "./collector.js";
+import { collectDefaultAddressID, collectMallSN, collectPDDProduct, collectPDDReviewMedia, detectPDDSite, isPDDAddressPage } from "./collector.js";
+
+test("detectPDDSite keeps cookie domains separated", () => {
+  assert.deepEqual(detectPDDSite("https://mobile.pinduoduo.com/goods.html"), { site: "pinduoduo", host: "mobile.pinduoduo.com", base_url: "https://mobile.pinduoduo.com", cookie_domain: ".pinduoduo.com" });
+  assert.deepEqual(detectPDDSite("https://mobile.yangkeduo.com/addresses.html"), { site: "yangkeduo", host: "mobile.yangkeduo.com", base_url: "https://mobile.yangkeduo.com", cookie_domain: ".yangkeduo.com" });
+  assert.throws(() => detectPDDSite("https://mobile.pinduoduo.com.example.com/goods.html"), /PDD_SITE_UNSUPPORTED/);
+});
 
 test("collectPDDReviewMedia stores live photos only as images and keeps normal videos separate", () => {
   const url = "https://mobile.pinduoduo.com/goods_comments.html?goods_id=977731220380";

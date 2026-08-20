@@ -25,5 +25,5 @@ pre { max-height: 300px; overflow: auto; padding: 10px; border-radius: 8px; colo
 .hidden { display: none; }
 form { display: grid; gap: 16px; margin-top: 24px; }
 label { display: grid; gap: 6px; font-weight: 600; }
-input { width: 100%; padding: 10px 11px; border: 1px solid #cbd3e1; border-radius: 8px; font: inherit; }
+input, select { width: 100%; padding: 10px 11px; border: 1px solid #cbd3e1; border-radius: 8px; font: inherit; background: #fff; }
 .saved { margin-left: 10px; color: #146c43; }
