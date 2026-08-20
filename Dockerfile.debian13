@@ -41,7 +41,7 @@ COPY .docker/playwright-runtime /prebuilt-playwright-runtime
 # Playwright 下载必须使用系统 CA 验证 HTTPS，禁止关闭 TLS 证书校验。
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates; \
+	apt-get install -y --no-install-recommends ca-certificates postgresql-client; \
     rm -rf /var/lib/apt/lists/*; \
     mkdir -p /ms-playwright-go /ms-playwright; \
     case "$TARGETARCH" in \
@@ -76,10 +76,6 @@ ENV PLAYWRIGHT_NODEJS_PATH=/usr/local/bin/node
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 WORKDIR /app
-COPY --from=backend /out/xianyu-server /app/xianyu-server
-COPY --from=backend /out/pdd-worker /app/pdd-worker
-COPY --from=backend /out/xianyu-dbseed /app/xianyu-dbseed
-COPY --from=backend /out/xianyu-dbverify /app/xianyu-dbverify
 COPY --from=playwright-runtime /ms-playwright-go /ms-playwright-go
 COPY --from=playwright-runtime /ms-playwright /ms-playwright
 # 浏览器文件本身不包含 Linux 动态链接库。使用与 runtime 同捆的 Playwright
@@ -87,10 +83,14 @@ COPY --from=playwright-runtime /ms-playwright /ms-playwright
 # slim 运行镜像默认可能缺少根证书；闲鱼 HTTPS API 依赖该证书包。
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates; \
+    apt-get install -y --no-install-recommends ca-certificates postgresql-client; \
     node /ms-playwright-go/package/cli.js install-deps chromium; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/* /root/.cache /tmp/* /var/tmp/*; \
     mkdir -p /app/data /app/browser_data
+COPY --from=backend /out/xianyu-server /app/xianyu-server
+COPY --from=backend /out/pdd-worker /app/pdd-worker
+COPY --from=backend /out/xianyu-dbseed /app/xianyu-dbseed
+COPY --from=backend /out/xianyu-dbverify /app/xianyu-dbverify
 EXPOSE 59188
 CMD ["/app/xianyu-server", "-addr", ":59188"]

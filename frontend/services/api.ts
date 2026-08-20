@@ -53,6 +53,22 @@ export const updateLoginCredentials = async (data: {
   return put('/account/credentials', data);
 };
 
+export interface DatabaseBackup {
+  id: string;
+  filename: string;
+  dialect: string;
+  created_at: number;
+  size_bytes: number;
+  sha256: string;
+  mapping_rows: number;
+  data_key_configured: boolean;
+  verified: boolean;
+}
+
+export const getDatabaseBackups = (): Promise<{backups: DatabaseBackup[]; dialect: string}> => get('/api/backups');
+export const createDatabaseBackup = (): Promise<DatabaseBackup> => post('/api/backups', {}, {timeoutMs: 30 * 60_000});
+export const databaseBackupDownloadURL = (id: string): string => `/api/backups/${encodeURIComponent(id)}/download`;
+
 // Accounts
 export const addAccount = async (id: string, value: string, loginMethod?: string): Promise<ApiResponse> => {
   return post('/cookies', { id, value, login_method: loginMethod });
@@ -461,6 +477,10 @@ export const createPDDMessage = async (input:PDDMessageInput,idempotencyKey:stri
 export const confirmPDDMessage = (id:string):Promise<ApiResponse> => post(`/api/pdd/messages/${encodeURIComponent(id)}/confirm`,{});
 export const cancelPDDMessage = (id:string):Promise<ApiResponse> => post(`/api/pdd/messages/${encodeURIComponent(id)}/cancel`,{});
 export const retryPDDMessage = (id:string):Promise<ApiResponse> => post(`/api/pdd/messages/${encodeURIComponent(id)}/retry`,{});
+export interface PDDChatConversation { id:string;pdd_account_id:string;mall_sn:string;mall_id:string;goods_id:string;pdd_order_id:string;page_url:string;last_message_id:string;last_sync_at:number;titan_wakeup_at:number;status:string; }
+export interface PDDChatMessage { id:string;conversation_id:string;platform_message_id:string;direction:'incoming'|'outgoing'|'unknown';message_type:string;content:string;platform_created_at:number;created_at:number;mall_sn:string;mall_id:string;goods_id:string;pdd_order_id:string; }
+export const getPDDChatConversations = ():Promise<PDDChatConversation[]> => get('/api/pdd/chat/conversations');
+export const getPDDChatMessages = (conversationId=''):Promise<PDDChatMessage[]> => get(`/api/pdd/chat/messages${conversationId?`?conversation_id=${encodeURIComponent(conversationId)}`:''}`);
 
 export const getDashboardStats = async (): Promise<DashboardStats> => {
   return get('/dashboard/stats');

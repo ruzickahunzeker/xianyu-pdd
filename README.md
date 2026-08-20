@@ -492,6 +492,8 @@ docker compose logs --tail=100 app
 
 ### 备份 PostgreSQL
 
+管理端“系统设置 → 数据库备份”支持手动备份、自动备份、保留策略、校验和下载。完整恢复流程见 [数据库备份与恢复](docs/database-backup.md)。
+
 ```bash
 set -a
 . ./.env

@@ -73,6 +73,8 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"pdd_address_operations", "pdd_account_id"},
 		{"pdd_accounts", "cookie_encrypted"},
 		{"pdd_message_tasks", "message_fingerprint"},
+		{"pdd_chat_conversations", "mall_id"},
+		{"pdd_chat_messages", "platform_message_id"},
 		{"order_fulfillments", "pdd_account_id"},
 		{"pdd_account_locks", "expires_at"},
 		{"pdd_purchase_goods_snapshots", "snapshot_json"},

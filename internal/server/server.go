@@ -21,6 +21,7 @@ import (
 	"xianyu-go/internal/account"
 	"xianyu-go/internal/auth"
 	"xianyu-go/internal/automation"
+	"xianyu-go/internal/backup"
 	"xianyu-go/internal/chat"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/notify"
@@ -72,6 +73,7 @@ type Server struct {
 	Addr              string
 	PDDAddressUpdater pddaddress.Updater
 	PDDProductFetch   func(context.Context, *db.PDDAccount, string) (pddproduct.Snapshot, error)
+	Backups           *backup.Manager
 
 	publishMu      sync.Mutex
 	publishCancels map[string]publishBatchWorker
@@ -106,6 +108,8 @@ func New(store *db.Store, manager *account.Manager, secure bool, webDir, addr st
 		logger = slog.New(slog.NewTextHandler(os.Stdout, nil))
 	}
 	qrMgr := qrlogin.NewManager(logger)
+	backupDir := strings.TrimSpace(os.Getenv("XIANYU_BACKUP_DIR"))
+	backupManager := backup.New(store.DB, store.Dialect, strings.TrimSpace(os.Getenv("DATABASE_URL")), backupDir)
 	return &Server{
 		Store:       store,
 		Auth:        &auth.Service{Store: store, Logger: logger, Secure: secure},
@@ -118,6 +122,7 @@ func New(store *db.Store, manager *account.Manager, secure bool, webDir, addr st
 		Logger:      logger,
 		WebDir:      webDir,
 		Addr:        addr,
+		Backups:     backupManager,
 
 		publishCancels:   make(map[string]publishBatchWorker),
 		workersDone:      closedSignal(),

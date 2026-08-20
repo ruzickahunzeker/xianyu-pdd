@@ -10,6 +10,7 @@ import { SystemSettings } from '../types';
 import FulfillmentKeyManager from './FulfillmentKeyManager';
 import OrderSyncSettings from './OrderSyncSettings';
 import PDDAccountSettings from './PDDAccountSettings';
+import DatabaseBackupSettings from './DatabaseBackupSettings';
 import {
   Save, Sparkles, Settings as SettingsIcon,
   Eye, EyeOff, RefreshCw, Database, ChevronDown, Check,
@@ -575,6 +576,8 @@ const Settings: React.FC = () => {
           <FulfillmentKeyManager />
 
           <PDDAccountSettings />
+
+          <DatabaseBackupSettings settings={settings} onChange={setSettings} />
 
           {/* SMTP 配置已移至「通知设置」页面 */}
         </div>

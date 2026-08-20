@@ -41,6 +41,18 @@ type messageTask struct {
 	TaskType, Message, Action, PDDOrderID                                 string
 }
 
+type pddChatCapture struct {
+	Endpoint string          `json:"endpoint"`
+	Response json.RawMessage `json:"response"`
+	MallID   string          `json:"mall_id"`
+	At       int64           `json:"at"`
+}
+
+type pddChatCaptureState struct {
+	Captures     []pddChatCapture `json:"captures"`
+	TitanWakeups int64            `json:"titan_wakeups"`
+}
+
 type worker struct {
 	baseURL, apiKey, screenshotDir string
 	submit, once, logisticsOnly    bool
@@ -86,18 +98,26 @@ func main() {
 		return
 	}
 	for {
-		err := w.runOne()
-		if errors.Is(err, errNoTask) {
-			messageErr := w.runMessageOne()
-			if errors.Is(messageErr, errNoTask) {
-				if syncErr := w.syncLogistics(); syncErr != nil {
-					log.Printf("物流同步失败: %v", syncErr)
-				}
-			} else if messageErr != nil {
-				log.Printf("商家消息任务失败: %v", messageErr)
+		purchaseErr := w.runOne()
+		if purchaseErr != nil && !errors.Is(purchaseErr, errNoTask) {
+			log.Printf("采购任务失败: %v", purchaseErr)
+		}
+
+		// Purchase and merchant-message queues are independent. Always give the
+		// message queue a turn so a failed or long-lived purchase task cannot
+		// leave confirmed messages waiting forever.
+		messageErr := w.runMessageOne()
+		if messageErr != nil && !errors.Is(messageErr, errNoTask) {
+			log.Printf("商家消息任务失败: %v", messageErr)
+		}
+
+		if errors.Is(purchaseErr, errNoTask) && errors.Is(messageErr, errNoTask) {
+			if inboxErr := w.syncPDDChatInbox(); inboxErr != nil {
+				log.Printf("拼多多消息接收同步失败: %v", inboxErr)
 			}
-		} else if err != nil {
-			log.Printf("采购任务失败: %v", err)
+			if syncErr := w.syncLogistics(); syncErr != nil {
+				log.Printf("物流同步失败: %v", syncErr)
+			}
 		}
 		if w.once {
 			return
@@ -116,34 +136,69 @@ func (w *worker) runMessageOne() error {
 		return w.messageResult(t, "failed", err.Error(), nil)
 	}
 	defer ctx.Close()
+	if err = installPDDChatObserver(ctx); err != nil {
+		return w.messageResult(t, "failed", "安装聊天接口监听失败: "+err.Error(), nil)
+	}
 	page, err := ctx.NewPage()
 	if err != nil {
 		return w.messageResult(t, "failed", err.Error(), nil)
 	}
 	defer page.Close()
-	chatURL := "https://mobile.pinduoduo.com/chat_detail.html?goods_id=" + url.QueryEscape(t.GoodsID) + "&mall_sn=" + url.QueryEscape(t.MallSN) + "&from=goods&page_from=101"
+	chatURL := strings.TrimSpace(t.CapturedChatURL)
+	if chatURL == "" {
+		chatURL = "https://mobile.pinduoduo.com/chat_detail.html?goods_id=" + url.QueryEscape(t.GoodsID) + "&mall_sn=" + url.QueryEscape(t.MallSN) + "&from=goods&page_from=101"
+	}
 	if _, err = page.Goto(chatURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil && t.CapturedChatURL != "" {
-		_, err = page.Goto(t.CapturedChatURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
+		fallbackURL := "https://mobile.pinduoduo.com/chat_detail.html?goods_id=" + url.QueryEscape(t.GoodsID) + "&mall_sn=" + url.QueryEscape(t.MallSN) + "&from=goods&page_from=101"
+		_, err = page.Goto(fallbackURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
 	}
 	if err != nil {
 		return w.messageResult(t, "failed", "打开商家聊天失败: "+err.Error(), nil)
 	}
 	_ = w.messageHeartbeat(t)
-	body, _ := page.Locator("body").InnerText()
-	normalized := strings.ToLower(body)
-	if strings.Contains(normalized, "登录") && !strings.Contains(normalized, "发送") {
-		return w.messageResult(t, "failed", "login_required", nil)
-	}
-	if strings.Contains(normalized, "验证码") || strings.Contains(normalized, "安全验证") {
-		return w.messageResult(t, "failed", "captcha_required", nil)
-	}
+	_ = w.flushPDDChatCapture(page, t.PDDAccountID, t.MallSN, t.GoodsID, t.PDDOrderID)
 	current, _ := url.Parse(page.URL())
 	if current != nil && current.Query().Get("mall_sn") != "" && current.Query().Get("mall_sn") != t.MallSN {
 		return w.messageResult(t, "failed", "merchant_mismatch", nil)
 	}
 	input := page.Locator("textarea#input-content, textarea.input-content").First()
+	inputDeadline := time.Now().Add(20 * time.Second)
+	networkRetries := 0
+	for time.Now().Before(inputDeadline) {
+		if count, _ := input.Count(); count == 1 {
+			break
+		}
+		body, _ := page.Locator("body").InnerText()
+		normalized := strings.ToLower(body)
+		if strings.Contains(body, "网络异常") || strings.Contains(body, "请稍后重试") {
+			if networkRetries < 2 {
+				networkRetries++
+				refresh := page.GetByText("刷新", playwright.PageGetByTextOptions{Exact: playwright.Bool(true)}).First()
+				if count, _ := refresh.Count(); count == 1 {
+					_ = refresh.Click()
+				} else {
+					_, _ = page.Reload(playwright.PageReloadOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
+				}
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			_ = w.screenshot(page, "message-"+t.ID+"-network-error.png")
+			return w.messageResult(t, "failed", "network_error", map[string]any{"url": page.URL(), "retries": networkRetries})
+		}
+		if strings.Contains(normalized, "登录") && !strings.Contains(normalized, "发送") {
+			_ = w.screenshot(page, "message-"+t.ID+"-login-required.png")
+			return w.messageResult(t, "failed", "login_required", map[string]any{"url": page.URL()})
+		}
+		if strings.Contains(normalized, "验证码") || strings.Contains(normalized, "安全验证") {
+			_ = w.screenshot(page, "message-"+t.ID+"-captcha-required.png")
+			return w.messageResult(t, "failed", "captcha_required", map[string]any{"url": page.URL()})
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	if count, _ := input.Count(); count != 1 {
-		return w.messageResult(t, "failed", "input_not_found", nil)
+		title, _ := page.Title()
+		_ = w.screenshot(page, "message-"+t.ID+"-input-not-found.png")
+		return w.messageResult(t, "failed", "input_not_found", map[string]any{"url": page.URL(), "title": title})
 	}
 	button := page.Locator("div.send-button").Filter(playwright.LocatorFilterOptions{HasText: "发送"}).First()
 	if t.Action == "preflight" {
@@ -159,7 +214,15 @@ func (w *worker) runMessageOne() error {
 	if actual, readErr := input.InputValue(); readErr != nil || actual != t.Message {
 		return w.messageResult(t, "failed", "消息正文回读不一致", nil)
 	}
+	buttonDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(buttonDeadline) {
+		if count, _ := button.Count(); count == 1 {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 	if count, _ := button.Count(); count != 1 {
+		_ = w.screenshot(page, "message-"+t.ID+"-send-button-not-found.png")
 		return w.messageResult(t, "failed", "send_button_not_found", nil)
 	}
 	_ = w.screenshot(page, "message-"+t.ID+"-before-send.png")
@@ -173,15 +236,152 @@ func (w *worker) runMessageOne() error {
 		value, _ := input.InputValue()
 		pageBody, _ := page.Locator("body").InnerText()
 		if value == "" && strings.Contains(pageBody, t.Message) {
+			time.Sleep(500 * time.Millisecond)
+			_ = w.flushPDDChatCapture(page, t.PDDAccountID, t.MallSN, t.GoodsID, t.PDDOrderID)
 			_ = w.screenshot(page, "message-"+t.ID+"-verified.png")
 			return w.messageResult(t, "verified", "", map[string]any{"url": page.URL(), "input_cleared": true, "message_visible": true})
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
 	if clicked {
+		_ = w.flushPDDChatCapture(page, t.PDDAccountID, t.MallSN, t.GoodsID, t.PDDOrderID)
 		return w.messageResult(t, "result_unknown", "点击发送后无法确认消息是否出现", map[string]any{"url": page.URL(), "clicked": true})
 	}
 	return w.messageResult(t, "failed", "发送未执行", nil)
+}
+
+const pddChatObserverScript = `(() => {
+  if (window.__xianyuPDDChat) return;
+  const state = {http: [], titanWakeups: 0, titanLastAt: 0};
+  Object.defineProperty(window, '__xianyuPDDChat', {value: state, configurable: false});
+  const endpoint = value => String(value || '').split('?')[0];
+  const relevant = value => /\/rainbow\/(chat|conv)\//.test(value);
+  const mallFromBody = body => {
+    try {
+      const value = typeof body === 'string' ? JSON.parse(body) : body;
+      return String(value?.list?.with?.id || value?.message?.to?.uid || value?.mall_id || '');
+    } catch (_) { return ''; }
+  };
+  const nativeFetch = window.fetch;
+  window.fetch = async function(input, init) {
+    const requestURL = typeof input === 'string' ? input : input?.url;
+    const response = await nativeFetch.apply(this, arguments);
+    if (relevant(String(requestURL || ''))) {
+      try {
+        const text = await response.clone().text();
+        let payload = {};
+        try { payload = JSON.parse(text); } catch (_) { payload = {raw_text: text.slice(0, 200000)}; }
+        state.http.push({endpoint: endpoint(requestURL), response: payload, mall_id: mallFromBody(init?.body), at: Date.now()});
+        if (state.http.length > 50) state.http.splice(0, state.http.length - 50);
+      } catch (_) {}
+    }
+    return response;
+  };
+  const NativeWebSocket = window.WebSocket;
+  function ObservedWebSocket(url, protocols) {
+    const socket = protocols === undefined ? new NativeWebSocket(url) : new NativeWebSocket(url, protocols);
+    if (String(url || '').includes('/proxy/ws/titan')) {
+      socket.addEventListener('message', () => { state.titanWakeups++; state.titanLastAt = Date.now(); });
+    }
+    return socket;
+  }
+  ObservedWebSocket.prototype = NativeWebSocket.prototype;
+  Object.setPrototypeOf(ObservedWebSocket, NativeWebSocket);
+  for (const key of ['CONNECTING','OPEN','CLOSING','CLOSED']) ObservedWebSocket[key] = NativeWebSocket[key];
+  window.WebSocket = ObservedWebSocket;
+})();`
+
+func installPDDChatObserver(ctx playwright.BrowserContext) error {
+	return ctx.AddInitScript(playwright.Script{Content: playwright.String(pddChatObserverScript)})
+}
+
+func (w *worker) drainPDDChatCapture(page playwright.Page) (pddChatCaptureState, error) {
+	value, err := page.Evaluate(`() => {
+      const state = window.__xianyuPDDChat;
+      if (!state) return {captures: [], titan_wakeups: 0};
+      const captures = state.http.splice(0, state.http.length);
+      const titanWakeups = state.titanWakeups;
+      state.titanWakeups = 0;
+      return {captures, titan_wakeups: titanWakeups};
+    }`)
+	if err != nil {
+		return pddChatCaptureState{}, err
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return pddChatCaptureState{}, err
+	}
+	var state pddChatCaptureState
+	err = json.Unmarshal(raw, &state)
+	return state, err
+}
+
+func (w *worker) flushPDDChatCapture(page playwright.Page, accountID, mallSN, goodsID, orderID string) error {
+	state, err := w.drainPDDChatCapture(page)
+	if err != nil || (len(state.Captures) == 0 && state.TitanWakeups == 0) {
+		return err
+	}
+	mallID := ""
+	for _, capture := range state.Captures {
+		if capture.MallID != "" {
+			mallID = capture.MallID
+			break
+		}
+	}
+	_, err = w.jsonRequest(http.MethodPost, "/api/pdd/chat/capture", map[string]any{"pdd_account_id": accountID, "mall_sn": mallSN, "mall_id": mallID, "goods_id": goodsID, "pdd_order_id": orderID, "page_url": page.URL(), "titan_wakeups": state.TitanWakeups, "captures": state.Captures}, nil)
+	return err
+}
+
+func (w *worker) syncPDDChatInbox() error {
+	var accountID, mallSN, goodsID, orderID, pageURL string
+	err := w.database.QueryRow(`SELECT pdd_account_id,mall_sn,goods_id,pdd_order_id,page_url FROM pdd_chat_conversations WHERE status='active' ORDER BY last_sync_at ASC LIMIT 1`).Scan(&accountID, &mallSN, &goodsID, &orderID, &pageURL)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	ctx, err := w.taskContext(task{PDDAccountID: accountID})
+	if err != nil {
+		return err
+	}
+	defer ctx.Close()
+	if err = installPDDChatObserver(ctx); err != nil {
+		return err
+	}
+	page, err := ctx.NewPage()
+	if err != nil {
+		return err
+	}
+	defer page.Close()
+	if strings.TrimSpace(pageURL) == "" {
+		pageURL = "https://mobile.pinduoduo.com/chat_detail.html?goods_id=" + url.QueryEscape(goodsID) + "&mall_sn=" + url.QueryEscape(mallSN) + "&from=goods&page_from=101"
+	}
+	if _, err = page.Goto(pageURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
+		return err
+	}
+	time.Sleep(2500 * time.Millisecond)
+	state, err := w.drainPDDChatCapture(page)
+	if err != nil {
+		return err
+	}
+	if state.TitanWakeups > 0 {
+		if reload, reloadErr := page.Reload(playwright.PageReloadOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); reloadErr == nil && reload != nil {
+			time.Sleep(1200 * time.Millisecond)
+			more, _ := w.drainPDDChatCapture(page)
+			state.Captures = append(state.Captures, more.Captures...)
+			state.TitanWakeups += more.TitanWakeups
+		}
+	}
+	mallID := ""
+	for _, capture := range state.Captures {
+		if capture.MallID != "" {
+			mallID = capture.MallID
+			break
+		}
+	}
+	_, err = w.jsonRequest(http.MethodPost, "/api/pdd/chat/capture", map[string]any{"pdd_account_id": accountID, "mall_sn": mallSN, "mall_id": mallID, "goods_id": goodsID, "pdd_order_id": orderID, "page_url": page.URL(), "titan_wakeups": state.TitanWakeups, "captures": state.Captures}, nil)
+	return err
 }
 
 func (w *worker) claimMessage() (messageTask, error) {

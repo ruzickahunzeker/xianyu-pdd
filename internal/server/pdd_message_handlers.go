@@ -39,6 +39,7 @@ type pddMessageInput struct {
 }
 
 func (s *Server) mountPDDMessages(r chi.Router) {
+	s.mountPDDChatInbox(r)
 	r.Get("/api/pdd/messages", s.listPDDMessages)
 	r.Post("/api/pdd/messages", s.createPDDMessage)
 	r.Post("/api/pdd/messages/claim", s.claimPDDMessage)

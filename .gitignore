@@ -15,6 +15,7 @@
 
 # Runtime data
 /data/
+/backups/
 /browser_data/
 *.db
 *.db-shm

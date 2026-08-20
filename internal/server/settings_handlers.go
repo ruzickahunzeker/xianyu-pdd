@@ -34,6 +34,9 @@ func (s *Server) mountSettingsReal(r chi.Router) {
 		r.Put("/system-settings", s.setSettings)
 		r.Put("/system-settings/{key}", s.setSetting)
 		r.Post("/ai-models", s.listAIModels)
+		r.Get("/api/backups", s.listBackups)
+		r.Post("/api/backups", s.createBackup)
+		r.Get("/api/backups/{id}/download", s.downloadBackup)
 	})
 }
 
@@ -95,6 +98,24 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if enabled, ok := values["backup_enabled"]; ok && enabled != "true" && enabled != "false" {
+		writeErr(w, http.StatusBadRequest, "自动备份开关无效")
+		return
+	}
+	if value, ok := values["backup_interval_hours"]; ok {
+		hours, e := strconv.Atoi(value)
+		if e != nil || hours < 1 || hours > 720 {
+			writeErr(w, http.StatusBadRequest, "备份间隔必须为 1 到 720 小时")
+			return
+		}
+	}
+	if value, ok := values["backup_retention_count"]; ok {
+		count, e := strconv.Atoi(value)
+		if e != nil || count < 1 || count > 365 {
+			writeErr(w, http.StatusBadRequest, "备份保留份数必须为 1 到 365")
+			return
+		}
+	}
 	if err := s.Store.Settings.SetMany(r.Context(), values); err != nil {
 		writeErr(w, http.StatusInternalServerError, "保存失败")
 		return
@@ -103,6 +124,93 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 		_ = logging.SetLevel(level)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+func (s *Server) listBackups(w http.ResponseWriter, r *http.Request) {
+	entries, err := s.Backups.List()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "读取备份列表失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"backups": entries, "dialect": s.Store.Dialect})
+}
+
+func (s *Server) createBackup(w http.ResponseWriter, r *http.Request) {
+	retention := s.backupIntSetting(r.Context(), "backup_retention_count", 14)
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
+	defer cancel()
+	entry, err := s.Backups.Create(ctx, retention)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "创建备份失败: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, entry)
+}
+
+func (s *Server) downloadBackup(w http.ResponseWriter, r *http.Request) {
+	path, filename, err := s.Backups.Path(chi.URLParam(r, "id"))
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "备份不存在")
+		return
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeFile(w, r, path)
+}
+
+func (s *Server) backupIntSetting(ctx context.Context, key string, fallback int) int {
+	value, err := s.Store.Settings.Get(ctx, key)
+	if err != nil {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || parsed < 1 {
+		return fallback
+	}
+	return parsed
+}
+
+// StartBackupScheduler starts a lightweight scheduler. It only creates a new
+// backup after the configured interval has elapsed since the latest manifest.
+func (s *Server) StartBackupScheduler(ctx context.Context) {
+	s.recoveryWG.Add(1)
+	go func() {
+		defer s.recoveryWG.Done()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			s.runScheduledBackup(ctx)
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+}
+
+func (s *Server) runScheduledBackup(ctx context.Context) {
+	enabled, err := s.Store.Settings.Get(ctx, "backup_enabled")
+	if err != nil || !strings.EqualFold(strings.TrimSpace(enabled), "true") {
+		return
+	}
+	interval := time.Duration(s.backupIntSetting(ctx, "backup_interval_hours", 24)) * time.Hour
+	entries, err := s.Backups.List()
+	if err != nil {
+		s.Logger.Error("读取自动备份状态失败", "err", err)
+		return
+	}
+	if len(entries) > 0 && time.Since(time.Unix(entries[0].CreatedAt, 0)) < interval {
+		return
+	}
+	backupCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	entry, err := s.Backups.Create(backupCtx, s.backupIntSetting(ctx, "backup_retention_count", 14))
+	if err != nil {
+		s.Logger.Error("自动数据库备份失败", "err", err)
+		return
+	}
+	s.Logger.Info("自动数据库备份完成", "id", entry.ID, "size_bytes", entry.SizeBytes)
 }
 
 func (s *Server) publicSettings(w http.ResponseWriter, r *http.Request) {
