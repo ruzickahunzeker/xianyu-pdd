@@ -19,7 +19,7 @@ func TestListChannels(t *testing.T) {
 	cookie := loginHelper(t, h)
 
 	// 先创建一个渠道。
-	body := `{"name":"钉钉","type":"dingtalk","config":"{}","enabled":true}`
+	body := `{"name":"钉钉","type":"dingtalk","config":"{\"access_token\":\"top-secret\"}","enabled":true}`
 	req := httptest.NewRequest(http.MethodPost, "/notification-channels", strings.NewReader(body))
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
@@ -40,6 +40,12 @@ func TestListChannels(t *testing.T) {
 	json.Unmarshal(rec2.Body.Bytes(), &arr)
 	if len(arr) != 1 || arr[0]["name"] != "钉钉" {
 		t.Fatalf("渠道列表异常: %+v", arr)
+	}
+	if _, exists := arr[0]["config"]; exists {
+		t.Fatalf("渠道列表不应暴露秘密配置: %+v", arr[0])
+	}
+	if strings.Contains(rec2.Body.String(), "top-secret") {
+		t.Fatalf("渠道列表泄露了 Token: %s", rec2.Body.String())
 	}
 }
 

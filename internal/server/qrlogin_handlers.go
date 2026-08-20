@@ -334,12 +334,26 @@ func cloneQRStatus(src map[string]any) map[string]any {
 	return dst
 }
 
-// publicQRStatus 返回可暴露给浏览器的扫码状态。闲鱼 Cookie 只在服务端持久化，
-// 永远不进入前端、浏览器日志或代理响应。
+// publicQRStatus 返回可暴露给浏览器的扫码状态。使用明确白名单，避免扫码服务
+// 将来新增内部字段时被代理接口自动暴露。闲鱼 Cookie、账号标识、验证原始地址等
+// 敏感数据只在服务端持久化。
 func publicQRStatus(src map[string]any) map[string]any {
-	dst := cloneQRStatus(src)
-	delete(dst, "cookies")
-	delete(dst, "cookie_snapshot")
+	dst := make(map[string]any, 10)
+	for _, key := range []string{
+		"status",
+		"message",
+		"session_id",
+		"expires_in",
+		"verification_screenshot",
+		"face_qr_url",
+		"success",
+		"account_id",
+		"is_new_account",
+	} {
+		if value, ok := src[key]; ok {
+			dst[key] = value
+		}
+	}
 	return dst
 }
 

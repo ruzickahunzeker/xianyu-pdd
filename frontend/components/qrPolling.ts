@@ -1,10 +1,9 @@
 export interface QRLoginStatusResult {
   status?: string;
-  cookies?: string;
-  unb?: string;
-  verification_url?: string;
   verification_screenshot?: string;
   face_qr_url?: string;
+  account_id?: string;
+  is_new_account?: boolean;
 }
 
 interface QRLoginPollerTimers {

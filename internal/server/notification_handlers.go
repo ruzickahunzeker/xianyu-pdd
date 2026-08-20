@@ -32,7 +32,23 @@ func (s *Server) listChannels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "查询失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, chs)
+	// 渠道列表只返回编辑器和绑定页面所需的摘要。Webhook、机器人 Token、
+	// SMTP 密码等秘密配置已经由数据库加密保存，不应再随列表响应进入浏览器。
+	type channelSummary struct {
+		ID         int64  `json:"id"`
+		Name       string `json:"name"`
+		Type       string `json:"type"`
+		EventTypes string `json:"event_types,omitempty"`
+		Enabled    bool   `json:"enabled"`
+	}
+	out := make([]channelSummary, 0, len(chs))
+	for _, ch := range chs {
+		out = append(out, channelSummary{
+			ID: ch.ID, Name: ch.Name, Type: ch.Type,
+			EventTypes: ch.EventTypes, Enabled: ch.Enabled,
+		})
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) createChannel(w http.ResponseWriter, r *http.Request) {

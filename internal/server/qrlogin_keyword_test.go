@@ -114,7 +114,9 @@ func TestQRLoginStatusNeverExposesCookies(t *testing.T) {
 	srv.Manager = nil
 	srv.QRLogin = &fakeQRLoginService{status: map[string]any{
 		"status": "success", "cookies": "unb=acc1; secret=value", "unb": "acc1",
-		"cookie_snapshot": []cookierefresh.BrowserCookie{{Name: "secret", Value: "value", Domain: ".goofish.com", Path: "/"}},
+		"verification_url":      "https://passport.goofish.com/private-verification",
+		"internal_future_field": "must-not-leak",
+		"cookie_snapshot":       []cookierefresh.BrowserCookie{{Name: "secret", Value: "value", Domain: ".goofish.com", Path: "/"}},
 	}}
 	ownQRSession(t, srv, store, "redacted")
 	h := srv.Router()
@@ -137,6 +139,11 @@ func TestQRLoginStatusNeverExposesCookies(t *testing.T) {
 		}
 		if _, exists := res["cookie_snapshot"]; exists {
 			t.Fatalf("%s must redact cookie snapshot: %+v", path, res)
+		}
+		for _, field := range []string{"unb", "verification_url", "internal_future_field"} {
+			if _, exists := res[field]; exists {
+				t.Fatalf("%s must redact %s: %+v", path, field, res)
+			}
 		}
 	}
 }
