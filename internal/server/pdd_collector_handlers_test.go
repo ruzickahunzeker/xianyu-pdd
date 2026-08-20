@@ -232,7 +232,7 @@ func TestPDDRefreshProductKeepsMissingSKUAndOnlySyncsMaterialStock(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = store.PDDAccounts.SaveSingle(context.Background(), admin.ID, "主账号", "api_uid=1; token=x", "1", "60984097534", "test-agent", true); err != nil {
+	if _, err = store.PDDAccounts.SaveSingle(context.Background(), admin.ID, "主账号", "pinduoduo", "api_uid=1; token=x", "1", "60984097534", "test-agent", true); err != nil {
 		t.Fatal(err)
 	}
 	_, err = store.DB.Exec(`INSERT INTO pdd_products(id,goods_id,mall_sn,final_url,title,images_json,first_collected_at,last_collected_at) VALUES(1,'123','','https://pdd/123','旧标题','[]',10,20)`)

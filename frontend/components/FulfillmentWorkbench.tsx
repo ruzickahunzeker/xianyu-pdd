@@ -8,6 +8,7 @@ import {
   FulfillmentHistoryRepairPreview, getFulfillmentOrders, getOrderSyncStatus, OrderSyncStatus,
   PDDPurchaseTask, FulfillmentException, clearFulfillmentExceptions, confirmPDDPurchasePayment, confirmUnknownPurchaseCancelled, getFulfillmentExceptions, getPDDPurchaseTasks, readFulfillmentExceptions, requestFulfillmentPurchase, resolveFulfillmentException,
   previewFulfillmentHistoryRepair, repairFulfillmentHistory, updateFulfillmentOrder,
+  getPDDAccount,
 } from '../services/api';
 
 type Preset = 'pending_order' | 'pending_pdd_ship' | 'pending_xianyu_ship' | 'pending_reminder' | 'all';
@@ -53,6 +54,7 @@ const FulfillmentWorkbench: React.FC = () => {
   const [taskBusy, setTaskBusy] = useState('');
   const [tasksOpen, setTasksOpen] = useState(() => localStorage.getItem('fulfillment.tasks.open') === 'true');
   const [exceptionsOpen, setExceptionsOpen] = useState(() => localStorage.getItem('fulfillment.exceptions.open') === 'true');
+  const [pddBaseURL, setPDDBaseURL] = useState('https://mobile.pinduoduo.com');
   const previousUnread = useRef(0);
 
   const loadOrders = async () => {
@@ -60,16 +62,18 @@ const FulfillmentWorkbench: React.FC = () => {
     setError('');
     try {
       const selected = presets.find(item => item.id === preset)?.filters || {};
-      const [nextOrders, nextStatus, nextTasks, nextExceptions] = await Promise.all([
+      const [nextOrders, nextStatus, nextTasks, nextExceptions, pddAccount] = await Promise.all([
         getFulfillmentOrders({ ...selected, mapping_status: mappingStatus || undefined }),
         getOrderSyncStatus(),
         getPDDPurchaseTasks(),
         getFulfillmentExceptions(),
+        getPDDAccount(),
       ]);
       setOrders(nextOrders);
       setSyncStatus(nextStatus);
       setPurchaseTasks(nextTasks);
       setExceptions(nextExceptions);
+      setPDDBaseURL(pddAccount.base_url || 'https://mobile.pinduoduo.com');
     } catch (err) {
       setError((err as Error).message || '读取履约订单失败');
     } finally {
@@ -260,7 +264,7 @@ const FulfillmentWorkbench: React.FC = () => {
                   return <tr key={order.order_id} className="hover:bg-blue-50/30 align-top">
                     <td className="px-5 py-4"><div className="font-mono text-sm font-bold text-gray-900" title={order.order_id}>{shortID(order.order_id)}</div><div className="mt-1 text-xs text-gray-500">商品 {shortID(order.item_id)}</div><div className="mt-1 text-xs text-gray-400">账号 {shortID(order.cookie_id)}</div></td>
                     <td className="px-4 py-4"><span className={`inline-flex px-2.5 py-1 rounded-lg text-xs font-bold ${mapping.className}`}>{mapping.label}</span><div className="mt-2 text-sm text-gray-700">{order.spec_name && `${order.spec_name}：`}{order.spec_value || '未记录规格'}</div><div className="mt-1 font-mono text-xs text-gray-400">PDD SKU {shortID(order.source_sku_id)}</div></td>
-                    <td className="px-4 py-4"><div className={`text-sm font-bold ${order.fulfillment_exempt ? 'text-blue-600' : order.pdd_paid ? 'text-green-700' : order.pdd_ordered ? 'text-amber-600' : 'text-gray-400'}`}>{order.fulfillment_exempt ? '无需履约' : order.pdd_paid ? '已付款 · 待发货' : order.pdd_ordered ? '已下单 · 待付款' : '未下单'}</div><div className="mt-1 font-mono text-xs text-gray-500">{order.pdd_order_id || '-'}</div>{order.pdd_order?.amount_cent != null && <div className="mt-2 text-xs text-gray-600">采购 ¥{(order.pdd_order.amount_cent / 100).toFixed(2)} · 数量 {order.pdd_order.quantity || 1}</div>}{order.pdd_order?.sku_id && <div className="mt-1 font-mono text-[11px] text-gray-400">SKU {order.pdd_order.sku_id}</div>}{order.pdd_order?.payment_deadline && !order.pdd_paid ? <div className="mt-1 text-[11px] text-amber-600">付款截止 {formatTime(order.pdd_order.payment_deadline)}</div> : null}{order.pdd_paid && <div className="mt-1 text-[11px] text-green-600">{order.pdd_paid_source === 'manual' ? '人工确认付款' : order.pdd_paid_source === 'auto_pdd_pending_ship' ? '待发货列表自动确认' : '已确认付款'} · {formatTime(order.pdd_paid_at)}</div>}{order.pdd_order?.receiver_name && <div className="mt-1 text-[11px] text-gray-400">{order.pdd_order.receiver_name} · {[order.pdd_order.province, order.pdd_order.city, order.pdd_order.district].filter(Boolean).join('')}</div>}{order.source_goods_id && <a href={`https://mobile.pinduoduo.com/goods.html?goods_id=${encodeURIComponent(order.source_goods_id)}`} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-blue-600">打开拼多多商品 <ExternalLink className="w-3 h-3" /></a>}</td>
+                    <td className="px-4 py-4"><div className={`text-sm font-bold ${order.fulfillment_exempt ? 'text-blue-600' : order.pdd_paid ? 'text-green-700' : order.pdd_ordered ? 'text-amber-600' : 'text-gray-400'}`}>{order.fulfillment_exempt ? '无需履约' : order.pdd_paid ? '已付款 · 待发货' : order.pdd_ordered ? '已下单 · 待付款' : '未下单'}</div><div className="mt-1 font-mono text-xs text-gray-500">{order.pdd_order_id || '-'}</div>{order.pdd_order?.amount_cent != null && <div className="mt-2 text-xs text-gray-600">采购 ¥{(order.pdd_order.amount_cent / 100).toFixed(2)} · 数量 {order.pdd_order.quantity || 1}</div>}{order.pdd_order?.sku_id && <div className="mt-1 font-mono text-[11px] text-gray-400">SKU {order.pdd_order.sku_id}</div>}{order.pdd_order?.payment_deadline && !order.pdd_paid ? <div className="mt-1 text-[11px] text-amber-600">付款截止 {formatTime(order.pdd_order.payment_deadline)}</div> : null}{order.pdd_paid && <div className="mt-1 text-[11px] text-green-600">{order.pdd_paid_source === 'manual' ? '人工确认付款' : order.pdd_paid_source === 'auto_pdd_pending_ship' ? '待发货列表自动确认' : '已确认付款'} · {formatTime(order.pdd_paid_at)}</div>}{order.pdd_order?.receiver_name && <div className="mt-1 text-[11px] text-gray-400">{order.pdd_order.receiver_name} · {[order.pdd_order.province, order.pdd_order.city, order.pdd_order.district].filter(Boolean).join('')}</div>}{order.source_goods_id && <a href={`${pddBaseURL}/goods.html?goods_id=${encodeURIComponent(order.source_goods_id)}`} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-blue-600">打开拼多多商品 <ExternalLink className="w-3 h-3" /></a>}</td>
                     <td className="px-4 py-4"><div className={`text-sm font-bold ${order.pdd_shipped ? 'text-green-700' : 'text-gray-400'}`}>{order.pdd_shipped ? '拼多多已发货' : '等待拼多多发货'}</div><div className="mt-1 text-xs text-gray-500">{order.logistics_company || '-'} · {order.tracking_number || '-'}</div></td>
                     <td className="px-4 py-4 space-y-1.5"><div className="flex items-center gap-1.5 text-xs"><PackageCheck className={`w-3.5 h-3.5 ${order.fulfillment_exempt || order.xianyu_shipped ? 'text-green-600' : 'text-gray-300'}`} />{order.fulfillment_exempt ? '无需继续履约' : `闲鱼${order.xianyu_shipped ? '已发货' : '未发货'}`}</div><div className="flex items-center gap-1.5 text-xs"><CheckCircle2 className={`w-3.5 h-3.5 ${order.reminder_exempt || order.reminded ? 'text-green-600' : 'text-gray-300'}`} />{order.reminder_exempt ? '无需提醒' : order.reminded ? '已提醒' : '未提醒'}</div><div className="text-[11px] text-gray-400">更新 {formatTime(order.updated_at)}</div></td>
                     <td className="px-5 py-4 text-right"><div className="flex flex-col items-end gap-2">{!order.fulfillment_exempt && !order.pdd_ordered && !order.pdd_order_id && <button type="button" onClick={() => requestPurchase(order)} disabled={taskBusy === order.order_id || order.mapping_status !== 'mapped' || order.purchase_requested_at > 0} className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold disabled:opacity-45">{taskBusy === order.order_id ? '处理中…' : order.purchase_requested_at > 0 ? '已优先排队' : '立即下单'}</button>}<button type="button" onClick={() => openEditor(order)} className="px-3.5 py-2 rounded-lg bg-gray-900 hover:bg-black text-white text-xs font-bold">更新履约</button></div></td>

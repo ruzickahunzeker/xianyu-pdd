@@ -16,7 +16,7 @@ describe('item PDD SKU mapping UI', () => {
   test('opens collected products with the captured full URL and keeps a canonical fallback', () => {
     const collected = source('components/PDDCollectedProducts.tsx');
     expect(collected).toContain('https://mobile.pinduoduo.com/goods.html?goods_id=${encodeURIComponent(product.goods_id)}');
-    expect(collected).toContain("product.final_url?.startsWith('https://mobile.pinduoduo.com/goods.html?')");
+    expect(collected).toContain('(?:pinduoduo|yangkeduo)');
   });
 
   test('publishes generated PDD matrix placeholders with zero inventory', () => {

@@ -992,7 +992,7 @@ export const updateSystemSettings = async (settings: Partial<SystemSettings>): P
 };
 
 export const getPDDAccount = async (): Promise<PDDAccountConfig> => get('/api/pdd/account');
-export const savePDDAccount = async (input: {name:string;cookie?:string;default_address_id:string;user_agent?:string;enabled:boolean}): Promise<PDDAccountConfig> => put('/api/pdd/account',input);
+export const savePDDAccount = async (input: {name:string;site:'pinduoduo'|'yangkeduo';cookie?:string;default_address_id:string;user_agent?:string;enabled:boolean}): Promise<PDDAccountConfig> => put('/api/pdd/account',input);
 export const verifyPDDAccount = async (): Promise<{success:boolean;credential_status:string;pdd_uid:string;message:string}> => post('/api/pdd/account/verify',{});
 export const deletePDDAccount = async (): Promise<ApiResponse> => del('/api/pdd/account');
 

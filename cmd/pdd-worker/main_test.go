@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
 	"time"
+	"xianyu-go/internal/pddsite"
 )
 
 func TestCheckoutAmountCent(t *testing.T) {
@@ -21,7 +23,7 @@ func TestCheckoutAmountCent(t *testing.T) {
 
 func TestPurchaseGoodsURLPreservesOriginalCapturedURL(t *testing.T) {
 	raw := "https://mobile.pinduoduo.com/goods.html?goods_id=977731220380&uin=user-token&page_from=35&_oak_rcto=fresh"
-	if got := purchaseGoodsURL(raw, "977731220380"); got != raw {
+	if got := purchaseGoodsURL(raw, "977731220380", pddsite.Pinduoduo); got != raw {
 		t.Fatalf("purchaseGoodsURL()=%q, want original captured URL", got)
 	}
 }
@@ -74,6 +76,7 @@ func TestQuantityButtonPlan(t *testing.T) {
 }
 
 func TestUnpaidOrdersURLKeepsRequiredListParameters(t *testing.T) {
+	pddUnpaidOrdersURL := unpaidOrdersURL(pddsite.Pinduoduo)
 	for _, value := range []string{"type=1", "comment_tab=1", "combine_orders=1", "main_orders=1", "order_index=0"} {
 		if !strings.Contains(pddUnpaidOrdersURL, value) {
 			t.Fatalf("missing %s in %s", value, pddUnpaidOrdersURL)

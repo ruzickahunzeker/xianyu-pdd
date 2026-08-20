@@ -15,6 +15,7 @@ import (
 	"xianyu-go/internal/auth"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/pddaddress"
+	"xianyu-go/internal/pddsite"
 )
 
 type fulfillmentPatch struct {
@@ -591,7 +592,11 @@ func (s *Server) pddAddressUpdater(r *http.Request, userID int64) (pddaddress.Up
 		if !account.Enabled {
 			return nil, "", "", errors.New("拼多多账号已禁用")
 		}
-		config := pddaddress.Config{BaseURL: "https://mobile.pinduoduo.com", PDDUID: account.PDDUID, AddressID: account.DefaultAddressID, Cookie: account.Cookie, UserAgent: account.UserAgent}
+		site, siteErr := pddsite.Parse(account.Site)
+		if siteErr != nil {
+			return nil, "", "", siteErr
+		}
+		config := pddaddress.Config{BaseURL: site.BaseURL(), PDDUID: account.PDDUID, AddressID: account.DefaultAddressID, Cookie: account.Cookie, UserAgent: account.UserAgent}
 		return pddaddress.NewClient(config), config.AddressID, account.ID, nil
 	}
 	if !errors.Is(accountErr, sql.ErrNoRows) {

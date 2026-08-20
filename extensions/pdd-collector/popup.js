@@ -104,6 +104,7 @@ document.querySelector("#capture-account").addEventListener("click", async () =>
   button.disabled = true; addressButton.classList.add("hidden"); status("正在读取拼多多账号配置…");
   try {
     const data = await call({ type: "CAPTURE_ACCOUNT" }); accountPayload = data;
+    document.querySelector("#pdd-site").textContent = data.base_url || data.site;
     document.querySelector("#pdd-uid").textContent = data.pdd_uid;
     document.querySelector("#pdd-address-id").textContent = data.default_address_id || "当前页面未找到";
     document.querySelector("#pdd-cookie").textContent = data.cookie_masked;

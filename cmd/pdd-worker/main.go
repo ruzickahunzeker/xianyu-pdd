@@ -24,6 +24,7 @@ import (
 	"xianyu-go/internal/pddcheckout"
 	"xianyu-go/internal/pddproduct"
 	"xianyu-go/internal/pddshipping"
+	"xianyu-go/internal/pddsite"
 )
 
 type task struct {
@@ -131,7 +132,7 @@ func (w *worker) runMessageOne() error {
 	if err != nil {
 		return err
 	}
-	ctx, err := w.taskContext(task{PDDAccountID: t.PDDAccountID})
+	ctx, site, err := w.taskContext(task{PDDAccountID: t.PDDAccountID})
 	if err != nil {
 		return w.messageResult(t, "failed", err.Error(), nil)
 	}
@@ -145,11 +146,11 @@ func (w *worker) runMessageOne() error {
 	}
 	defer page.Close()
 	chatURL := strings.TrimSpace(t.CapturedChatURL)
-	if chatURL == "" {
-		chatURL = "https://mobile.pinduoduo.com/chat_detail.html?goods_id=" + url.QueryEscape(t.GoodsID) + "&mall_sn=" + url.QueryEscape(t.MallSN) + "&from=goods&page_from=101"
+	if chatURL == "" || pddsite.Detect(chatURL) != site {
+		chatURL = merchantChatURL(site, t.GoodsID, t.MallSN)
 	}
 	if _, err = page.Goto(chatURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil && t.CapturedChatURL != "" {
-		fallbackURL := "https://mobile.pinduoduo.com/chat_detail.html?goods_id=" + url.QueryEscape(t.GoodsID) + "&mall_sn=" + url.QueryEscape(t.MallSN) + "&from=goods&page_from=101"
+		fallbackURL := merchantChatURL(site, t.GoodsID, t.MallSN)
 		_, err = page.Goto(fallbackURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
 	}
 	if err != nil {
@@ -341,7 +342,7 @@ func (w *worker) syncPDDChatInbox() error {
 	if err != nil {
 		return err
 	}
-	ctx, err := w.taskContext(task{PDDAccountID: accountID})
+	ctx, site, err := w.taskContext(task{PDDAccountID: accountID})
 	if err != nil {
 		return err
 	}
@@ -354,8 +355,8 @@ func (w *worker) syncPDDChatInbox() error {
 		return err
 	}
 	defer page.Close()
-	if strings.TrimSpace(pageURL) == "" {
-		pageURL = "https://mobile.pinduoduo.com/chat_detail.html?goods_id=" + url.QueryEscape(goodsID) + "&mall_sn=" + url.QueryEscape(mallSN) + "&from=goods&page_from=101"
+	if strings.TrimSpace(pageURL) == "" || pddsite.Detect(pageURL) != site {
+		pageURL = merchantChatURL(site, goodsID, mallSN)
 	}
 	if _, err = page.Goto(pageURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
 		return err
@@ -432,7 +433,7 @@ func (w *worker) syncLogisticsWithForce(force bool) error {
 	if err := w.database.QueryRow(`SELECT id FROM pdd_accounts WHERE enabled=1 AND is_default=1 ORDER BY updated_at DESC LIMIT 1`).Scan(&accountID); err != nil {
 		return nil
 	}
-	ctx, err := w.taskContext(task{PDDAccountID: accountID})
+	ctx, site, err := w.taskContext(task{PDDAccountID: accountID})
 	if err != nil {
 		return err
 	}
@@ -441,7 +442,7 @@ func (w *worker) syncLogisticsWithForce(force bool) error {
 	if err != nil {
 		return err
 	}
-	if _, err = page.Goto("https://mobile.pinduoduo.com/orders.html?type=3&comment_tab=1&combine_orders=1&main_orders=1&order_index=0", playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
+	if _, err = page.Goto(site.URL("/orders.html", url.Values{"type": {"3"}, "comment_tab": {"1"}, "combine_orders": {"1"}, "main_orders": {"1"}, "order_index": {"0"}}), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
 		return err
 	}
 	html, err := page.Content()
@@ -454,7 +455,7 @@ func (w *worker) syncLogisticsWithForce(force bool) error {
 			continue
 		}
 		seen[orderID] = true
-		if _, err = page.Goto("https://mobile.pinduoduo.com/order.html?order_sn="+url.QueryEscape(orderID), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
+		if _, err = page.Goto(site.URL("/order.html", url.Values{"order_sn": {orderID}}), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
 			continue
 		}
 		detail, _ := page.Content()
@@ -495,14 +496,16 @@ func (w *worker) logisticsIntervalAt(now time.Time) int {
 	return def
 }
 
-const pddUnpaidOrdersURL = "https://mobile.pinduoduo.com/orders.html?type=1&comment_tab=1&combine_orders=1&main_orders=1&refer_page_name=personal&refer_page_sn=10001&order_index=0"
-
-func gotoUnpaidOrders(page playwright.Page) error {
-	if _, err := page.Goto("https://mobile.pinduoduo.com/personal.html", playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
+func gotoUnpaidOrders(page playwright.Page, site pddsite.Site) error {
+	if _, err := page.Goto(site.URL("/personal.html", nil), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
 		return err
 	}
-	_, err := page.Goto(pddUnpaidOrdersURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
+	_, err := page.Goto(unpaidOrdersURL(site), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
 	return err
+}
+
+func unpaidOrdersURL(site pddsite.Site) string {
+	return site.URL("/orders.html", url.Values{"type": {"1"}, "comment_tab": {"1"}, "combine_orders": {"1"}, "main_orders": {"1"}, "refer_page_name": {"personal"}, "refer_page_sn": {"10001"}, "order_index": {"0"}})
 }
 
 func (w *worker) waitForAPI(ctx context.Context) error {
@@ -561,19 +564,23 @@ func (w *worker) openStore() error {
 	return nil
 }
 
-func (w *worker) taskContext(t task) (playwright.BrowserContext, error) {
+func (w *worker) taskContext(t task) (playwright.BrowserContext, pddsite.Site, error) {
 	if w.store == nil || w.store.PDDAccounts == nil {
-		return nil, errors.New("拼多多账号存储未初始化")
+		return nil, "", errors.New("拼多多账号存储未初始化")
 	}
 	account, err := w.store.PDDAccounts.GetByID(context.Background(), t.PDDAccountID)
 	if err != nil {
-		return nil, fmt.Errorf("读取任务绑定的拼多多账号: %w", err)
+		return nil, "", fmt.Errorf("读取任务绑定的拼多多账号: %w", err)
+	}
+	site, err := pddsite.Parse(account.Site)
+	if err != nil {
+		return nil, "", err
 	}
 	if !account.Enabled {
-		return nil, errors.New("任务绑定的拼多多账号已禁用")
+		return nil, "", errors.New("任务绑定的拼多多账号已禁用")
 	}
 	if strings.TrimSpace(account.Cookie) == "" {
-		return nil, errors.New("任务绑定的拼多多账号 Cookie 为空")
+		return nil, "", errors.New("任务绑定的拼多多账号 Cookie 为空")
 	}
 	options := playwright.BrowserNewContextOptions{Locale: playwright.String("zh-CN"), TimezoneId: playwright.String("Asia/Shanghai"), Viewport: &playwright.Size{Width: 1280, Height: 900}}
 	if userAgent := strings.TrimSpace(account.UserAgent); userAgent != "" {
@@ -581,27 +588,31 @@ func (w *worker) taskContext(t task) (playwright.BrowserContext, error) {
 	}
 	browserContext, err := w.browser.NewContext(options)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	cookies := []playwright.OptionalCookie{}
 	for _, part := range strings.Split(account.Cookie, ";") {
 		pair := strings.SplitN(strings.TrimSpace(part), "=", 2)
 		if len(pair) == 2 && pair[0] != "" {
-			cookies = append(cookies, playwright.OptionalCookie{Name: pair[0], Value: pair[1], URL: playwright.String("https://mobile.pinduoduo.com")})
+			cookies = append(cookies, playwright.OptionalCookie{Name: pair[0], Value: pair[1], URL: playwright.String(site.BaseURL())})
 		}
 	}
 	if len(cookies) == 0 {
 		_ = browserContext.Close()
-		return nil, errors.New("设置中保存的拼多多 Cookie 格式无效")
+		return nil, "", errors.New("设置中保存的拼多多 Cookie 格式无效")
 	}
 	if err := browserContext.AddCookies(cookies); err != nil {
 		_ = browserContext.Close()
-		return nil, err
+		return nil, "", err
 	}
-	return browserContext, nil
+	// Ensure every account/site pair owns a distinct profile directory. The
+	// current context is intentionally ephemeral; this path is the stable home
+	// for site-scoped browser state when persistence is enabled.
+	_ = os.MkdirAll(site.ProfileDir(env("PDD_BROWSER_DATA_DIR", "/app/browser_data"), account.ID), 0o700)
+	return browserContext, site, nil
 }
 
-func (w *worker) loadGoodsSnapshot(t task, page playwright.Page) (pddproduct.Snapshot, string, bool, error) {
+func (w *worker) loadGoodsSnapshot(t task, page playwright.Page, site pddsite.Site) (pddproduct.Snapshot, string, bool, error) {
 	hours := 72
 	if raw, err := w.store.Settings.Get(context.Background(), "pdd_product_refresh_interval_hours"); err == nil {
 		if parsed, parseErr := strconv.Atoi(strings.TrimSpace(raw)); parseErr == nil && parsed >= 1 && parsed <= 720 {
@@ -626,7 +637,7 @@ func (w *worker) loadGoodsSnapshot(t task, page playwright.Page) (pddproduct.Sna
 	if scanErr := w.database.QueryRow(`SELECT final_url FROM pdd_collection_snapshots WHERE goods_id=? ORDER BY received_at DESC,id DESC LIMIT 1`, t.GoodsID).Scan(&capturedURL); scanErr != nil {
 		_ = w.database.QueryRow(`SELECT final_url FROM pdd_products WHERE goods_id=?`, t.GoodsID).Scan(&capturedURL)
 	}
-	goodsURL := purchaseGoodsURL(capturedURL, t.GoodsID)
+	goodsURL := purchaseGoodsURL(capturedURL, t.GoodsID, site)
 	req, _ := http.NewRequest(http.MethodGet, goodsURL, nil)
 	req.Header.Set("Cookie", account.Cookie)
 	if account.UserAgent != "" {
@@ -655,8 +666,12 @@ func (w *worker) loadGoodsSnapshot(t task, page playwright.Page) (pddproduct.Sna
 	return snapshot, "browser", false, err
 }
 
-func purchaseGoodsURL(capturedURL, goodsID string) string {
-	return pddproduct.ProductURL(capturedURL, goodsID)
+func purchaseGoodsURL(capturedURL, goodsID string, site pddsite.Site) string {
+	return pddproduct.ProductURLForSite(capturedURL, goodsID, site)
+}
+
+func merchantChatURL(site pddsite.Site, goodsID, mallSN string) string {
+	return site.URL("/chat_detail.html", url.Values{"goods_id": {goodsID}, "mall_sn": {mallSN}, "from": {"goods"}, "page_from": {"101"}})
 }
 
 func (w *worker) validateGoods(t task, snapshot pddproduct.Snapshot, source string, cacheHit bool) error {
@@ -681,7 +696,7 @@ func (w *worker) runOne() error {
 	if err != nil {
 		return err
 	}
-	browserContext, err := w.taskContext(t)
+	browserContext, site, err := w.taskContext(t)
 	if err != nil {
 		return w.abort(t, err.Error())
 	}
@@ -692,7 +707,7 @@ func (w *worker) runOne() error {
 	}
 	defer page.Close()
 	if t.RecoveryOnly {
-		order, recoverErr := w.findCreatedOrder(t, page, 15*time.Second)
+		order, recoverErr := w.findCreatedOrder(t, page, site, 15*time.Second)
 		if recoverErr != nil {
 			_ = w.resultUnknown(t, recoverErr.Error())
 			return recoverErr
@@ -708,7 +723,7 @@ func (w *worker) runOne() error {
 	if err = w.heartbeat(t, "loading_goods"); err != nil {
 		return w.abort(t, err.Error())
 	}
-	snapshot, source, cacheHit, err := w.loadGoodsSnapshot(t, page)
+	snapshot, source, cacheHit, err := w.loadGoodsSnapshot(t, page, site)
 	if err != nil {
 		return w.abort(t, "读取拼多多商品页失败: "+err.Error())
 	}
@@ -722,7 +737,7 @@ func (w *worker) runOne() error {
 	if err = w.heartbeat(t, "browser_preparing"); err != nil {
 		return w.abort(t, err.Error())
 	}
-	if err = gotoUnpaidOrders(page); err != nil {
+	if err = gotoUnpaidOrders(page, site); err != nil {
 		return w.abort(t, "读取待付款基线失败: "+err.Error())
 	}
 	beforeHTML, err := page.Content()
@@ -736,7 +751,7 @@ func (w *worker) runOne() error {
 		return w.abort(t, err.Error())
 	}
 
-	checkout := "https://mobile.pinduoduo.com/order_checkout.html?sku_id=" + url.QueryEscape(t.SKUID) + "&goods_id=" + url.QueryEscape(t.GoodsID)
+	checkout := site.URL("/order_checkout.html", url.Values{"sku_id": {t.SKUID}, "goods_id": {t.GoodsID}})
 	if _, err = page.Goto(checkout, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
 		return w.abort(t, "打开结算页失败: "+err.Error())
 	}
@@ -787,7 +802,7 @@ func (w *worker) runOne() error {
 	for _, order := range before {
 		t.BeforeOrderSNs = append(t.BeforeOrderSNs, order.OrderID)
 	}
-	order, err := w.findCreatedOrder(t, page, 45*time.Second)
+	order, err := w.findCreatedOrder(t, page, site, 45*time.Second)
 	if err != nil {
 		return err
 	}
@@ -795,7 +810,7 @@ func (w *worker) runOne() error {
 	return w.browserResult(t, order)
 }
 
-func (w *worker) findCreatedOrder(t task, page playwright.Page, timeout time.Duration) (pddcheckout.Order, error) {
+func (w *worker) findCreatedOrder(t task, page playwright.Page, site pddsite.Site, timeout time.Duration) (pddcheckout.Order, error) {
 	seen := map[string]bool{}
 	for _, id := range t.BeforeOrderSNs {
 		seen[id] = true
@@ -805,7 +820,7 @@ func (w *worker) findCreatedOrder(t task, page playwright.Page, timeout time.Dur
 	lastObserved := []string{}
 	var lastHTML string
 	for {
-		if err := gotoUnpaidOrders(page); err == nil {
+		if err := gotoUnpaidOrders(page, site); err == nil {
 			time.Sleep(800 * time.Millisecond)
 			if html, contentErr := page.Content(); contentErr == nil {
 				lastHTML = html
@@ -820,7 +835,7 @@ func (w *worker) findCreatedOrder(t task, page playwright.Page, timeout time.Dur
 					}
 					lastCount = len(candidates)
 					if len(candidates) == 1 {
-						return w.verifyCreatedOrder(t, page, candidates[0])
+						return w.verifyCreatedOrder(t, page, site, candidates[0])
 					}
 				}
 			}
@@ -837,8 +852,8 @@ func (w *worker) findCreatedOrder(t task, page playwright.Page, timeout time.Dur
 	}
 }
 
-func (w *worker) verifyCreatedOrder(t task, page playwright.Page, order pddcheckout.Order) (pddcheckout.Order, error) {
-	if _, err := page.Goto("https://mobile.pinduoduo.com/order.html?order_sn="+url.QueryEscape(order.OrderID), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
+func (w *worker) verifyCreatedOrder(t task, page playwright.Page, site pddsite.Site, order pddcheckout.Order) (pddcheckout.Order, error) {
+	if _, err := page.Goto(site.URL("/order.html", url.Values{"order_sn": {order.OrderID}}), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
 		return pddcheckout.Order{}, err
 	}
 	detailBody, err := page.Locator("body").InnerText()

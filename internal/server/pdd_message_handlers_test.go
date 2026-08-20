@@ -17,7 +17,7 @@ func TestPDDMessageManualConfirmationWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	account, err := store.PDDAccounts.SaveSingle(t.Context(), admin.ID, "主账号", "api_uid=1; webp=1", "uin", "609", "test-agent", true)
+	account, err := store.PDDAccounts.SaveSingle(t.Context(), admin.ID, "主账号", "pinduoduo", "api_uid=1; webp=1", "uin", "609", "test-agent", true)
 	if err != nil {
 		t.Fatal(err)
 	}

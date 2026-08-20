@@ -84,8 +84,9 @@ func (c *Client) Update(ctx context.Context, in UpdateRequest) (UpdateResult, er
 	}
 	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
 	req.Header.Set("User-Agent", c.Config.UserAgent)
-	req.Header.Set("Origin", "https://mobile.pinduoduo.com")
-	req.Header.Set("Referer", "https://mobile.pinduoduo.com/")
+	origin := strings.TrimRight(c.Config.BaseURL, "/")
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Referer", origin+"/")
 	req.Header.Set("Cookie", c.Config.Cookie)
 	httpClient := c.HTTPClient
 	if httpClient == nil {

@@ -317,6 +317,9 @@ export interface SystemSettings {
 export interface PDDAccountConfig {
   id: string;
   name: string;
+  site: 'pinduoduo' | 'yangkeduo';
+  base_url: string;
+  cookie_domain: string;
   pdd_uid: string;
   default_address_id: string;
   user_agent: string;

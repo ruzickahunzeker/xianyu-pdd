@@ -22,8 +22,8 @@ func TestPDDAccountSettingsDoNotExposeCookie(t *testing.T) {
 		return rec
 	}
 	cookie := "token=x; pdd_user_id=6670459375039; secret=do-not-return"
-	saved := request(http.MethodPut, "/api/pdd/account", `{"name":"主账号","cookie":"`+cookie+`","default_address_id":"60984097534","enabled":true}`)
-	if saved.Code != http.StatusOK || strings.Contains(saved.Body.String(), "do-not-return") || !strings.Contains(saved.Body.String(), `"pdd_uid":"6670459375039"`) {
+	saved := request(http.MethodPut, "/api/pdd/account", `{"name":"主账号","site":"pinduoduo","cookie":"`+cookie+`","default_address_id":"60984097534","enabled":true}`)
+	if saved.Code != http.StatusOK || strings.Contains(saved.Body.String(), "do-not-return") || !strings.Contains(saved.Body.String(), `"pdd_uid":"6670459375039"`) || !strings.Contains(saved.Body.String(), `"base_url":"https://mobile.pinduoduo.com"`) {
 		t.Fatalf("save=%d %s", saved.Code, saved.Body.String())
 	}
 	got := request(http.MethodGet, "/api/pdd/account", "")
@@ -33,6 +33,31 @@ func TestPDDAccountSettingsDoNotExposeCookie(t *testing.T) {
 	verified := request(http.MethodPost, "/api/pdd/account/verify", `{}`)
 	if verified.Code != http.StatusOK || !strings.Contains(verified.Body.String(), `"credential_status":"valid"`) {
 		t.Fatalf("verify=%d %s", verified.Code, verified.Body.String())
+	}
+}
+
+func TestPDDAccountSiteSwitchRequiresNewCookie(t *testing.T) {
+	t.Setenv("XIANYU_DATA_KEY", "pdd-handler-site-key")
+	server, _, cleanup := newTestServer(t)
+	defer cleanup()
+	router := server.Router()
+	session := loginHelper(t, router)
+	request := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/api/pdd/account", strings.NewReader(body))
+		req.AddCookie(session)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request(`{"site":"pinduoduo","cookie":"pdd_user_id=1","default_address_id":"10"}`); rec.Code != http.StatusOK {
+		t.Fatalf("initial save=%d %s", rec.Code, rec.Body.String())
+	}
+	if rec := request(`{"site":"yangkeduo","default_address_id":"20"}`); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("site switch without cookie=%d %s", rec.Code, rec.Body.String())
+	}
+	if rec := request(`{"site":"yangkeduo","cookie":"pdd_user_id=1","default_address_id":"20"}`); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"cookie_domain":".yangkeduo.com"`) {
+		t.Fatalf("site switch=%d %s", rec.Code, rec.Body.String())
 	}
 }
 

@@ -24,6 +24,7 @@ test("collectPDDReviewMedia supports camelCase live-photo fields from pictures",
 
 test("isPDDAddressPage accepts only the canonical address page", () => {
   assert.equal(isPDDAddressPage("https://mobile.pinduoduo.com/addresses.html?refer_page=personal"), true);
+  assert.equal(isPDDAddressPage("https://mobile.yangkeduo.com/addresses.html?refer_page=personal"), true);
   assert.equal(isPDDAddressPage("http://mobile.pinduoduo.com/addresses.html"), false);
   assert.equal(isPDDAddressPage("https://mobile.pinduoduo.com/goods.html"), false);
   assert.equal(isPDDAddressPage("https://mobile.pinduoduo.com.example.com/addresses.html"), false);

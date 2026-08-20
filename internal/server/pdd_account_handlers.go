@@ -8,6 +8,7 @@ import (
 
 	"xianyu-go/internal/auth"
 	"xianyu-go/internal/pddaddress"
+	"xianyu-go/internal/pddsite"
 )
 
 const defaultPDDUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
@@ -24,27 +25,29 @@ func (s *Server) mountPDDAccountAdmin(r interface {
 	r.Post("/api/pdd/account/verify", s.verifyPDDAccount)
 }
 
-func pddAccountJSON(accountID, name, pddUID, addressID, userAgent, status, lastError string, enabled bool, verifiedAt int64, configured bool) map[string]any {
-	return map[string]any{"id": accountID, "name": name, "pdd_uid": pddUID, "default_address_id": addressID, "user_agent": userAgent, "enabled": enabled, "credential_status": status, "last_verified_at": verifiedAt, "last_error": lastError, "configured": configured, "cookie_configured": configured}
+func pddAccountJSON(accountID, name string, site pddsite.Site, pddUID, addressID, userAgent, status, lastError string, enabled bool, verifiedAt int64, configured bool) map[string]any {
+	return map[string]any{"id": accountID, "name": name, "site": site, "base_url": site.BaseURL(), "cookie_domain": site.CookieDomain(), "pdd_uid": pddUID, "default_address_id": addressID, "user_agent": userAgent, "enabled": enabled, "credential_status": status, "last_verified_at": verifiedAt, "last_error": lastError, "configured": configured, "cookie_configured": configured}
 }
 
 func (s *Server) getPDDAccount(w http.ResponseWriter, r *http.Request) {
 	userID := auth.SessionFromContext(r.Context()).UserID
 	a, err := s.Store.PDDAccounts.Default(r.Context(), userID)
 	if errors.Is(err, sql.ErrNoRows) {
-		writeJSON(w, http.StatusOK, pddAccountJSON("", "拼多多主账号", "", "", defaultPDDUserAgent, "unconfigured", "", true, 0, false))
+		writeJSON(w, http.StatusOK, pddAccountJSON("", "拼多多主账号", pddsite.Default, "", "", defaultPDDUserAgent, "unconfigured", "", true, 0, false))
 		return
 	}
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "读取拼多多账号失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, pddAccountJSON(a.ID, a.Name, a.PDDUID, a.DefaultAddressID, a.UserAgent, a.CredentialStatus, a.LastError, a.Enabled, a.LastVerifiedAt, a.Cookie != ""))
+	site, _ := pddsite.Parse(a.Site)
+	writeJSON(w, http.StatusOK, pddAccountJSON(a.ID, a.Name, site, a.PDDUID, a.DefaultAddressID, a.UserAgent, a.CredentialStatus, a.LastError, a.Enabled, a.LastVerifiedAt, a.Cookie != ""))
 }
 
 func (s *Server) savePDDAccount(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Name             string `json:"name"`
+		Site             string `json:"site"`
 		Cookie           string `json:"cookie"`
 		DefaultAddressID string `json:"default_address_id"`
 		UserAgent        string `json:"user_agent"`
@@ -56,8 +59,18 @@ func (s *Server) savePDDAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	userID := auth.SessionFromContext(r.Context()).UserID
 	existing, _ := s.Store.PDDAccounts.Default(r.Context(), userID)
+	site, siteErr := pddsite.Parse(in.Site)
+	if siteErr != nil {
+		writeErr(w, http.StatusBadRequest, siteErr.Error())
+		return
+	}
 	cookie := strings.TrimSpace(in.Cookie)
 	if cookie == "" && existing != nil {
+		existingSite, _ := pddsite.Parse(existing.Site)
+		if existingSite != site {
+			writeErr(w, http.StatusUnprocessableEntity, "切换拼多多站点时必须重新采集该站点的 Cookie 和地址 ID")
+			return
+		}
 		cookie = existing.Cookie
 	}
 	pddUID := pddaddress.PDDUIDFromCookie(cookie)
@@ -86,12 +99,12 @@ func (s *Server) savePDDAccount(w http.ResponseWriter, r *http.Request) {
 	if in.Enabled != nil {
 		enabled = *in.Enabled
 	}
-	a, err := s.Store.PDDAccounts.SaveSingle(r.Context(), userID, name, cookie, pddUID, addressID, ua, enabled)
+	a, err := s.Store.PDDAccounts.SaveSingle(r.Context(), userID, name, string(site), cookie, pddUID, addressID, ua, enabled)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "保存拼多多账号失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, pddAccountJSON(a.ID, a.Name, a.PDDUID, a.DefaultAddressID, a.UserAgent, a.CredentialStatus, a.LastError, a.Enabled, a.LastVerifiedAt, true))
+	writeJSON(w, http.StatusOK, pddAccountJSON(a.ID, a.Name, site, a.PDDUID, a.DefaultAddressID, a.UserAgent, a.CredentialStatus, a.LastError, a.Enabled, a.LastVerifiedAt, true))
 }
 
 func (s *Server) deletePDDAccount(w http.ResponseWriter, r *http.Request) {

@@ -11,9 +11,9 @@ import (
 )
 
 type PDDAccount struct {
-	ID, Name, Cookie, PDDUID, DefaultAddressID, UserAgent, CredentialStatus, LastError string
-	UserID, LastVerifiedAt, CreatedAt, UpdatedAt                                       int64
-	Enabled, IsDefault                                                                 bool
+	ID, Name, Site, Cookie, PDDUID, DefaultAddressID, UserAgent, CredentialStatus, LastError string
+	UserID, LastVerifiedAt, CreatedAt, UpdatedAt                                             int64
+	Enabled, IsDefault                                                                       bool
 }
 
 type PDDAccountStore struct {
@@ -29,7 +29,7 @@ func (s *PDDAccountStore) GetByID(ctx context.Context, id string) (*PDDAccount, 
 	var a PDDAccount
 	var cookie string
 	var enabled, isDefault int
-	err := s.DB.QueryRowContext(ctx, `SELECT id,user_id,name,cookie_encrypted,pdd_uid,default_address_id,user_agent,enabled,is_default,credential_status,last_verified_at,last_error,created_at,updated_at FROM pdd_accounts WHERE id=? LIMIT 1`, strings.TrimSpace(id)).Scan(&a.ID, &a.UserID, &a.Name, &cookie, &a.PDDUID, &a.DefaultAddressID, &a.UserAgent, &enabled, &isDefault, &a.CredentialStatus, &a.LastVerifiedAt, &a.LastError, &a.CreatedAt, &a.UpdatedAt)
+	err := s.DB.QueryRowContext(ctx, `SELECT id,user_id,name,site,cookie_encrypted,pdd_uid,default_address_id,user_agent,enabled,is_default,credential_status,last_verified_at,last_error,created_at,updated_at FROM pdd_accounts WHERE id=? LIMIT 1`, strings.TrimSpace(id)).Scan(&a.ID, &a.UserID, &a.Name, &a.Site, &cookie, &a.PDDUID, &a.DefaultAddressID, &a.UserAgent, &enabled, &isDefault, &a.CredentialStatus, &a.LastVerifiedAt, &a.LastError, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -45,7 +45,7 @@ func (s *PDDAccountStore) Default(ctx context.Context, userID int64) (*PDDAccoun
 	var a PDDAccount
 	var cookie string
 	var enabled, isDefault int
-	err := s.DB.QueryRowContext(ctx, `SELECT id,user_id,name,cookie_encrypted,pdd_uid,default_address_id,user_agent,enabled,is_default,credential_status,last_verified_at,last_error,created_at,updated_at FROM pdd_accounts WHERE user_id=? AND is_default=1 LIMIT 1`, userID).Scan(&a.ID, &a.UserID, &a.Name, &cookie, &a.PDDUID, &a.DefaultAddressID, &a.UserAgent, &enabled, &isDefault, &a.CredentialStatus, &a.LastVerifiedAt, &a.LastError, &a.CreatedAt, &a.UpdatedAt)
+	err := s.DB.QueryRowContext(ctx, `SELECT id,user_id,name,site,cookie_encrypted,pdd_uid,default_address_id,user_agent,enabled,is_default,credential_status,last_verified_at,last_error,created_at,updated_at FROM pdd_accounts WHERE user_id=? AND is_default=1 LIMIT 1`, userID).Scan(&a.ID, &a.UserID, &a.Name, &a.Site, &cookie, &a.PDDUID, &a.DefaultAddressID, &a.UserAgent, &enabled, &isDefault, &a.CredentialStatus, &a.LastVerifiedAt, &a.LastError, &a.CreatedAt, &a.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +57,7 @@ func (s *PDDAccountStore) Default(ctx context.Context, userID int64) (*PDDAccoun
 	return &a, nil
 }
 
-func (s *PDDAccountStore) SaveSingle(ctx context.Context, userID int64, name, cookie, pddUID, addressID, userAgent string, enabled bool) (*PDDAccount, error) {
+func (s *PDDAccountStore) SaveSingle(ctx context.Context, userID int64, name, site, cookie, pddUID, addressID, userAgent string, enabled bool) (*PDDAccount, error) {
 	if s.codec == nil || s.codec.aead == nil {
 		return nil, errors.New("XIANYU_DATA_KEY 未配置，禁止保存拼多多 Cookie")
 	}
@@ -72,7 +72,7 @@ func (s *PDDAccountStore) SaveSingle(ctx context.Context, userID int64, name, co
 		if err != nil {
 			return nil, err
 		}
-		_, err = s.DB.ExecContext(ctx, `INSERT INTO pdd_accounts(id,user_id,name,cookie_encrypted,pdd_uid,default_address_id,user_agent,enabled,is_default,credential_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,1,'unchecked',?,?)`, id, userID, name, encrypted, pddUID, addressID, userAgent, boolIntDB(enabled), now, now)
+		_, err = s.DB.ExecContext(ctx, `INSERT INTO pdd_accounts(id,user_id,name,site,cookie_encrypted,pdd_uid,default_address_id,user_agent,enabled,is_default,credential_status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,1,'unchecked',?,?)`, id, userID, name, site, encrypted, pddUID, addressID, userAgent, boolIntDB(enabled), now, now)
 		if err != nil {
 			return nil, err
 		}
@@ -85,7 +85,7 @@ func (s *PDDAccountStore) SaveSingle(ctx context.Context, userID int64, name, co
 	if err != nil {
 		return nil, err
 	}
-	_, err = s.DB.ExecContext(ctx, `UPDATE pdd_accounts SET name=?,cookie_encrypted=?,pdd_uid=?,default_address_id=?,user_agent=?,enabled=?,credential_status='unchecked',last_verified_at=0,last_error='',updated_at=? WHERE id=? AND user_id=?`, name, encrypted, pddUID, addressID, userAgent, boolIntDB(enabled), now, existing.ID, userID)
+	_, err = s.DB.ExecContext(ctx, `UPDATE pdd_accounts SET name=?,site=?,cookie_encrypted=?,pdd_uid=?,default_address_id=?,user_agent=?,enabled=?,credential_status='unchecked',last_verified_at=0,last_error='',updated_at=? WHERE id=? AND user_id=?`, name, site, encrypted, pddUID, addressID, userAgent, boolIntDB(enabled), now, existing.ID, userID)
 	if err != nil {
 		return nil, err
 	}

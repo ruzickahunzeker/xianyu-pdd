@@ -1,6 +1,16 @@
 import { collectDefaultAddressID, collectPDDProduct, collectPDDReviewMedia, isPDDAddressPage } from "./collector.js";
 
-const PDD_ADDRESS_URL = "https://mobile.pinduoduo.com/addresses.html";
+const PDD_SITES = {
+  "mobile.pinduoduo.com": { site: "pinduoduo", cookieDomain: ".pinduoduo.com" },
+  "mobile.yangkeduo.com": { site: "yangkeduo", cookieDomain: ".yangkeduo.com" }
+};
+
+function siteFromURL(rawURL) {
+  const parsed = new URL(rawURL);
+  const site = PDD_SITES[parsed.hostname];
+  if (!site || parsed.protocol !== "https:") throw new Error("当前页面不是支持的拼多多移动站点");
+  return { ...site, host: parsed.hostname, baseURL: `https://${parsed.hostname}` };
+}
 
 const DEFAULT_SETTINGS = {
   serverURL: "http://127.0.0.1:59188",
@@ -25,7 +35,8 @@ async function capture() {
     world: "MAIN",
     func: () => JSON.stringify(globalThis.rawData)
   });
-  const normalized = { ...collectPDDProduct(JSON.parse(result), tab.url), collection_id: crypto.randomUUID() };
+  const currentSite = siteFromURL(tab.url);
+  const normalized = { ...collectPDDProduct(JSON.parse(result), tab.url), site: currentSite.site, collection_id: crypto.randomUUID() };
   await chrome.storage.local.set({ lastCollection: normalized });
   return normalized;
 }
@@ -62,6 +73,7 @@ async function upload(payload) {
 
 async function captureReviewMedia() {
   const tab = await activeTab();
+  siteFromURL(tab.url);
   const [{ result }] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: "MAIN", func: () => JSON.stringify(globalThis.rawData || null) });
   const data = collectPDDReviewMedia(JSON.parse(result), tab.url);
   await chrome.storage.local.set({ lastReviewMedia: data });
@@ -83,14 +95,16 @@ async function uploadReviewMedia(payload) {
 
 async function captureAccount() {
   const tab = await activeTab();
+  const currentSite = siteFromURL(tab.url);
   if (!isPDDAddressPage(tab.url)) {
     const error = new Error("请先打开拼多多收货地址页");
     error.code = "ADDRESS_PAGE_REQUIRED";
     throw error;
   }
-  const cookies = await chrome.cookies.getAll({ domain: ".pinduoduo.com" });
-  const extraCookies = await chrome.cookies.getAll({ domain: ".yangkeduo.com" });
-  const unique = new Map([...cookies, ...extraCookies].map(item => [`${item.name};${item.domain};${item.path}`, item]));
+	// Never merge credentials from the two domains. A captured account belongs
+	// to exactly one site and the server enforces the same boundary.
+  const cookies = await chrome.cookies.getAll({ domain: currentSite.cookieDomain });
+  const unique = new Map(cookies.map(item => [`${item.name};${item.domain};${item.path}`, item]));
   const cookie = [...unique.values()].map(item => `${item.name}=${item.value}`).join("; ");
   const pddUID = [...unique.values()].find(item => item.name === "pdd_user_id")?.value || "";
   if (!pddUID) throw new Error("未读取到 pdd_user_id，请确认拼多多已登录");
@@ -106,15 +120,18 @@ async function captureAccount() {
       return { rawData: globalThis.rawData || null, userAgent: navigator.userAgent };
     }
   });
-  const data = { cookie, pdd_uid: pddUID, default_address_id: collectDefaultAddressID(result?.rawData), user_agent: result?.userAgent || "", captured_at: new Date().toISOString() };
+  const data = { site: currentSite.site, base_url: currentSite.baseURL, cookie_domain: currentSite.cookieDomain, cookie, pdd_uid: pddUID, default_address_id: collectDefaultAddressID(result?.rawData), user_agent: result?.userAgent || "", captured_at: new Date().toISOString() };
   await chrome.storage.local.set({ lastPDDAccount: data });
   return { ...data, cookie_masked: `${cookie.slice(0, 18)}…（${unique.size} 项）` };
 }
 
 async function openAddressPage() {
   const tab = await activeTab();
-  await chrome.tabs.update(tab.id, { url: PDD_ADDRESS_URL });
-  return { url: PDD_ADDRESS_URL };
+  let currentSite;
+  try { currentSite = siteFromURL(tab.url); } catch { currentSite = { baseURL: "https://mobile.pinduoduo.com" }; }
+  const addressURL = `${currentSite.baseURL}/addresses.html`;
+  await chrome.tabs.update(tab.id, { url: addressURL });
+  return { url: addressURL };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

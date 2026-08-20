@@ -15,7 +15,7 @@ func TestPDDAccountSingleConfigEncryptsCookieAndKeepsIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	owner, _ := store.Users.GetByUsername(ctx, "pdd-owner")
-	a, err := store.PDDAccounts.SaveSingle(ctx, owner.ID, "主账号", "token=x; pdd_user_id=123456; other=y", "123456", "60984097534", "UA", true)
+	a, err := store.PDDAccounts.SaveSingle(ctx, owner.ID, "主账号", "pinduoduo", "token=x; pdd_user_id=123456; other=y", "123456", "60984097534", "UA", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestPDDAccountSingleConfigEncryptsCookieAndKeepsIdentity(t *testing.T) {
 	if !strings.HasPrefix(raw, encryptedValuePrefix) || strings.Contains(raw, "pdd_user_id") {
 		t.Fatalf("cookie not encrypted: %q", raw)
 	}
-	updated, err := store.PDDAccounts.SaveSingle(ctx, owner.ID, "新名称", "", "123456", "60984097534", "UA2", true)
+	updated, err := store.PDDAccounts.SaveSingle(ctx, owner.ID, "新名称", "pinduoduo", "", "123456", "60984097534", "UA2", true)
 	if err != nil || updated.ID != a.ID || !strings.Contains(updated.Cookie, "pdd_user_id=123456") {
 		t.Fatalf("updated=%+v err=%v", updated, err)
 	}

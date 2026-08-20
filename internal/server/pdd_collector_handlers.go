@@ -23,6 +23,7 @@ import (
 	"xianyu-go/internal/auth"
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/pddproduct"
+	"xianyu-go/internal/pddsite"
 )
 
 var pddNumericID = regexp.MustCompile(`^[0-9]+$`)
@@ -253,7 +254,7 @@ func (s *Server) pddMediaSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func pddProductURL(raw, goodsID string) string {
-	return pddproduct.ProductURL(raw, goodsID)
+	return pddproduct.ProductURLForSite(raw, goodsID, pddsite.Detect(raw))
 }
 
 func validatePDDProductSnapshot(snapshot pddproduct.Snapshot) error {
@@ -286,7 +287,8 @@ func fetchPDDProduct(ctx context.Context, account *db.PDDAccount, goodsID, pageU
 	req.Header.Set("Cookie", account.Cookie)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
-	req.Header.Set("Referer", "https://mobile.pinduoduo.com/")
+	pageSite := pddsite.Detect(pageURL)
+	req.Header.Set("Referer", pageSite.BaseURL()+"/")
 	if account.UserAgent != "" {
 		req.Header.Set("User-Agent", account.UserAgent)
 	}
@@ -327,7 +329,7 @@ func (s *Server) pddRefreshProduct(w http.ResponseWriter, r *http.Request) {
 	}
 	var latestCapturedURL string
 	if s.Store.DB.QueryRowContext(r.Context(), `SELECT final_url FROM pdd_collection_snapshots WHERE goods_id=? ORDER BY received_at DESC,id DESC LIMIT 1`, goodsID).Scan(&latestCapturedURL) == nil {
-		if candidate := pddProductURL(latestCapturedURL, goodsID); candidate != "https://mobile.pinduoduo.com/goods.html?goods_id="+goodsID {
+		if candidate := pddProductURL(latestCapturedURL, goodsID); candidate != pddsite.Default.URL("/goods.html", url.Values{"goods_id": {goodsID}}) {
 			finalURL = candidate
 		}
 	}

@@ -178,7 +178,7 @@ export function isPDDAddressPage(pageURL) {
   try {
     const parsed = new URL(asString(pageURL));
     return parsed.protocol === "https:"
-      && parsed.hostname === "mobile.pinduoduo.com"
+      && ["mobile.pinduoduo.com", "mobile.yangkeduo.com"].includes(parsed.hostname)
       && parsed.pathname === "/addresses.html";
   } catch {
     return false;
@@ -220,7 +220,7 @@ export function collectDefaultAddressID(rawData) {
 export function isPDDCommentsPage(pageURL) {
   try {
     const parsed = new URL(asString(pageURL));
-    return parsed.protocol === "https:" && parsed.hostname === "mobile.pinduoduo.com"
+    return parsed.protocol === "https:" && ["mobile.pinduoduo.com", "mobile.yangkeduo.com"].includes(parsed.hostname)
       && parsed.pathname === "/goods_comments.html" && /^\d+$/.test(parsed.searchParams.get("goods_id") || "");
   } catch { return false; }
 }
