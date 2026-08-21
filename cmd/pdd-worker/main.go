@@ -63,6 +63,9 @@ type worker struct {
 	pw                             *playwright.Playwright
 	browser                        playwright.Browser
 	lastLogisticsSync              time.Time
+	lastStateReport                time.Time
+	lastReportedState              string
+	lastReportedError              string
 }
 
 func main() {
@@ -91,7 +94,9 @@ func main() {
 	if err := w.startBrowser(); err != nil {
 		log.Fatal(err)
 	}
+	w.reportState("idle", "")
 	defer w.close()
+	defer w.reportState("stopped", "")
 	if w.logisticsOnly {
 		if err := w.syncLogisticsForce(); err != nil {
 			log.Fatal(err)
@@ -112,19 +117,38 @@ func main() {
 			log.Printf("商家消息任务失败: %v", messageErr)
 		}
 
+		var logisticsErr error
 		if errors.Is(purchaseErr, errNoTask) && errors.Is(messageErr, errNoTask) {
-			if inboxErr := w.syncPDDChatInbox(); inboxErr != nil {
-				log.Printf("拼多多消息接收同步失败: %v", inboxErr)
+			w.reportState("syncing_logistics", "")
+			if logisticsErr = w.syncLogistics(); logisticsErr != nil {
+				log.Printf("物流同步失败: %v", logisticsErr)
 			}
-			if syncErr := w.syncLogistics(); syncErr != nil {
-				log.Printf("物流同步失败: %v", syncErr)
+		}
+		lastError := ""
+		for _, runErr := range []error{purchaseErr, messageErr, logisticsErr} {
+			if runErr != nil && !errors.Is(runErr, errNoTask) {
+				lastError = runErr.Error()
+				break
 			}
+		}
+		if lastError != "" {
+			w.reportState("degraded", lastError)
+		} else {
+			w.reportState("idle", "")
 		}
 		if w.once {
 			return
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func (w *worker) reportState(state, lastError string) {
+	if state == w.lastReportedState && lastError == w.lastReportedError && time.Since(w.lastStateReport) < 15*time.Second {
+		return
+	}
+	_ = w.store.Settings.SetMany(context.Background(), map[string]string{"pdd_worker_last_seen_at": strconv.FormatInt(time.Now().Unix(), 10), "pdd_worker_state": state, "pdd_worker_last_error": lastError})
+	w.lastReportedState, w.lastReportedError, w.lastStateReport = state, lastError, time.Now()
 }
 
 func (w *worker) runMessageOne() error {
@@ -137,27 +161,15 @@ func (w *worker) runMessageOne() error {
 		return w.messageResult(t, "failed", err.Error(), nil)
 	}
 	defer ctx.Close()
-	if err = installPDDChatObserver(ctx); err != nil {
-		return w.messageResult(t, "failed", "安装聊天接口监听失败: "+err.Error(), nil)
-	}
 	page, err := ctx.NewPage()
 	if err != nil {
 		return w.messageResult(t, "failed", err.Error(), nil)
 	}
 	defer page.Close()
-	chatURL := strings.TrimSpace(t.CapturedChatURL)
-	if chatURL == "" || pddsite.Detect(chatURL) != site {
-		chatURL = merchantChatURL(site, t.GoodsID, t.MallSN)
-	}
-	if _, err = page.Goto(chatURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil && t.CapturedChatURL != "" {
-		fallbackURL := merchantChatURL(site, t.GoodsID, t.MallSN)
-		_, err = page.Goto(fallbackURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
-	}
-	if err != nil {
-		return w.messageResult(t, "failed", "打开商家聊天失败: "+err.Error(), nil)
+	if err = w.openMerchantChat(page, site, t); err != nil {
+		return w.messageResult(t, "failed", err.Error(), nil)
 	}
 	_ = w.messageHeartbeat(t)
-	_ = w.flushPDDChatCapture(page, t.PDDAccountID, t.MallSN, t.GoodsID, t.PDDOrderID)
 	current, _ := url.Parse(page.URL())
 	if current != nil && current.Query().Get("mall_sn") != "" && current.Query().Get("mall_sn") != t.MallSN {
 		return w.messageResult(t, "failed", "merchant_mismatch", nil)
@@ -249,6 +261,47 @@ func (w *worker) runMessageOne() error {
 		return w.messageResult(t, "result_unknown", "点击发送后无法确认消息是否出现", map[string]any{"url": page.URL(), "clicked": true})
 	}
 	return w.messageResult(t, "failed", "发送未执行", nil)
+}
+
+func (w *worker) openMerchantChat(page playwright.Page, site pddsite.Site, t messageTask) error {
+	productURL := ""
+	if strings.TrimSpace(t.PDDOrderID) == "" {
+		if strings.TrimSpace(t.GoodsID) == "" {
+			return errors.New("消息任务缺少拼多多订单号和 goods_id，无法进入商家聊天")
+		}
+		if err := w.database.QueryRow(`SELECT final_url FROM pdd_products WHERE goods_id=?`, t.GoodsID).Scan(&productURL); err != nil {
+			return errors.New("数据库中没有该商品链接，无法进入商家聊天")
+		}
+	}
+	entryURL, buttonText, pageName, err := merchantEntryForTask(site, t, productURL)
+	if err != nil {
+		return err
+	}
+	if _, err := page.Goto(entryURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded, Timeout: playwright.Float(30000)}); err != nil {
+		return fmt.Errorf("打开拼多多%s页面失败: %w", pageName, err)
+	}
+	if strings.Contains(page.URL(), "/login.html") {
+		return errors.New("拼多多页面跳转登录，请更新对应站点 Cookie")
+	}
+	button := page.GetByText(buttonText, playwright.PageGetByTextOptions{Exact: playwright.Bool(true)}).First()
+	if err := button.WaitFor(playwright.LocatorWaitForOptions{State: playwright.WaitForSelectorStateVisible, Timeout: playwright.Float(15000)}); err != nil {
+		return fmt.Errorf("拼多多%s页面未找到“%s”按钮", pageName, buttonText)
+	}
+	if err := button.Click(); err != nil {
+		return fmt.Errorf("点击“%s”失败: %w", buttonText, err)
+	}
+	page.WaitForTimeout(1500)
+	return nil
+}
+
+func merchantEntryForTask(site pddsite.Site, t messageTask, productURL string) (entryURL, buttonText, pageName string, err error) {
+	if strings.TrimSpace(t.PDDOrderID) != "" {
+		return site.URL("/order.html", url.Values{"order_sn": {t.PDDOrderID}}), "联系商家", "订单", nil
+	}
+	if strings.TrimSpace(t.GoodsID) == "" {
+		return "", "", "", errors.New("消息任务缺少拼多多订单号和 goods_id，无法进入商家聊天")
+	}
+	return pddproduct.ProductURLForSite(productURL, t.GoodsID, site), "客服", "商品", nil
 }
 
 const pddChatObserverScript = `(() => {
@@ -421,6 +474,9 @@ func (w *worker) syncLogisticsWithForce(force bool) error {
 	if !force && !settingBool(enabledRaw) {
 		return nil
 	}
+	if !force && !w.hasPendingLogisticsDemand() {
+		return nil
+	}
 	minutes := w.logisticsIntervalAt(time.Now())
 	if !force && minutes == 0 {
 		return nil
@@ -468,8 +524,56 @@ func (w *worker) syncLogisticsWithForce(force bool) error {
 	for _, shipment := range shipments {
 		log.Printf("待收货物流: order=%s goods=%s sku=%s company=%s tracking=%s", shipment.OrderID, shipment.GoodsID, shipment.SKUID, shipment.Company, shipment.TrackingNumber)
 	}
-	_, err = w.jsonRequest(http.MethodPost, "/api/fulfillment/logistics/snapshot", map[string]any{"shipments": shipments}, nil)
-	return err
+	var result struct {
+		ReadyOrderIDs []string `json:"ready_order_ids"`
+	}
+	if _, err = w.jsonRequest(http.MethodPost, "/api/fulfillment/logistics/snapshot", map[string]any{"shipments": shipments}, &result); err != nil {
+		return err
+	}
+	autoRaw, _ := w.store.Settings.Get(context.Background(), "shipping_auto_enabled")
+	if !settingBool(autoRaw) {
+		return nil
+	}
+	for _, orderID := range result.ReadyOrderIDs {
+		if err := w.autoShipOrder(orderID); err != nil {
+			log.Printf("自动闲鱼发货失败: order=%s err=%v", orderID, err)
+		}
+	}
+	return nil
+}
+
+func (w *worker) hasPendingLogisticsDemand() bool {
+	var count int
+	err := w.database.QueryRow(`SELECT COUNT(*) FROM order_fulfillments WHERE pdd_order_id<>'' AND pdd_shipped=0 AND xianyu_shipped=0 AND fulfillment_exempt=0`).Scan(&count)
+	return err == nil && count > 0
+}
+
+func (w *worker) autoShipOrder(orderID string) error {
+	var precheck struct {
+		Ready          bool     `json:"ready"`
+		Problems       []string `json:"problems"`
+		TrackingNumber string   `json:"tracking_number"`
+		AddressID      int64    `json:"address_id"`
+	}
+	if _, err := w.jsonRequest(http.MethodPost, "/api/fulfillment/orders/"+url.PathEscape(orderID)+"/shipping-precheck", nil, &precheck); err != nil {
+		return err
+	}
+	if !precheck.Ready {
+		return fmt.Errorf("发货预检查未通过: %s", strings.Join(precheck.Problems, "；"))
+	}
+	req, _ := http.NewRequest(http.MethodPost, w.baseURL+"/api/fulfillment/orders/"+url.PathEscape(orderID)+"/ship", nil)
+	req.Header.Set("Authorization", "Bearer "+w.apiKey)
+	req.Header.Set("Idempotency-Key", fmt.Sprintf("auto-ship-%s-%s-%d", orderID, precheck.TrackingNumber, precheck.AddressID))
+	response, err := w.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode/100 != 2 {
+		raw, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("HTTP %d: %s", response.StatusCode, raw)
+	}
+	return nil
 }
 
 func (w *worker) syncLogisticsForce() error {
@@ -500,12 +604,16 @@ func gotoUnpaidOrders(page playwright.Page, site pddsite.Site) error {
 	if _, err := page.Goto(site.URL("/personal.html", nil), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
 		return err
 	}
-	_, err := page.Goto(unpaidOrdersURL(site), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
+	_, err := page.Goto(ordersURL(site, "1"), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded})
 	return err
 }
 
 func unpaidOrdersURL(site pddsite.Site) string {
-	return site.URL("/orders.html", url.Values{"type": {"1"}, "comment_tab": {"1"}, "combine_orders": {"1"}, "main_orders": {"1"}, "refer_page_name": {"personal"}, "refer_page_sn": {"10001"}, "order_index": {"0"}})
+	return ordersURL(site, "1")
+}
+
+func ordersURL(site pddsite.Site, listType string) string {
+	return site.URL("/orders.html", url.Values{"type": {listType}, "comment_tab": {"1"}, "combine_orders": {"1"}, "main_orders": {"1"}, "refer_page_name": {"personal"}, "refer_page_sn": {"10001"}, "order_index": {"0"}})
 }
 
 func (w *worker) waitForAPI(ctx context.Context) error {
@@ -625,7 +733,7 @@ func (w *worker) loadGoodsSnapshot(t task, page playwright.Page, site pddsite.Si
 	err := w.database.QueryRow(`SELECT snapshot_json FROM pdd_purchase_goods_snapshots WHERE pdd_account_id=? AND goods_id=? AND cache_hit=0 AND blocking_errors_json='[]' AND captured_at>=? ORDER BY captured_at DESC LIMIT 1`, t.PDDAccountID, t.GoodsID, time.Now().Add(-time.Duration(hours)*time.Hour).Unix()).Scan(&cached)
 	if err == nil {
 		var snapshot pddproduct.Snapshot
-		if json.Unmarshal([]byte(cached), &snapshot) == nil && snapshot.GoodsID == t.GoodsID {
+		if json.Unmarshal([]byte(cached), &snapshot) == nil && snapshot.GoodsID == t.GoodsID && (len(snapshot.GroupOrderIDs) == 0 || len(snapshot.GroupOffers) > 0) {
 			return snapshot, "cache", true, nil
 		}
 	}
@@ -751,7 +859,11 @@ func (w *worker) runOne() error {
 		return w.abort(t, err.Error())
 	}
 
-	checkout := site.URL("/order_checkout.html", url.Values{"sku_id": {t.SKUID}, "goods_id": {t.GoodsID}})
+	checkout, checkoutMode, checkoutErr := purchaseCheckoutURL(site, snapshot, t.GoodsID, t.SKUID, t.Quantity, time.Now())
+	if checkoutErr != nil {
+		return w.abort(t, "生成拼多多结算链接失败: "+checkoutErr.Error())
+	}
+	log.Printf("采购结算上下文: task=%s mode=%s detail_id=%s group_id=%s", t.ID, checkoutMode, snapshot.DetailID, snapshot.GroupID)
 	if _, err = page.Goto(checkout, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
 		return w.abort(t, "打开结算页失败: "+err.Error())
 	}
@@ -810,6 +922,30 @@ func (w *worker) runOne() error {
 	return w.browserResult(t, order)
 }
 
+func purchaseCheckoutURL(site pddsite.Site, snapshot pddproduct.Snapshot, goodsID, skuID string, quantity int, now time.Time) (string, string, error) {
+	if strings.TrimSpace(goodsID) == "" || strings.TrimSpace(skuID) == "" || quantity < 1 {
+		return "", "", errors.New("商品、SKU或数量无效")
+	}
+	values := url.Values{"goods_id": {goodsID}, "sku_id": {skuID}, "goods_number": {strconv.Itoa(quantity)}}
+	if offer, ok, err := pddproduct.SelectActiveGroupOffer(snapshot, now); err != nil {
+		return "", "", err
+	} else if ok {
+		values.Set("group_id", offer.GroupID)
+		values.Set("detail_id", offer.DetailID)
+		values.Set("group_order_id", offer.GroupOrderID)
+		values.Set("is_history_group", "1")
+		values.Set("page_from", "0")
+		return site.URL("/order_checkout.html", values), "join_group", nil
+	}
+	if snapshot.GroupID != "" && snapshot.DetailID != "" {
+		values.Set("group_id", snapshot.GroupID)
+		values.Set("detail_id", snapshot.DetailID)
+		values.Set("page_from", "31")
+		return site.URL("/order_checkout.html", values), "create_group", nil
+	}
+	return site.URL("/order_checkout.html", values), "direct", nil
+}
+
 func (w *worker) findCreatedOrder(t task, page playwright.Page, site pddsite.Site, timeout time.Duration) (pddcheckout.Order, error) {
 	seen := map[string]bool{}
 	for _, id := range t.BeforeOrderSNs {
@@ -820,24 +956,33 @@ func (w *worker) findCreatedOrder(t task, page playwright.Page, site pddsite.Sit
 	lastObserved := []string{}
 	var lastHTML string
 	for {
-		if err := gotoUnpaidOrders(page, site); err == nil {
+		listTypes := []string{"1"}
+		if t.RecoveryOnly {
+			listTypes = append(listTypes, "0")
+		}
+		candidateByID := map[string]pddcheckout.Order{}
+		lastObserved = lastObserved[:0]
+		for _, listType := range listTypes {
+			if _, navErr := page.Goto(ordersURL(site, listType), playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); navErr != nil {
+				continue
+			}
 			time.Sleep(800 * time.Millisecond)
 			if html, contentErr := page.Content(); contentErr == nil {
 				lastHTML = html
-				if orders, parseErr := pddcheckout.ParseUnpaidHTML([]byte(html)); parseErr == nil {
-					lastObserved = lastObserved[:0]
-					candidates := []pddcheckout.Order{}
+				if orders, parseErr := pddcheckout.ParseOrdersHTML([]byte(html), listType); parseErr == nil {
 					for _, order := range orders {
 						lastObserved = append(lastObserved, fmt.Sprintf("%s(goods=%s sku=%s qty=%d time=%d)", order.OrderID, order.GoodsID, order.SKUID, order.Quantity, order.OrderTime))
 						if !seen[order.OrderID] && order.GoodsID == t.GoodsID && order.SKUID == t.SKUID && int(order.Quantity) == t.Quantity && (t.StartedAt == 0 || order.OrderTime >= t.StartedAt-5) {
-							candidates = append(candidates, order)
+							candidateByID[order.OrderID] = order
 						}
 					}
-					lastCount = len(candidates)
-					if len(candidates) == 1 {
-						return w.verifyCreatedOrder(t, page, site, candidates[0])
-					}
 				}
+			}
+		}
+		lastCount = len(candidateByID)
+		if len(candidateByID) == 1 {
+			for _, candidate := range candidateByID {
+				return w.verifyCreatedOrder(t, page, site, candidate)
 			}
 		}
 		if time.Now().After(deadline) {
@@ -971,6 +1116,7 @@ func (w *worker) claim() (task, error) {
 }
 
 func (w *worker) heartbeat(t task, status string) error {
+	w.reportState(status, "")
 	_, err := w.jsonRequest(http.MethodPost, "/api/fulfillment/purchase-tasks/"+t.ID+"/heartbeat", map[string]any{"lease_token": t.LeaseToken, "status": status, "lease_seconds": 180}, nil)
 	return err
 }

@@ -43,6 +43,7 @@ func (s *Server) ingestPDDLogistics(w http.ResponseWriter, r *http.Request) {
 	}
 	userID, now := auth.SessionFromContext(r.Context()).UserID, time.Now().Unix()
 	updated, unmatched := 0, []string{}
+	readyOrderIDs := []string{}
 	bound := map[string]string{}
 	for _, shipment := range in.Shipments {
 		shipment.OrderID, shipment.Company, shipment.TrackingNumber = strings.TrimSpace(shipment.OrderID), strings.TrimSpace(shipment.Company), strings.TrimSpace(shipment.TrackingNumber)
@@ -87,11 +88,17 @@ func (s *Server) ingestPDDLogistics(w http.ResponseWriter, r *http.Request) {
 		}
 		if rows > 0 {
 			updated += int(rows)
+			if code != "" {
+				var readyOrderID string
+				if s.Store.DB.QueryRowContext(r.Context(), `SELECT order_id FROM order_fulfillments WHERE user_id=? AND pdd_order_id=? AND pdd_shipped=1 AND xianyu_shipped=0 AND shipping_status='pending_xianyu_shipping'`, userID, shipment.OrderID).Scan(&readyOrderID) == nil {
+					readyOrderIDs = append(readyOrderIDs, readyOrderID)
+				}
+			}
 		} else {
 			unmatched = append(unmatched, shipment.OrderID)
 		}
 	}
-	writeJSON(w, 200, map[string]any{"success": true, "updated": updated, "recovered_bindings": bound, "unmatched_order_ids": unmatched})
+	writeJSON(w, 200, map[string]any{"success": true, "updated": updated, "recovered_bindings": bound, "unmatched_order_ids": unmatched, "ready_order_ids": readyOrderIDs})
 }
 
 func exactCarrierCode(name string) string { return officialHotCarriers[strings.TrimSpace(name)] }
@@ -367,12 +374,20 @@ func (s *Server) createShippingOperation(w http.ResponseWriter, r *http.Request)
 		s.markPhysicalShipmentSuccess(r.Context(), order, userID, finished)
 	} else {
 		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET shipping_status=?,shipping_last_error=?,shipping_attempts=shipping_attempts+1,updated_at=? WHERE order_id=? AND user_id=?`, status, errMessage, finished, orderID, userID)
+		if strings.HasPrefix(key, "auto-ship-") {
+			s.createFulfillmentException(r, userID, orderID, opID, "auto_shipping_"+status, "自动闲鱼发货失败："+errMessage, map[string]any{"operation_id": opID, "status": status, "ret": ret})
+		}
 	}
 	writeJSON(w, httpStatus, map[string]any{"operation_id": opID, "status": status, "success": status == "success", "ret": ret, "error": errMessage})
 }
 
 func (s *Server) markPhysicalShipmentSuccess(ctx context.Context, order *db.Order, userID, finished int64) {
-	_, _ = s.Store.DB.ExecContext(ctx, `UPDATE order_fulfillments SET xianyu_shipped=1,xianyu_shipped_at=CASE WHEN xianyu_shipped_at=0 THEN ? ELSE xianyu_shipped_at END,shipping_status='xianyu_shipped',shipping_last_error='',shipping_attempts=shipping_attempts+1,updated_at=? WHERE order_id=? AND user_id=?`, finished, finished, order.OrderID, userID)
+	phoneEnabled, _ := s.Store.Settings.Get(ctx, "pdd_phone_change_enabled")
+	if settingEnabled(phoneEnabled) {
+		_, _ = s.Store.DB.ExecContext(ctx, `UPDATE order_fulfillments SET xianyu_shipped=1,xianyu_shipped_at=CASE WHEN xianyu_shipped_at=0 THEN ? ELSE xianyu_shipped_at END,shipping_status='xianyu_shipped',shipping_last_error='',shipping_attempts=shipping_attempts+1,phone_restore_due_at=?,reminder_exempt=0,updated_at=? WHERE order_id=? AND user_id=?`, finished, finished+86400, finished, order.OrderID, userID)
+	} else {
+		_, _ = s.Store.DB.ExecContext(ctx, `UPDATE order_fulfillments SET xianyu_shipped=1,xianyu_shipped_at=CASE WHEN xianyu_shipped_at=0 THEN ? ELSE xianyu_shipped_at END,shipping_status='xianyu_shipped',shipping_last_error='',shipping_attempts=shipping_attempts+1,phone_restore_due_at=0,reminder_exempt=1,updated_at=? WHERE order_id=? AND user_id=?`, finished, finished, order.OrderID, userID)
+	}
 	shipped := true
 	if err := s.Store.Orders.Upsert(ctx, order.OrderID, db.OrderUpsertOpts{
 		CookieID: order.CookieID, OrderStatus: "shipped", SystemShipped: &shipped,

@@ -451,6 +451,8 @@ export interface PDDPurchaseTask {
   created_at:number; updated_at:number;
 }
 export const getPDDPurchaseTasks = ():Promise<PDDPurchaseTask[]> => get('/api/fulfillment/purchase-tasks');
+export interface PDDWorkerStatus { online:boolean; state:string; last_seen_at:number; last_error:string; active_tasks:number; logistics_demand:number; open_exceptions:number; }
+export const getPDDWorkerStatus = ():Promise<PDDWorkerStatus> => get('/api/fulfillment/worker-status');
 export const confirmPDDPurchasePayment = (taskId:string,pddOrderId:string):Promise<ApiResponse> => post(`/api/fulfillment/purchase-tasks/${encodeURIComponent(taskId)}/confirm-payment`,{pdd_order_id:pddOrderId});
 export const confirmUnknownPurchaseCancelled = (taskId:string):Promise<ApiResponse> => post(`/api/fulfillment/purchase-tasks/${encodeURIComponent(taskId)}/confirm-cancelled`,{});
 export interface FulfillmentException { id:string; order_id:string; task_id:string; event_type:string; summary:string; status:string; notification_status:string; created_at:number; resolved_at:number; read_at:number; }

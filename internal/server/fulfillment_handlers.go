@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -32,6 +33,7 @@ type fulfillmentPatch struct {
 func (s *Server) mountFulfillment(r chi.Router) {
 	s.mountPDDMessages(r)
 	r.Get("/api/fulfillment/orders", s.listFulfillments)
+	r.Get("/api/fulfillment/worker-status", s.fulfillmentWorkerStatus)
 	r.Post("/api/fulfillment/reconcile", s.reconcileFulfillments)
 	r.Get("/api/fulfillment/history-repair/preview", s.previewFulfillmentHistoryRepair)
 	r.Post("/api/fulfillment/history-repair", s.repairFulfillmentHistory)
@@ -59,6 +61,19 @@ func (s *Server) mountFulfillment(r chi.Router) {
 	r.Get("/api/fulfillment/shipping-accounts", s.listShippingAccounts)
 	r.Put("/api/fulfillment/shipping-accounts/{cookie_id}", s.saveShippingAccount)
 	r.Post("/api/fulfillment/shipping-accounts/{cookie_id}/sync", s.syncShippingAddresses)
+}
+
+func (s *Server) fulfillmentWorkerStatus(w http.ResponseWriter, r *http.Request) {
+	lastSeenRaw, _ := s.Store.Settings.Get(r.Context(), "pdd_worker_last_seen_at")
+	state, _ := s.Store.Settings.Get(r.Context(), "pdd_worker_state")
+	lastError, _ := s.Store.Settings.Get(r.Context(), "pdd_worker_last_error")
+	lastSeen, _ := strconv.ParseInt(strings.TrimSpace(lastSeenRaw), 10, 64)
+	now := time.Now().Unix()
+	var activeTasks, logisticsDemand, openExceptions int
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM pdd_purchase_tasks WHERE status NOT IN ('completed','failed','aborted','paid_confirmed')`).Scan(&activeTasks)
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM order_fulfillments WHERE pdd_order_id<>'' AND pdd_shipped=0 AND xianyu_shipped=0 AND fulfillment_exempt=0`).Scan(&logisticsDemand)
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM fulfillment_exception_events WHERE status='open'`).Scan(&openExceptions)
+	writeJSON(w, 200, map[string]any{"online": lastSeen > 0 && now-lastSeen <= 300, "state": state, "last_seen_at": lastSeen, "last_error": lastError, "active_tasks": activeTasks, "logistics_demand": logisticsDemand, "open_exceptions": openExceptions})
 }
 
 func (s *Server) ensureFulfillment(r *http.Request, order db.Order, userID int64) error {
@@ -203,7 +218,8 @@ func (s *Server) listFulfillments(w http.ResponseWriter, r *http.Request) {
 			args = append(args, value)
 			if value == 0 {
 				if field == "reminded" {
-					query += " AND f.reminder_exempt=0"
+					query += " AND f.reminder_exempt=0 AND (f.phone_restore_due_at=0 OR f.phone_restore_due_at<=?)"
+					args = append(args, time.Now().Unix())
 				} else {
 					query += " AND f.fulfillment_exempt=0"
 				}
@@ -432,7 +448,7 @@ func (s *Server) previewFulfillmentAddress(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	match, addressErr := pddaddress.Resolve(order.ReceiverCity, order.ReceiverAddr)
-	temporaryPhone, phoneErr := pddaddress.TemporaryPhone(order.ReceiverPhone)
+	mobile, temporaryPhone, phoneErr := s.fulfillmentPhone(r.Context(), order.ReceiverPhone)
 	if err := errors.Join(addressErr, phoneErr); err != nil {
 		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET address_match_status='failed',last_error=?,updated_at=? WHERE order_id=? AND user_id=?`, err.Error(), time.Now().Unix(), orderID, userID)
 		writeErr(w, 422, err.Error())
@@ -444,7 +460,19 @@ func (s *Server) previewFulfillmentAddress(w http.ResponseWriter, r *http.Reques
 		writeErr(w, 500, "保存地址预览失败")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"success": true, "name": order.ReceiverName, "original_phone": order.ReceiverPhone, "temporary_phone": temporaryPhone, "province_id": strconv.FormatInt(match.ProvinceID, 10), "province_name": match.ProvinceName, "city_id": strconv.FormatInt(match.CityID, 10), "city_name": match.CityName, "district_id": strconv.FormatInt(match.DistrictID, 10), "district_name": match.DistrictName, "address": match.Address, "check_region": true})
+	writeJSON(w, 200, map[string]any{"success": true, "name": order.ReceiverName, "original_phone": order.ReceiverPhone, "submit_phone": mobile, "temporary_phone": temporaryPhone, "phone_change_enabled": temporaryPhone != "", "province_id": strconv.FormatInt(match.ProvinceID, 10), "province_name": match.ProvinceName, "city_id": strconv.FormatInt(match.CityID, 10), "city_name": match.CityName, "district_id": strconv.FormatInt(match.DistrictID, 10), "district_name": match.DistrictName, "address": match.Address, "check_region": true})
+}
+
+func (s *Server) fulfillmentPhone(ctx context.Context, original string) (mobile, temporary string, err error) {
+	generated, err := pddaddress.TemporaryPhone(original)
+	if err != nil {
+		return "", "", err
+	}
+	enabled, _ := s.Store.Settings.Get(ctx, "pdd_phone_change_enabled")
+	if settingEnabled(enabled) {
+		return generated, generated, nil
+	}
+	return strings.TrimSpace(original), "", nil
 }
 
 type pddAddressOperation struct {
@@ -491,7 +519,7 @@ func (s *Server) applyPDDAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	match, addressErr := pddaddress.Resolve(order.ReceiverCity, order.ReceiverAddr)
-	temporaryPhone, phoneErr := pddaddress.TemporaryPhone(order.ReceiverPhone)
+	mobile, temporaryPhone, phoneErr := s.fulfillmentPhone(r.Context(), order.ReceiverPhone)
 	if err := errors.Join(addressErr, phoneErr); err != nil {
 		writeErr(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -505,7 +533,7 @@ func (s *Server) applyPDDAddress(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	target, _ := json.Marshal(map[string]any{"name": order.ReceiverName, "mobile": temporaryPhone, "province_id": match.ProvinceID, "city_id": match.CityID, "district_id": match.DistrictID, "address": match.Address})
+	target, _ := json.Marshal(map[string]any{"name": order.ReceiverName, "mobile": mobile, "province_id": match.ProvinceID, "city_id": match.CityID, "district_id": match.DistrictID, "address": match.Address})
 	now, operationID := time.Now().Unix(), uuid.NewString()
 	if err := s.claimPDDAddressLock(r, userID, accountID, orderID, operationID, now); err != nil {
 		writeErr(w, http.StatusConflict, err.Error())
@@ -526,7 +554,7 @@ func (s *Server) applyPDDAddress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET province_id=?,city_id=?,district_id=?,temporary_phone=?,pdd_account_id=?,address_match_status='applying',last_error='',updated_at=? WHERE order_id=? AND user_id=?`, match.ProvinceID, match.CityID, match.DistrictID, temporaryPhone, accountID, now, orderID, userID)
-	result, callErr := updater.Update(r.Context(), pddaddress.UpdateRequest{Name: order.ReceiverName, Mobile: temporaryPhone, Match: match})
+	result, callErr := updater.Update(r.Context(), pddaddress.UpdateRequest{Name: order.ReceiverName, Mobile: mobile, Match: match})
 	finalStatus, errorMessage := result.Status, ""
 	if callErr != nil {
 		finalStatus, errorMessage = "failed", callErr.Error()

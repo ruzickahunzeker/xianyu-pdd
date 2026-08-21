@@ -6,7 +6,7 @@ import {
 import {
   FulfillmentOrder, FulfillmentOrderFilters, FulfillmentOrderPatch,
   FulfillmentHistoryRepairPreview, getFulfillmentOrders, getOrderSyncStatus, OrderSyncStatus,
-  PDDPurchaseTask, FulfillmentException, clearFulfillmentExceptions, confirmPDDPurchasePayment, confirmUnknownPurchaseCancelled, getFulfillmentExceptions, getPDDPurchaseTasks, readFulfillmentExceptions, requestFulfillmentPurchase, resolveFulfillmentException,
+  PDDPurchaseTask, PDDWorkerStatus, FulfillmentException, clearFulfillmentExceptions, confirmPDDPurchasePayment, confirmUnknownPurchaseCancelled, getFulfillmentExceptions, getPDDPurchaseTasks, getPDDWorkerStatus, readFulfillmentExceptions, requestFulfillmentPurchase, resolveFulfillmentException,
   previewFulfillmentHistoryRepair, repairFulfillmentHistory, updateFulfillmentOrder,
   getPDDAccount,
 } from '../services/api';
@@ -50,6 +50,7 @@ const FulfillmentWorkbench: React.FC = () => {
   const [repairPreview, setRepairPreview] = useState<FulfillmentHistoryRepairPreview | null>(null);
   const [repairing, setRepairing] = useState(false);
   const [purchaseTasks, setPurchaseTasks] = useState<PDDPurchaseTask[]>([]);
+  const [workerStatus, setWorkerStatus] = useState<PDDWorkerStatus | null>(null);
   const [exceptions, setExceptions] = useState<FulfillmentException[]>([]);
   const [taskBusy, setTaskBusy] = useState('');
   const [tasksOpen, setTasksOpen] = useState(() => localStorage.getItem('fulfillment.tasks.open') === 'true');
@@ -62,18 +63,20 @@ const FulfillmentWorkbench: React.FC = () => {
     setError('');
     try {
       const selected = presets.find(item => item.id === preset)?.filters || {};
-      const [nextOrders, nextStatus, nextTasks, nextExceptions, pddAccount] = await Promise.all([
+      const [nextOrders, nextStatus, nextTasks, nextExceptions, pddAccount, nextWorkerStatus] = await Promise.all([
         getFulfillmentOrders({ ...selected, mapping_status: mappingStatus || undefined }),
         getOrderSyncStatus(),
         getPDDPurchaseTasks(),
         getFulfillmentExceptions(),
         getPDDAccount(),
+        getPDDWorkerStatus(),
       ]);
       setOrders(nextOrders);
       setSyncStatus(nextStatus);
       setPurchaseTasks(nextTasks);
       setExceptions(nextExceptions);
       setPDDBaseURL(pddAccount.base_url || 'https://mobile.pinduoduo.com');
+      setWorkerStatus(nextWorkerStatus);
     } catch (err) {
       setError((err as Error).message || '读取履约订单失败');
     } finally {
@@ -211,6 +214,7 @@ const FulfillmentWorkbench: React.FC = () => {
             <h2 className="text-3xl font-extrabold text-gray-900">订单履约工作台</h2>
             <p className="text-sm font-medium text-gray-500 mt-1">闲鱼订单、拼多多下单、物流和提醒状态统一管理</p>
             <p className="text-xs text-gray-400 mt-1">自动同步：{syncStatus?.enabled ? `每 ${syncStatus.interval_minutes} 分钟` : '未启用'} · 上次完成 {formatTime(syncStatus?.last_run?.finished_at || 0)}</p>
+            <p className={`mt-1 text-xs font-bold ${workerStatus?.online ? 'text-green-600' : 'text-amber-600'}`}>PDD Worker：{workerStatus?.online ? `${workerStatus.state || '运行中'} · ${formatTime(workerStatus.last_seen_at)}` : '离线'} · 活跃任务 {workerStatus?.active_tasks || 0} · 待同步物流 {workerStatus?.logistics_demand || 0}</p>
           </div>
         </div>
         <div className="flex flex-wrap gap-2"><button type="button" onClick={openRepairPreview} disabled={repairing} className="px-4 py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold flex items-center justify-center gap-2 disabled:opacity-50"><ShieldCheck className="w-4 h-4" />修复历史订单</button><button type="button" onClick={loadOrders} disabled={loading} className="px-4 py-2.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold flex items-center justify-center gap-2 disabled:opacity-50"><RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />同步并刷新</button></div>

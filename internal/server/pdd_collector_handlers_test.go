@@ -26,6 +26,31 @@ func TestPDDCollectorRejectsMissingToken(t *testing.T) {
 	}
 }
 
+func TestSetPDDNavigationHeadersDoesNotBindBrowserVersion(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "https://mobile.pinduoduo.com/goods.html?goods_id=123", nil)
+	account := &db.PDDAccount{
+		Cookie:    "api_uid=test; pdd_vds=fresh",
+		UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+	}
+	setPDDNavigationHeaders(req, account)
+
+	want := map[string]string{
+		"Cookie":        account.Cookie,
+		"User-Agent":    account.UserAgent,
+		"Cache-Control": "no-cache",
+	}
+	for name, value := range want {
+		if got := req.Header.Get(name); got != value {
+			t.Errorf("%s=%q, want %q", name, got, value)
+		}
+	}
+	for _, name := range []string{"Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform"} {
+		if got := req.Header.Get(name); got != "" {
+			t.Fatalf("%s=%q, browser version hints must not be synthesized", name, got)
+		}
+	}
+}
+
 func TestPDDPriceCentPrefersGroupPrice(t *testing.T) {
 	prices := map[string]any{
 		"group_price":     "26.9",

@@ -64,6 +64,12 @@ type rawOrder struct {
 // ParseUnpaidHTML reads the server-rendered snake_case order snapshot. It does
 // not depend on generated CSS classes or visual card ordering.
 func ParseUnpaidHTML(html []byte) ([]Order, error) {
+	return ParseOrdersHTML(html, "1")
+}
+
+// ParseOrdersHTML parses one list from PDD's server-rendered order snapshot.
+// listType "1" is unpaid and "0" is the all-orders list.
+func ParseOrdersHTML(html []byte, listType string) ([]Order, error) {
 	marker := `"initOdersList":`
 	start := strings.Index(string(html), marker)
 	if start < 0 {
@@ -81,7 +87,7 @@ func ParseUnpaidHTML(html []byte) ([]Order, error) {
 	if err := json.Unmarshal(value, &lists); err != nil {
 		return nil, fmt.Errorf("解析待付款订单数据失败: %w", err)
 	}
-	raw := lists["1"]
+	raw := lists[listType]
 	result := make([]Order, 0, len(raw))
 	for _, row := range raw {
 		orderSN := firstString(row.OrderSN, row.OrderSNCamel)

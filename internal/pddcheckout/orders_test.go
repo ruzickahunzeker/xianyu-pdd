@@ -31,3 +31,11 @@ func TestParseUnpaidHTMLCamelCase(t *testing.T) {
 		t.Fatalf("unexpected: %+v", got)
 	}
 }
+
+func TestParseOrdersHTMLAllOrders(t *testing.T) {
+	html := []byte(`<script>window.rawData={"initOdersList":{"0":[{"order_sn":"paid-1","order_amount":399,"order_time":12,"pay_status":2,"order_goods":[{"goods_id":"936","sku_id":"188","goods_number":2}]}],"1":[]}};</script>`)
+	orders, err := ParseOrdersHTML(html, "0")
+	if err != nil || len(orders) != 1 || orders[0].OrderID != "paid-1" || orders[0].PayStatus != 2 {
+		t.Fatalf("orders=%+v err=%v", orders, err)
+	}
+}

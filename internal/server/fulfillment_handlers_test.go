@@ -32,6 +32,9 @@ func TestApplyPDDAddressIsIdempotentAndStatusGuarded(t *testing.T) {
 	}
 	updater := &fakePDDAddressUpdater{result: pddaddress.UpdateResult{Status: "applied", HTTPStatus: 200, ResponseBody: `{"success":true}`}}
 	server.PDDAddressUpdater = updater
+	if err := store.Settings.Set(t.Context(), "pdd_phone_change_enabled", "true"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.DB.Exec(`INSERT INTO orders(order_id,item_id,cookie_id,order_status,receiver_name,receiver_phone,receiver_address,receiver_city) VALUES('address-order','item-a','acc1','pending_ship','张三','13216514040','北京市海淀区中关村大街1号','北京市')`); err != nil {
 		t.Fatal(err)
 	}
@@ -65,6 +68,22 @@ func TestApplyPDDAddressIsIdempotentAndStatusGuarded(t *testing.T) {
 	}
 	if response := request("order-address-2"); response.Code != http.StatusConflict || updater.calls != 1 {
 		t.Fatalf("status guard: %d calls=%d", response.Code, updater.calls)
+	}
+}
+
+func TestFulfillmentPhoneUsesOriginalUnlessSwitchEnabled(t *testing.T) {
+	server, store, cleanup := newTestServer(t)
+	defer cleanup()
+	mobile, temporary, err := server.fulfillmentPhone(t.Context(), "13216514040")
+	if err != nil || mobile != "13216514040" || temporary != "" {
+		t.Fatalf("default mobile=%q temporary=%q err=%v", mobile, temporary, err)
+	}
+	if err := store.Settings.Set(t.Context(), "pdd_phone_change_enabled", "true"); err != nil {
+		t.Fatal(err)
+	}
+	mobile, temporary, err = server.fulfillmentPhone(t.Context(), "13216514040")
+	if err != nil || mobile != "13217514040" || temporary != mobile {
+		t.Fatalf("enabled mobile=%q temporary=%q err=%v", mobile, temporary, err)
 	}
 }
 

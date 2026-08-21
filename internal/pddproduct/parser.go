@@ -7,18 +7,53 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Snapshot is the purchase-time view of a Pinduoduo goods page. RawData is
 // deliberately omitted: callers persist the normalized snapshot, not cookies
 // or arbitrary executable page content.
 type Snapshot struct {
-	GoodsID       string   `json:"goods_id"`
-	Title         string   `json:"title"`
-	DetailID      string   `json:"detail_id,omitempty"`
-	ActivityID    string   `json:"activity_id,omitempty"`
-	GroupOrderIDs []string `json:"group_order_ids,omitempty"`
-	SKUs          []SKU    `json:"skus"`
+	GoodsID       string       `json:"goods_id"`
+	Title         string       `json:"title"`
+	DetailID      string       `json:"detail_id,omitempty"`
+	GroupID       string       `json:"group_id,omitempty"`
+	ActivityID    string       `json:"activity_id,omitempty"`
+	GroupOrderIDs []string     `json:"group_order_ids,omitempty"`
+	GroupOffers   []GroupOffer `json:"group_offers,omitempty"`
+	SKUs          []SKU        `json:"skus"`
+}
+
+type GroupOffer struct {
+	GroupOrderID string `json:"group_order_id"`
+	GroupID      string `json:"group_id,omitempty"`
+	DetailID     string `json:"detail_id,omitempty"`
+	ExpireAt     int64  `json:"expire_at,omitempty"`
+}
+
+// SelectActiveGroupOffer returns the first usable, non-expired group offer.
+// PDD pages have used both second and millisecond Unix timestamps.
+func SelectActiveGroupOffer(snapshot Snapshot, now time.Time) (GroupOffer, bool, error) {
+	for _, offer := range snapshot.GroupOffers {
+		if strings.TrimSpace(offer.GroupOrderID) == "" || groupOfferExpired(offer.ExpireAt, now) {
+			continue
+		}
+		if strings.TrimSpace(offer.GroupID) == "" || strings.TrimSpace(offer.DetailID) == "" {
+			return GroupOffer{}, false, errors.New("商品存在有效拼单但缺少 group_id 或 detail_id")
+		}
+		return offer, true, nil
+	}
+	return GroupOffer{}, false, nil
+}
+
+func groupOfferExpired(expireAt int64, now time.Time) bool {
+	if expireAt <= 0 {
+		return false
+	}
+	if expireAt > 1_000_000_000_000 {
+		return expireAt <= now.UnixMilli()
+	}
+	return expireAt <= now.Unix()
 }
 
 type SKU struct {
@@ -52,21 +87,25 @@ func ParseHTML(html []byte) (Snapshot, error) {
 	if err := dec.Decode(&root); err != nil {
 		return Snapshot{}, fmt.Errorf("解析商品页 rawData: %w", err)
 	}
-	out := Snapshot{SKUs: []SKU{}}
+	out := Snapshot{SKUs: []SKU{}, GroupOffers: []GroupOffer{}}
 	skuIndex, seenGroup := map[string]int{}, map[string]bool{}
 	walk(root, func(m map[string]any) {
 		if out.Title == "" {
 			out.Title = text(m["goodsName"])
 		}
 		if out.DetailID == "" {
-			out.DetailID = text(m["detail_id"])
+			out.DetailID = firstText(m, "detail_id", "detailId")
+		}
+		if out.GroupID == "" {
+			out.GroupID = firstText(m, "group_id", "groupId")
 		}
 		if out.ActivityID == "" {
 			out.ActivityID = text(m["activityId"])
 		}
-		if id := text(m["group_order_id"]); id != "" && !seenGroup[id] {
+		if id := firstText(m, "group_order_id", "groupOrderId"); id != "" && !seenGroup[id] {
 			seenGroup[id] = true
 			out.GroupOrderIDs = append(out.GroupOrderIDs, id)
+			out.GroupOffers = append(out.GroupOffers, GroupOffer{GroupOrderID: id, GroupID: firstText(m, "group_id", "groupId"), DetailID: firstText(m, "detail_id", "detailId"), ExpireAt: firstInteger(m, "expire_time", "expireTime", "end_time", "endTime")})
 		}
 		skuID, goodsID := text(m["skuId"]), text(m["goodsId"])
 		if skuID == "" || goodsID == "" {
@@ -119,10 +158,36 @@ func ParseHTML(html []byte) (Snapshot, error) {
 			out.GoodsID = goodsID
 		}
 	})
+	for i := range out.GroupOffers {
+		if out.GroupOffers[i].GroupID == "" {
+			out.GroupOffers[i].GroupID = out.GroupID
+		}
+		if out.GroupOffers[i].DetailID == "" {
+			out.GroupOffers[i].DetailID = out.DetailID
+		}
+	}
 	if out.GoodsID == "" || len(out.SKUs) == 0 {
 		return Snapshot{}, errors.New("商品页未解析到 goods_id 或 SKU")
 	}
 	return out, nil
+}
+
+func firstText(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := text(m[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func firstInteger(m map[string]any, keys ...string) int64 {
+	for _, key := range keys {
+		if value := integer(m[key]); value != 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 func normalizeSpecs(v any) []Spec {

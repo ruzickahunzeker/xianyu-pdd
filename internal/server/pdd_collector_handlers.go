@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -279,19 +280,23 @@ func pddInputStockExact(sku pddSKUInput) bool {
 	return sku.Stock < 1000
 }
 
+func setPDDNavigationHeaders(req *http.Request, account *db.PDDAccount) {
+	userAgent := strings.TrimSpace(account.UserAgent)
+	req.Header.Set("Cookie", account.Cookie)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,zh-TW;q=0.8,en;q=0.7")
+	req.Header.Set("Cache-Control", "no-cache")
+	if userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+}
+
 func fetchPDDProduct(ctx context.Context, account *db.PDDAccount, goodsID, pageURL string) (pddproduct.Snapshot, error) {
 	if account == nil || !account.Enabled || strings.TrimSpace(account.Cookie) == "" {
 		return pddproduct.Snapshot{}, errors.New("默认拼多多账号未启用或 Cookie 为空")
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, pddProductURL(pageURL, goodsID), nil)
-	req.Header.Set("Cookie", account.Cookie)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
-	pageSite := pddsite.Detect(pageURL)
-	req.Header.Set("Referer", pageSite.BaseURL()+"/")
-	if account.UserAgent != "" {
-		req.Header.Set("User-Agent", account.UserAgent)
-	}
+	setPDDNavigationHeaders(req, account)
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -307,7 +312,10 @@ func fetchPDDProduct(ctx context.Context, account *db.PDDAccount, goodsID, pageU
 	}
 	snapshot, err := pddproduct.ParseHTML(body)
 	if err != nil {
-		return pddproduct.Snapshot{}, err
+		if bytes.Contains(body, []byte(`"enableSkuMask":true`)) || bytes.Contains(body, []byte("living-validation")) {
+			return pddproduct.Snapshot{}, errors.New("拼多多商品页处于风控降级状态；请保留采集时的完整原始链接（尤其 _oak_rcto），并确认账号 Cookie 仍有效")
+		}
+		return pddproduct.Snapshot{}, fmt.Errorf("商品页未解析到 goods_id 或 SKU（响应 %d 字节，skuId=%d，goodsId=%d，APP降级=%t）: %w", len(body), bytes.Count(body, []byte(`"skuId"`)), bytes.Count(body, []byte(`"goodsId"`)), bytes.Contains(body, []byte("前往APP查看")), err)
 	}
 	if snapshot.GoodsID != goodsID {
 		return pddproduct.Snapshot{}, errors.New("拼多多返回的 goods_id 与目标商品不一致")
@@ -347,11 +355,11 @@ func (s *Server) pddRefreshProduct(w http.ResponseWriter, r *http.Request) {
 		snapshot, err = fetch(r.Context(), account, goodsID)
 	}
 	if err != nil {
-		writeErr(w, 422, err.Error()+"；可打开商品页后使用采集扩展更新")
+		writeErr(w, 422, err.Error()+"；Curl 未取得完整商品数据，已保留原商品与 SKU")
 		return
 	}
 	if err = validatePDDProductSnapshot(snapshot); err != nil {
-		writeErr(w, 422, err.Error()+"；请用浏览器完整打开商品后使用采集扩展更新")
+		writeErr(w, 422, err.Error()+"；Curl 未取得完整商品数据，已保留原商品与 SKU")
 		return
 	}
 	s.collectorMu.Lock()

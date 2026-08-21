@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 
 	"xianyu-go/internal/auth"
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/notify"
 	"xianyu-go/internal/pddaddress"
 	"xianyu-go/internal/pddcheckout"
 	"xianyu-go/internal/pddproduct"
@@ -84,6 +86,11 @@ func canSavePurchaseBaseline(status string) bool {
 		return false
 	}
 }
+
+func (s *Server) recoverExpiredPurchaseLeases(ctx context.Context, userID, now int64) error {
+	_, err := s.Store.DB.ExecContext(ctx, `UPDATE pdd_purchase_tasks SET status='result_unknown',last_error=CASE WHEN status='submitting_unpaid_order' THEN '提交阶段租约过期，等待核对拼多多订单' ELSE '订单核对租约过期，等待再次核对' END,worker_id='',lease_token='',lease_expires_at=0,updated_at=? WHERE user_id=? AND status IN ('submitting_unpaid_order','reconciling_result') AND lease_expires_at>0 AND lease_expires_at<=? AND COALESCE(pdd_order_id,'')=''`, now, userID, now)
+	return err
+}
 func amountCent(raw string) int64 {
 	f, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 	if err != nil || f < 0 {
@@ -112,6 +119,9 @@ func (s *Server) claimPurchaseTask(w http.ResponseWriter, r *http.Request) {
 	s.purchaseMu.Lock()
 	defer s.purchaseMu.Unlock()
 	now := time.Now().Unix()
+	// Submission may already have created an order. Expired submit/reconcile
+	// leases must therefore re-enter reconciliation instead of fresh purchase.
+	_ = s.recoverExpiredPurchaseLeases(r.Context(), userID, now)
 	// Only pre-submit leases may expire automatically. Preserve the failed attempt
 	// and create a new attempt on the next claim; never reclaim a submitting task.
 	_, _ = s.Store.DB.ExecContext(r.Context(), `DELETE FROM pdd_account_locks WHERE operation_id IN (SELECT id FROM pdd_purchase_tasks WHERE user_id=? AND status IN ('claimed','loading_goods','validating_goods','goods_validated','validating','browser_preparing') AND lease_expires_at>0 AND lease_expires_at<=?)`, userID, now)
@@ -274,6 +284,9 @@ func (s *Server) validatePurchaseGoods(w http.ResponseWriter, r *http.Request) {
 	blocking, warnings := []string{}, []string{}
 	if in.Snapshot.GoodsID != v.ExpectedGoodsID {
 		blocking = append(blocking, "商品 goods_id 与映射不匹配")
+	}
+	if _, _, groupErr := pddproduct.SelectActiveGroupOffer(in.Snapshot, time.Now()); groupErr != nil {
+		blocking = append(blocking, groupErr.Error())
 	}
 	var selected *pddproduct.SKU
 	for i := range in.Snapshot.SKUs {
@@ -606,7 +619,30 @@ func (s *Server) confirmPurchasePayment(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) createFulfillmentException(r *http.Request, userID int64, orderID, taskID, eventType, summary string, detail any) {
 	raw, _ := json.Marshal(detail)
-	_, _ = s.Store.DB.ExecContext(r.Context(), `INSERT INTO fulfillment_exception_events(id,user_id,order_id,task_id,event_type,summary,detail_json,status,notification_status,created_at) VALUES(?,?,?,?,?,?,?,'open','pending',?)`, uuid.NewString(), userID, orderID, taskID, eventType, summary, string(raw), time.Now().Unix())
+	var existing string
+	if s.Store.DB.QueryRowContext(r.Context(), `SELECT id FROM fulfillment_exception_events WHERE user_id=? AND order_id=? AND task_id=? AND event_type=? AND summary=? AND status='open' LIMIT 1`, userID, orderID, taskID, eventType, summary).Scan(&existing) == nil {
+		return
+	}
+	id, now := uuid.NewString(), time.Now().Unix()
+	result, err := s.Store.DB.ExecContext(r.Context(), `INSERT INTO fulfillment_exception_events(id,user_id,order_id,task_id,event_type,summary,detail_json,status,notification_status,created_at) VALUES(?,?,?,?,?,?,?,'open','pending',?)`, id, userID, orderID, taskID, eventType, summary, string(raw), now)
+	if err != nil {
+		return
+	}
+	if inserted, _ := result.RowsAffected(); inserted != 1 {
+		return
+	}
+	if s.notifier == nil {
+		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE fulfillment_exception_events SET notification_status='not_configured' WHERE id=?`, id)
+		return
+	}
+	var cookieID string
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT cookie_id FROM orders WHERE order_id=?`, orderID).Scan(&cookieID)
+	if cookieID == "" {
+		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE fulfillment_exception_events SET notification_status='no_account' WHERE id=?`, id)
+		return
+	}
+	s.notifier.NotifyEvent(r.Context(), notify.NotificationEvent{AccountID: cookieID, Type: notify.EventSystemError, Level: "error", Title: "订单履约异常", Body: summary, Fields: map[string]string{"order_id": orderID, "task_id": taskID, "event_type": eventType}, Time: time.Unix(now, 0)})
+	_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE fulfillment_exception_events SET notification_status='queued' WHERE id=?`, id)
 }
 
 func (s *Server) listFulfillmentExceptions(w http.ResponseWriter, r *http.Request) {
