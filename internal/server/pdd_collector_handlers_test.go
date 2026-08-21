@@ -26,6 +26,30 @@ func TestPDDCollectorRejectsMissingToken(t *testing.T) {
 	}
 }
 
+func TestPDDCollectorDeviceStatusVerifiesTokenAndReturnsDevice(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	token := "pddc_status_test_token"
+	if _, err := store.DB.Exec(`INSERT INTO pdd_collector_devices(id,name,token_hash,enabled,last_seen_at,last_collected_at,created_at) VALUES('status-device','局域网采集器',?,1,0,0,1)`, tokenDigest(token)); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/pdd-collector/device", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"device_name":"局域网采集器"`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	badReq := httptest.NewRequest(http.MethodGet, "/api/pdd-collector/device", nil)
+	badReq.Header.Set("Authorization", "Bearer pddc_wrong_token")
+	badRec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid token status=%d body=%s", badRec.Code, badRec.Body.String())
+	}
+}
+
 func TestSetPDDNavigationHeadersDoesNotBindBrowserVersion(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://mobile.pinduoduo.com/goods.html?goods_id=123", nil)
 	account := &db.PDDAccount{

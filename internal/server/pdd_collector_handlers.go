@@ -97,7 +97,9 @@ type pddReviewMediaInput struct {
 
 func (s *Server) mountPDDCollectorPublic(r interface {
 	Post(string, http.HandlerFunc)
+	Get(string, http.HandlerFunc)
 }) {
+	r.Get("/api/pdd-collector/device", s.pddCollectorDeviceStatus)
 	r.Post("/api/pdd-collector/products", s.pddCollectorUpload)
 	r.Post("/api/pdd-collector/review-media", s.pddReviewMediaUpload)
 }
@@ -643,6 +645,20 @@ func (s *Server) authenticateCollector(r *http.Request) (string, error) {
 		return "", errors.New("invalid token")
 	}
 	return id, nil
+}
+
+func (s *Server) pddCollectorDeviceStatus(w http.ResponseWriter, r *http.Request) {
+	id, err := s.authenticateCollector(r)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "设备 Token 无效或已停用")
+		return
+	}
+	var name string
+	if err = s.Store.DB.QueryRowContext(r.Context(), `SELECT name FROM pdd_collector_devices WHERE id=? AND enabled=1`, id).Scan(&name); err != nil {
+		writeErr(w, http.StatusUnauthorized, "设备 Token 无效或已停用")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "device_id": id, "device_name": name})
 }
 
 func validatePDDCollection(in *pddCollectionInput) error {

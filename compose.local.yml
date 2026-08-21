@@ -13,7 +13,7 @@ services:
       XIANYU_ITEM_SYNC_CAPTURE_DIR: /app/data/sync-captures
       XIANYU_ITEM_SYNC_CAPTURE_ITEM_ID: "1073844478604"
     ports:
-      - "127.0.0.1:59188:59188"
+      - "${XIANYU_BIND_ADDRESS:-127.0.0.1}:${XIANYU_HTTP_PORT:-59188}:59188"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:59188/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 2s
