@@ -17,7 +17,7 @@ func TestSQLiteBackupCreatesVerifiedSnapshotAndMappingExport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	if _, err := database.Exec(`INSERT INTO users (username,password_hash,is_admin,created_at) VALUES ('backup-user','hash',1,CURRENT_TIMESTAMP)`); err != nil {
+	if _, err := database.Exec(`INSERT INTO users (username,email,password_hash,is_admin,created_at) VALUES ('backup-user','backup-user@example.com','hash',1,CURRENT_TIMESTAMP)`); err != nil {
 		t.Fatal(err)
 	}
 	var userID int64
