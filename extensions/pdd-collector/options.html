@@ -11,6 +11,12 @@
     <h1>拼多多采集器设置</h1>
     <p>Token 只保存在当前浏览器扩展的本地存储中，不会注入拼多多页面。</p>
     <form id="settings-form">
+      <label>当前服务环境<select id="profile-select"></select></label>
+      <div class="actions compact-actions">
+        <button id="new-profile" type="button">新增环境</button>
+        <button id="delete-profile" type="button">删除当前环境</button>
+      </div>
+      <label>环境名称<input id="profile-name" type="text" maxlength="50" placeholder="例如：本机、局域网服务器、公网服务器" required></label>
       <label>服务端地址<input id="server-url" type="url" placeholder="http://127.0.0.1:59188" required></label>
       <label>默认拼多多站点<select id="preferred-site"><option value="pinduoduo">mobile.pinduoduo.com</option><option value="yangkeduo">mobile.yangkeduo.com</option></select></label>
       <label>设备 Token<input id="device-token" type="password" autocomplete="off" placeholder="pddc_…"></label>

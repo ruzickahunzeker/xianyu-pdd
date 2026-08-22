@@ -13,6 +13,7 @@ button:disabled { cursor: not-allowed; opacity: .5; }
 button.primary { color: white; border-color: #1769e0; background: #1769e0; }
 .link-button { border: 0; color: #1769e0; background: transparent; }
 .actions { display: flex; gap: 8px; margin: 14px 0; }
+.compact-actions { margin: -6px 0 0; }
 .status { min-height: 42px; margin: 8px 0; padding: 9px 11px; border-radius: 8px; background: #eaf0f8; }
 .status[data-kind="success"] { color: #146c43; background: #e7f6ed; }
 .status[data-kind="error"] { color: #a52323; background: #fdecec; }

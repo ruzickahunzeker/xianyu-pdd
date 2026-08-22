@@ -1,13 +1,8 @@
 import { collectDefaultAddressID, collectPDDProduct, collectPDDReviewMedia, detectPDDSite, isPDDAddressPage } from "./collector.js";
-
-const DEFAULT_SETTINGS = {
-  serverURL: "http://127.0.0.1:59188",
-  deviceToken: "",
-  preferredSite: "pinduoduo"
- };
+import { getActiveCollectorSettings } from "./settings-store.js";
 
 async function settings() {
-  return { ...DEFAULT_SETTINGS, ...(await chrome.storage.local.get(DEFAULT_SETTINGS)) };
+  return getActiveCollectorSettings();
 }
 
 async function activeTab() {

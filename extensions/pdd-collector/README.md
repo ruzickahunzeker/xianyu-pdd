@@ -1,6 +1,6 @@
 # 拼多多浏览器采集器（原型）
 
-Manifest V3 扩展（当前版本 0.4.0），支持 `mobile.pinduoduo.com` 与 `mobile.yangkeduo.com`，从当前拼多多商品页的 `window.rawData.store` 提取商品与 SKU 白名单数据。相同 `goods_id` 可重复采集更新；服务端按 `goods_id + sku_id` 保持 SKU 身份，新增当前出现的 SKU，并保留本次页面未返回的旧 SKU 供人工核对。采集时会保存当前标签页的原始完整商品链接；页面返回的 1000 封顶库存标记为非精确，不自动覆盖素材库存。
+Manifest V3 扩展（当前版本 0.5.0），支持 `mobile.pinduoduo.com` 与 `mobile.yangkeduo.com`，从当前拼多多商品页的 `window.rawData.store` 提取商品与 SKU 白名单数据。相同 `goods_id` 可重复采集更新；服务端按 `goods_id + sku_id` 保持 SKU 身份，新增当前出现的 SKU，并保留本次页面未返回的旧 SKU 供人工核对。采集时会保存当前标签页的原始完整商品链接；页面返回的 1000 封顶库存标记为非精确，不自动覆盖素材库存。
 
 ## 安装
 
@@ -9,6 +9,8 @@ Manifest V3 扩展（当前版本 0.4.0），支持 `mobile.pinduoduo.com` 与 `
 3. 选择本目录 `extensions/pdd-collector`。
 4. 打开一个已经完整加载的拼多多商品页。
 5. 点击扩展图标，再点击“采集当前页面”。
+
+扩展设置支持保存多个服务环境。每套部署使用自己的数据库，因此也必须使用在该服务器后台创建的设备 Token。例如可以分别建立“本机”“局域网服务器”和“公网服务器”，上传前切换当前环境；旧版单地址配置会自动迁移为第一个环境。
 
 采集结果可以先预览或复制 JSON。服务端启用采集 API 后，在设置页填写服务端地址和设备 Token，即可调用：
 
