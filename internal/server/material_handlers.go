@@ -691,9 +691,9 @@ func (s *Server) insertMaterial(w http.ResponseWriter, r *http.Request, sourceTy
 }
 func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 	goodsID := chi.URLParam(r, "goodsID")
-	var title, images string
+	var title, images, productVideos string
 	var productID int64
-	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,title,images_json FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&productID, &title, &images); err != nil {
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,title,images_json,videos_json FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&productID, &title, &images, &productVideos); err != nil {
 		writeErr(w, 404, "采集商品不存在")
 		return
 	}
@@ -737,7 +737,16 @@ func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	in := materialInput{Title: title, Description: title, Images: cleanImages, Category: map[string]any{}, SKUs: skus, PostageMode: "free"}
+	var collectedVideos []pddProductVideoInput
+	_ = json.Unmarshal([]byte(productVideos), &collectedVideos)
+	videos := make([]materialVideo, 0, len(collectedVideos))
+	for _, video := range collectedVideos {
+		if strings.TrimSpace(video.URL) != "" {
+			videos = append(videos, materialVideo{Source: "product", SourceGoodsID: goodsID, URL: video.URL, CoverURL: video.CoverURL, DurationMS: video.DurationMS})
+		}
+	}
+	videoEnabled := true
+	in := materialInput{Title: title, Description: title, Images: cleanImages, Category: map[string]any{}, SKUs: skus, PostageMode: "free", VideoEnabled: &videoEnabled, Videos: videos}
 	if err := validateMaterial(&in); err != nil {
 		writeErr(w, 400, err.Error())
 		return

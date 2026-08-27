@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -506,14 +507,25 @@ func (s *Service) CreateOutgoingMedia(ctx context.Context, session db.ChatSessio
 // RecordOutgoingSent captures automatic replies and automation messages. A
 // supplied key correlates a UI pending message and only updates its status.
 func (s *Service) RecordOutgoingSent(ctx context.Context, session db.ChatSession, key, text string) (*db.ChatMessage, error) {
-	if strings.TrimSpace(key) != "" {
-		return s.SetOutgoingStatus(ctx, session.CookieID, key, "sent")
+	normalizedKey := strings.TrimSpace(key)
+	if normalizedKey != "" {
+		existing, err := s.SetOutgoingStatus(ctx, session.CookieID, normalizedKey, "sent")
+		if err == nil {
+			return existing, nil
+		}
+		if !errors.Is(err, db.ErrNotFound) {
+			return nil, err
+		}
 	}
-	message := db.ChatMessage{MessageKey: "sent-" + randomID(), Direction: "outgoing", SenderID: session.CookieID,
+	messageKey := normalizedKey
+	if messageKey == "" {
+		messageKey = "sent-" + randomID()
+	}
+	message := db.ChatMessage{MessageKey: messageKey, Direction: "outgoing", SenderID: session.CookieID,
 		SenderName: "我", MessageType: "text", Content: strings.TrimSpace(text), Status: "sent",
 		SentAt: time.Now().UTC().UnixMilli()}
-	stored, _, err := s.store.Chats.SaveMessage(ctx, session, message, false)
-	if err == nil {
+	stored, inserted, err := s.store.Chats.SaveMessage(ctx, session, message, false)
+	if err == nil && inserted {
 		s.Publish(session.CookieID, Event{Type: "message.created", Message: stored, Session: &session})
 	}
 	return stored, err

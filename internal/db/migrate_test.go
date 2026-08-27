@@ -83,6 +83,7 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"fulfillment_exception_events", "notification_status"},
 		{"product_materials", "video_enabled"},
 		{"product_materials", "videos_json"},
+		{"pdd_products", "videos_json"},
 		{"pdd_review_media", "media_type"},
 	}
 	for _, c := range checks {

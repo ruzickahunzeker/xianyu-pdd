@@ -297,6 +297,7 @@ export interface OrderAnalytics {
 export interface SystemSettings {
   ai_model?: string;
   ai_api_key?: string;
+  ai_api_key_configured?: boolean;
   ai_api_url?: string;
   ai_base_url?: string;
   default_reply?: string;
@@ -310,6 +311,11 @@ export interface SystemSettings {
   pdd_product_refresh_interval_hours?: number;
   'captcha.remote_service_url'?: string;
   'captcha.remote_secret_key'?: string;
+  'captcha.remote_secret_key_configured'?: boolean;
+  smtp_password?: string;
+  smtp_password_configured?: boolean;
+  qq_reply_secret_key?: string;
+  qq_reply_secret_key_configured?: boolean;
   'captcha.remote_pass_cookies'?: boolean | string;
   [key: string]: any;
 }

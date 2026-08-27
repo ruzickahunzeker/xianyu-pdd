@@ -21,6 +21,20 @@ import (
 
 const maxOpenAIModelsResponseBytes = 4 << 20
 
+var sensitiveSystemSettingKeys = map[string]struct{}{
+	"ai_api_key": {}, "smtp_password": {}, "qq_reply_secret_key": {}, "captcha.remote_secret_key": {},
+}
+
+type systemSettingSecretCommand struct {
+	Action string `json:"action"`
+	Value  string `json:"value,omitempty"`
+}
+
+func isSensitiveSystemSetting(key string) bool {
+	_, ok := sensitiveSystemSettingKeys[strings.ToLower(strings.TrimSpace(key))]
+	return ok
+}
+
 // authSess 从上下文取会话。
 func authSess(r *http.Request) *db.Session {
 	return auth.SessionFromContext(r.Context())
@@ -47,14 +61,76 @@ func (s *Server) setSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	values := make(map[string]string, len(raw))
-	for key, value := range raw {
+	commands := map[string]systemSettingSecretCommand{}
+	rawValues, valuesExist := raw["values"]
+	_, secretsExist := raw["secrets"]
+	if valuesExist || secretsExist {
+		if valuesExist {
+			valueMap, ok := rawValues.(map[string]any)
+			if !ok {
+				writeErr(w, http.StatusBadRequest, "普通设置格式错误")
+				return
+			}
+			for key, value := range valueMap {
+				if isSensitiveSystemSetting(key) {
+					writeErr(w, http.StatusBadRequest, "敏感设置必须使用 secrets 命令")
+					return
+				}
+				values[key] = stringFromAny(value)
+			}
+		}
+		if rawSecrets, exists := raw["secrets"]; exists {
+			encoded, err := json.Marshal(rawSecrets)
+			if err != nil || json.Unmarshal(encoded, &commands) != nil {
+				writeErr(w, http.StatusBadRequest, "敏感设置命令格式错误")
+				return
+			}
+		}
+	} else {
+		// 兼容旧管理页面：非空敏感值等价 replace，空值等价 keep，防止
+		// 新服务端隐藏密钥后旧页面保存时意外清空已有凭据。
+		for key, value := range raw {
+			if isSensitiveSystemSetting(key) {
+				if secret := strings.TrimSpace(stringFromAny(value)); secret != "" {
+					commands[key] = systemSettingSecretCommand{Action: "replace", Value: secret}
+				}
+				continue
+			}
+			values[key] = stringFromAny(value)
+		}
+	}
+	for key, command := range commands {
 		key = strings.TrimSpace(key)
-		if key == "" || len(key) > 100 || value == nil {
+		if !isSensitiveSystemSetting(key) {
+			writeErr(w, http.StatusBadRequest, "不支持的敏感设置键")
+			return
+		}
+		switch strings.ToLower(strings.TrimSpace(command.Action)) {
+		case "keep":
+			continue
+		case "replace":
+			if strings.TrimSpace(command.Value) == "" {
+				writeErr(w, http.StatusBadRequest, "替换敏感设置时值不能为空")
+				return
+			}
+			values[key] = command.Value
+		case "clear":
+			values[key] = ""
+		default:
+			writeErr(w, http.StatusBadRequest, "敏感设置命令必须为 keep、replace 或 clear")
+			return
+		}
+	}
+	normalizedValues := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		if key == "" || len(key) > 100 {
 			writeErr(w, http.StatusBadRequest, "设置键或值无效")
 			return
 		}
-		values[key] = stringFromAny(value)
+		normalizedValues[key] = value
 	}
+	values = normalizedValues
 	if level, ok := values["log_level"]; ok {
 		if _, err := logging.ParseLevel(level); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
@@ -228,11 +304,28 @@ func (s *Server) allSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "查询失败")
 		return
 	}
-	writeJSON(w, http.StatusOK, m)
+	result := make(map[string]any, len(m)+len(sensitiveSystemSettingKeys))
+	for key, value := range m {
+		if isSensitiveSystemSetting(key) {
+			result[key+"_configured"] = strings.TrimSpace(value) != ""
+			continue
+		}
+		result[key] = value
+	}
+	for key := range sensitiveSystemSettingKeys {
+		if _, exists := result[key+"_configured"]; !exists {
+			result[key+"_configured"] = false
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) setSetting(w http.ResponseWriter, r *http.Request) {
 	key := chi.URLParam(r, "key")
+	if isSensitiveSystemSetting(key) {
+		writeErr(w, http.StatusBadRequest, "敏感设置请使用批量接口的 secrets 命令")
+		return
+	}
 	var req struct {
 		Value string `json:"value"`
 	}

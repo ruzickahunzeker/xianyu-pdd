@@ -58,6 +58,45 @@ func TestRecordHistoryPageParsesDirectionMediaAndDeduplicates(t *testing.T) {
 	}
 }
 
+func TestRecordOutgoingSentCreatesAndDeduplicatesOfficialEcho(t *testing.T) {
+	store, cleanup := chatTestStore(t)
+	defer cleanup()
+	service := New(store)
+	ctx := context.Background()
+	session := db.ChatSession{CookieID: "account-1", ChatID: "official-client", BuyerID: "buyer-1", BuyerName: "买家"}
+	first, err := service.RecordOutgoingSent(ctx, session, "official.PNM", "官方客户端发送")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := service.RecordOutgoingSent(ctx, session, "official.PNM", "官方客户端发送")
+	if err != nil || repeated.ID != first.ID {
+		t.Fatalf("first=%+v repeated=%+v err=%v", first, repeated, err)
+	}
+	owner, _ := store.Users.GetByUsername(ctx, "owner")
+	rows, err := store.Chats.ListMessages(ctx, owner.ID, "account-1", "official-client", 0, 20)
+	if err != nil || len(rows) != 1 || rows[0].Direction != "outgoing" || rows[0].Status != "sent" {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestOfficialEchoDoesNotEraseKnownSessionIdentity(t *testing.T) {
+	store, cleanup := chatTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	known := db.ChatSession{CookieID: "account-1", ChatID: "known", BuyerID: "buyer-1", BuyerName: "已知买家", ItemID: "item-1", ItemTitle: "已知商品"}
+	if err := store.Chats.UpsertSession(ctx, known); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(store).RecordOutgoingSent(ctx, db.ChatSession{CookieID: "account-1", ChatID: "known"}, "echo.PNM", "回显"); err != nil {
+		t.Fatal(err)
+	}
+	owner, _ := store.Users.GetByUsername(ctx, "owner")
+	sessions, err := store.Chats.ListSessions(ctx, owner.ID, "account-1", 20)
+	if err != nil || len(sessions) != 1 || sessions[0].BuyerID != "buyer-1" || sessions[0].BuyerName != "已知买家" || sessions[0].ItemID != "item-1" {
+		t.Fatalf("sessions=%+v err=%v", sessions, err)
+	}
+}
+
 func TestRecordHistoryPageClassifiesOfficialCardsAsSystem(t *testing.T) {
 	store, cleanup := chatTestStore(t)
 	defer cleanup()

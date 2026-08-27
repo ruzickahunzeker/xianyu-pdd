@@ -104,6 +104,32 @@ function collectImages(store) {
   return { images: images.slice(0, 9), paths: uniqueStrings(paths) };
 }
 
+function collectProductVideos(store) {
+  const videos = [];
+  const paths = [];
+  const seen = new Set();
+  walkObjects(store, 6, (value, path) => {
+    if (Array.isArray(value)) return;
+    for (const [key, candidate] of Object.entries(value)) {
+      if (!Array.isArray(candidate) || !["videoGallery", "video_gallery", "goodsVideos", "goods_videos"].includes(key)) continue;
+      for (const entry of candidate) {
+        const url = asString(firstValue(entry, ["videoUrl", "video_url", "url", "src"]));
+        if (!/^https:\/\//.test(url) || seen.has(url)) continue;
+        seen.add(url);
+        videos.push({
+          url,
+          cover_url: asString(firstValue(entry, ["coverUrl", "cover_url", "cover", "thumbUrl", "thumb_url"])),
+          width: asNumber(entry?.width),
+          height: asNumber(entry?.height),
+          duration_ms: asNumber(firstValue(entry, ["durationMs", "duration_ms", "duration"]))
+        });
+      }
+      if (candidate.length) paths.push(`${path}.${key}`);
+    }
+  });
+  return { videos: videos.slice(0, 20), paths: uniqueStrings(paths) };
+}
+
 function normalizeSpec(spec) {
   return {
     spec_key: asString(firstValue(spec, ["spec_key", "specKey", "key"])),
@@ -301,6 +327,7 @@ export function collectPDDProduct(rawDataOverride, pageURL = globalThis.location
   if (skus.some((sku) => !sku.sku_id)) throw new Error("SKU_ID_MISSING: 部分 SKU 缺少 skuId/skuID");
   const title = findNestedValue(store, ["goodsName", "goods_name", "goodsTitle", "goods_title", "title"]);
   const imageResult = collectImages(store);
+  const videoResult = collectProductVideos(store);
   const propertyResult = collectGoodsProperties(store);
   const mallSN = collectMallSN(store);
 
@@ -310,6 +337,7 @@ export function collectPDDProduct(rawDataOverride, pageURL = globalThis.location
     sku_source_path: located.path,
     title_source_path: title.path,
     image_source_paths: imageResult.paths,
+    video_source_paths: videoResult.paths,
     goods_property_source_path: propertyResult.path,
     mall_sn_source_path: mallSN.path,
     collected_at: new Date().toISOString(),
@@ -319,6 +347,7 @@ export function collectPDDProduct(rawDataOverride, pageURL = globalThis.location
       mall_sn: mallSN.value,
       title: asString(title.value),
       images: imageResult.images,
+      videos: videoResult.videos,
       goods_property: propertyResult.properties
     },
     skus

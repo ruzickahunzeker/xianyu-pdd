@@ -15,9 +15,10 @@ import (
 
 // recordingHandler 记录收到的聊天消息，用于断言防抖与去重行为。
 type recordingHandler struct {
-	mu      sync.Mutex
-	chats   []ChatMessage
-	refresh int
+	mu       sync.Mutex
+	chats    []ChatMessage
+	outgoing []OutgoingChatMessage
+	refresh  int
 }
 
 func (h *recordingHandler) HandleChatMessage(_ context.Context, m ChatMessage) error {
@@ -39,6 +40,12 @@ func (h *recordingHandler) OnPasswordLoginRefresh(_ context.Context, _ string) b
 	return true
 }
 func (h *recordingHandler) OnAccountAlert(_ context.Context, _, _, _, _ string) {}
+func (h *recordingHandler) HandleOutgoingChatMessage(_ context.Context, message OutgoingChatMessage) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.outgoing = append(h.outgoing, message)
+	return nil
+}
 
 func newAccountForTest(t *testing.T) (*Account, *recordingHandler, *db.Store, func()) {
 	t.Helper()

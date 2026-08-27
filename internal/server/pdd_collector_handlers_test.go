@@ -168,7 +168,7 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := `{"schema_version":1,"collection_id":"0d2858ce-43ad-4d1e-b953-01ff9492983a","collection_method":"page_raw_data","collected_at":"2026-08-13T12:00:00Z","final_url":"https://mobile.pinduoduo.com/goods.html?goods_id=972484695683&uin=test-uin&page_from=31&_oak_rcto=fresh","goods":{"goods_id":"972484695683","mall_sn":"CgI2W-test-token","title":"测试商品","images":["https://img.example/a.jpg"]},"skus":[{"sku_id":"1928995096086","goods_id":"972484695683","thumb_url":"https://img.example/sku.jpg","stock":0,"stock_exact":true,"is_onsale":true,"prices":{"old_group_price":28500},"spec_value_ids":["30553766053"],"specs":[{"spec_key":"数量","spec_key_id":"1216","spec_value_id":"30553766053","raw_value":"整箱10罐【限时特价】"}]}]}`
+	body := `{"schema_version":1,"collection_id":"0d2858ce-43ad-4d1e-b953-01ff9492983a","collection_method":"page_raw_data","collected_at":"2026-08-13T12:00:00Z","final_url":"https://mobile.pinduoduo.com/goods.html?goods_id=972484695683&uin=test-uin&page_from=31&_oak_rcto=fresh","goods":{"goods_id":"972484695683","mall_sn":"CgI2W-test-token","title":"测试商品","images":["https://img.example/a.jpg"],"videos":[{"url":"https://video5.pddpic.com/product.mp4","width":720,"height":960}]},"skus":[{"sku_id":"1928995096086","goods_id":"972484695683","thumb_url":"https://img.example/sku.jpg","stock":0,"stock_exact":true,"is_onsale":true,"prices":{"old_group_price":28500},"spec_value_ids":["30553766053"],"specs":[{"spec_key":"数量","spec_key_id":"1216","spec_value_id":"30553766053","raw_value":"整箱10罐【限时特价】"}]}]}`
 	upload := func() *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/pdd-collector/products", strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
@@ -220,6 +220,10 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	}
 	if mallSN != "CgI2W-test-token" {
 		t.Fatalf("mall_sn=%q", mallSN)
+	}
+	var videosJSON string
+	if err := store.DB.QueryRow(`SELECT videos_json FROM pdd_products WHERE goods_id='972484695683'`).Scan(&videosJSON); err != nil || !strings.Contains(videosJSON, "video5.pddpic.com/product.mp4") {
+		t.Fatalf("videos_json=%q err=%v", videosJSON, err)
 	}
 	var finalURL string
 	if err := store.DB.QueryRow(`SELECT final_url FROM pdd_products WHERE goods_id='972484695683'`).Scan(&finalURL); err != nil {

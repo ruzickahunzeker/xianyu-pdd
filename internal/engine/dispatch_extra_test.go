@@ -522,3 +522,21 @@ func plainChatMessage(t *testing.T, text, senderUserID, chatID string) map[strin
 	}
 	return m
 }
+
+func TestHandleMessageRecordsOfficialClientOutgoingEcho(t *testing.T) {
+	acc, handler, _, cleanup := newAccountForTest(t)
+	defer cleanup()
+	decrypted := plainChatMessage(t, "官方客户端发送", "123", "chat-own")
+	envelope := decrypted["1"].(map[string]any)
+	envelope["10"].(map[string]any)["reminderUrl"] = "fleamarket://message_chat?itemId=item-1&peerUserId=buyer-own"
+	acc.handleMessage(decrypted)
+	handler.mu.Lock()
+	defer handler.mu.Unlock()
+	if len(handler.chats) != 0 || len(handler.outgoing) != 1 {
+		t.Fatalf("chats=%d outgoing=%d", len(handler.chats), len(handler.outgoing))
+	}
+	got := handler.outgoing[0]
+	if got.ChatID != "chat-own" || got.BuyerID != "buyer-own" || got.Text != "官方客户端发送" || got.MessageKey != "msg-chat-own" {
+		t.Fatalf("outgoing=%+v", got)
+	}
+}

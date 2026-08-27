@@ -24,6 +24,27 @@ const normalizeSettings = (settings: Record<string, any>): SystemSettings => {
   return out as SystemSettings;
 };
 
+const SENSITIVE_SYSTEM_SETTINGS = new Set([
+  'ai_api_key', 'smtp_password', 'qq_reply_secret_key', 'captcha.remote_secret_key',
+]);
+
+export type SecretSettingCommand = { action: 'keep' | 'replace' | 'clear'; value?: string };
+
+export const normalizeSystemSettingsUpdate = (settings: Partial<SystemSettings>) => {
+  const values: Record<string, unknown> = {};
+  const secrets: Record<string, SecretSettingCommand> = {};
+  for (const [key, value] of Object.entries(settings)) {
+    if (value === undefined || value === null || key.endsWith('_configured')) continue;
+    if (SENSITIVE_SYSTEM_SETTINGS.has(key)) {
+      const secret = String(value).trim();
+      secrets[key] = secret ? { action: 'replace', value: secret } : { action: 'keep' };
+      continue;
+    }
+    values[key] = value;
+  }
+  return { values, secrets };
+};
+
 // Auth
 export const login = async (data: { username?: string; password?: string; email?: string; verification_code?: string }): Promise<LoginResponse> => {
   return post('/login', data, { skipAuthLogout: true });
@@ -987,10 +1008,7 @@ export const getSystemSettings = async (): Promise<SystemSettings> => {
 };
 
 export const updateSystemSettings = async (settings: Partial<SystemSettings>): Promise<ApiResponse> => {
-	const payload = Object.fromEntries(
-		Object.entries(settings).filter(([, value]) => value !== undefined && value !== null),
-	);
-	return put('/system-settings', payload);
+	return put('/system-settings', normalizeSystemSettingsUpdate(settings));
 };
 
 export const getPDDAccount = async (): Promise<PDDAccountConfig> => get('/api/pdd/account');
@@ -1207,10 +1225,11 @@ export interface PDDSKU {
   prices: Record<string, unknown>; price_cent: number; stock: number; stock_exact: boolean; is_onsale: boolean; last_collected_at: number;
 }
 export interface PDDProductSummary {
-  id: number; goods_id: string; mall_sn:string; final_url: string; title: string; images: string[];
+  id: number; goods_id: string; mall_sn:string; final_url: string; title: string; images: string[]; videos: PDDProductVideo[];
   first_collected_at: number; last_collected_at: number; sku_count: number; onsale_sku_count: number;
   min_price_cent: number; max_price_cent: number;
 }
+export interface PDDProductVideo { url:string; cover_url?:string; width?:number; height?:number; duration_ms?:number }
 export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 'onsale_sku_count' | 'min_price_cent' | 'max_price_cent'> { goods_property:PDDGoodsProperty[]; skus: PDDSKU[] }
 export const getPDDProducts = (): Promise<PDDProductSummary[]> => get('/api/pdd-collector/catalog');
 export const getPDDProduct = (goodsId: string): Promise<PDDProductDetail> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);

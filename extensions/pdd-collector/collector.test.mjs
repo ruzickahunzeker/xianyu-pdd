@@ -91,3 +91,11 @@ test("collectPDDProduct includes the active tab URL, mall_sn and capped-stock se
   assert.equal(result.skus[0].stock, 1000);
   assert.equal(result.skus[0].stock_exact, false);
 });
+
+test("collectPDDProduct includes product videoGallery separately from images", () => {
+  const result = collectPDDProduct({ store: { goodsID: 123, goodsName: "视频商品", skus: [{ skuId: 456, goodsId: 123 }], initDataObj: { goods: {
+    videoGallery: [{ url: "https://video5.pddpic.com/a.mp4", videoUrl: "https://video5.pddpic.com/a.f30.mp4", width: 720, height: 960 }]
+  } } } }, "https://mobile.pinduoduo.com/goods.html?goods_id=123");
+  assert.deepEqual(result.goods.videos, [{ url: "https://video5.pddpic.com/a.f30.mp4", cover_url: "", width: 720, height: 960, duration_ms: 0 }]);
+  assert.deepEqual(result.video_source_paths, ["store.initDataObj.goods.videoGallery"]);
+});

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -65,6 +66,17 @@ func (a *Account) handleMessageContext(ctx context.Context, decrypted map[string
 		if a.handler != nil {
 			if err := a.handler.HandleSystemEvent(ctx, *task); err != nil {
 				a.logger.Error("处理系统自动化事件失败", "err", err, "trigger", task.TriggerType)
+			}
+		}
+		return
+	}
+
+	// 官方客户端发送的普通文本也会回显到本账号 WebSocket。它只进入
+	// 出站观察与聊天持久化，不能落入买家消息的自动回复链。
+	if ownEcho := extractOwnWebSocketEcho(decrypted, a.CookieID, a.currentCookieStr()); ownEcho != nil {
+		if observer, ok := a.handler.(outgoingChatHandler); ok {
+			if err := observer.HandleOutgoingChatMessage(ctx, *ownEcho); err != nil {
+				a.logger.Warn("处理官方客户端出站消息回显失败", "err", err, "chat_id", ownEcho.ChatID)
 			}
 		}
 		return
@@ -258,6 +270,62 @@ func extractChatMessage(decrypted map[string]any, accountID, cookieStr string) *
 		ItemID:       itemID,
 		Raw:          decrypted,
 	}
+}
+
+// extractOwnWebSocketEcho 识别官方闲鱼客户端发送后回显到当前账号的普通文本。
+func extractOwnWebSocketEcho(decrypted map[string]any, accountID, cookieStr string) *OutgoingChatMessage {
+	m1, ok := decrypted["1"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	m10, _ := m1["10"].(map[string]any)
+	if m10 == nil {
+		return nil
+	}
+	text, _ := m10["reminderContent"].(string)
+	if strings.TrimSpace(text) == "" || isNonUserChatNotice(m1, m10, text) {
+		return nil
+	}
+	senderUserID := strings.TrimSuffix(strings.TrimSpace(toString(m10["senderUserId"])), "@goofish")
+	selfUserID := strings.TrimSuffix(strings.TrimSpace(cookieValue(cookieStr, "unb")), "@goofish")
+	if senderUserID == "" || selfUserID == "" || senderUserID != selfUserID {
+		return nil
+	}
+	chatID := toString(m1["2"])
+	if i := strings.Index(chatID, "@"); i >= 0 {
+		chatID = chatID[:i]
+	}
+	if strings.TrimSpace(chatID) == "" {
+		return nil
+	}
+	reminderURL, _ := m10["reminderUrl"].(string)
+	return &OutgoingChatMessage{
+		AccountID: accountID, ChatID: chatID,
+		BuyerID: extractChatPeerUserID(reminderURL, selfUserID),
+		Text:    text, MessageKey: extractMessageID(decrypted),
+	}
+}
+
+func extractChatPeerUserID(reminderURL, selfUserID string) string {
+	parsed, err := url.Parse(strings.TrimSpace(reminderURL))
+	if err != nil {
+		return ""
+	}
+	peer := strings.TrimSuffix(strings.TrimSpace(parsed.Query().Get("peerUserId")), "@goofish")
+	if peer == "" || peer == strings.TrimSuffix(strings.TrimSpace(selfUserID), "@goofish") {
+		return ""
+	}
+	return peer
+}
+
+func cookieValue(cookieStr, key string) string {
+	for _, part := range strings.Split(cookieStr, ";") {
+		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if ok && name == key {
+			return value
+		}
+	}
+	return ""
 }
 
 // isNonUserChatNotice 判断闲鱼 IM 中不应进入自动回复的系统提示或交易卡片。

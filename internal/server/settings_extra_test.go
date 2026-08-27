@@ -238,6 +238,53 @@ func TestBulkSystemSettingsAreAtomic(t *testing.T) {
 	}
 }
 
+func TestSensitiveSystemSettingsUseCommandsAndNeverReadBackPlaintext(t *testing.T) {
+	srv, _, cleanup := newTestServer(t)
+	defer cleanup()
+	h := srv.Router()
+	cookie := loginHelper(t, h)
+
+	putSettings := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPut, "/system-settings", strings.NewReader(body))
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := putSettings(`{"values":{"theme_color":"blue"},"secrets":{"ai_api_key":{"action":"replace","value":"sk-secret"}}}`); rec.Code != http.StatusOK {
+		t.Fatalf("replace status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, _ := srv.Store.Settings.Get(context.Background(), "ai_api_key"); got != "sk-secret" {
+		t.Fatalf("stored secret=%q", got)
+	}
+
+	getReq := httptest.NewRequest(http.MethodGet, "/system-settings", nil)
+	getReq.AddCookie(cookie)
+	getRec := httptest.NewRecorder()
+	h.ServeHTTP(getRec, getReq)
+	if strings.Contains(getRec.Body.String(), "sk-secret") {
+		t.Fatalf("secret leaked: %s", getRec.Body.String())
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(getRec.Body.Bytes(), &settings); err != nil || settings["ai_api_key_configured"] != true {
+		t.Fatalf("configured marker missing: settings=%+v err=%v", settings, err)
+	}
+
+	// 旧页面在隐藏后的空密码框保存时必须保留现有密钥。
+	if rec := putSettings(`{"theme_color":"green","ai_api_key":""}`); rec.Code != http.StatusOK {
+		t.Fatalf("legacy keep status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, _ := srv.Store.Settings.Get(context.Background(), "ai_api_key"); got != "sk-secret" {
+		t.Fatalf("legacy empty cleared secret: %q", got)
+	}
+	if rec := putSettings(`{"secrets":{"ai_api_key":{"action":"clear"}}}`); rec.Code != http.StatusOK {
+		t.Fatalf("clear status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got, _ := srv.Store.Settings.Get(context.Background(), "ai_api_key"); got != "" {
+		t.Fatalf("secret not cleared: %q", got)
+	}
+}
+
 // TestListUserSettings 用户设置增删查。
 func TestListUserSettings(t *testing.T) {
 	srv, _, cleanup := newTestServer(t)

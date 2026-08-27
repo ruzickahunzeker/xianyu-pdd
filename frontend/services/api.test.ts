@@ -34,7 +34,8 @@ import {
 	updateAccountSettings,
   updateItem,
   updateNotificationChannel,
-  updateSystemSettings,
+	updateSystemSettings,
+	normalizeSystemSettingsUpdate,
   updateShippingRule,
 	getChatSessions,
 	getChatMessages,
@@ -51,13 +52,29 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-test('updateSystemSettings uses one atomic bulk request', async () => {
+test('updateSystemSettings uses one atomic command request', async () => {
 	const fetchMock = vi.fn().mockResolvedValue(jsonResponse({ success: true }));
 	vi.stubGlobal('fetch', fetchMock);
 	await updateSystemSettings({ theme_color: 'blue', renewal_log_retention_days: 15 });
 	expect(fetchMock).toHaveBeenCalledTimes(1);
 	expect(fetchMock).toHaveBeenCalledWith('/system-settings', expect.objectContaining({ method: 'PUT', credentials: 'include' }));
-	expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ theme_color: 'blue', renewal_log_retention_days: 15 });
+	expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({
+		values: { theme_color: 'blue', renewal_log_retention_days: 15 }, secrets: {},
+	});
+});
+
+test('system settings separate sensitive values into explicit commands', () => {
+	expect(normalizeSystemSettingsUpdate({
+		theme_color: 'blue', ai_api_key: 'sk-next', smtp_password: '',
+		'captcha.remote_secret_key': 'captcha-next', ai_api_key_configured: true,
+	})).toEqual({
+		values: { theme_color: 'blue' },
+		secrets: {
+			ai_api_key: { action: 'replace', value: 'sk-next' },
+			smtp_password: { action: 'keep' },
+			'captcha.remote_secret_key': { action: 'replace', value: 'captcha-next' },
+		},
+	});
 });
 
 test('fulfillment key management uses authenticated admin endpoints', async () => {

@@ -1,6 +1,6 @@
 # 拼多多浏览器采集器（原型）
 
-Manifest V3 扩展（当前版本 0.5.0），支持 `mobile.pinduoduo.com` 与 `mobile.yangkeduo.com`，从当前拼多多商品页的 `window.rawData.store` 提取商品与 SKU 白名单数据。相同 `goods_id` 可重复采集更新；服务端按 `goods_id + sku_id` 保持 SKU 身份，新增当前出现的 SKU，并保留本次页面未返回的旧 SKU 供人工核对。采集时会保存当前标签页的原始完整商品链接；页面返回的 1000 封顶库存标记为非精确，不自动覆盖素材库存。
+Manifest V3 扩展（当前版本 0.6.0），支持 `mobile.pinduoduo.com` 与 `mobile.yangkeduo.com`，从当前拼多多商品页的 `window.rawData.store` 提取商品、商品视频与 SKU 白名单数据。相同 `goods_id` 可重复采集更新；服务端按 `goods_id + sku_id` 保持 SKU 身份，新增当前出现的 SKU，并保留本次页面未返回的旧 SKU 供人工核对。采集时会保存当前标签页的原始完整商品链接；页面返回的 1000 封顶库存标记为非精确，不自动覆盖素材库存。商品页 `videoGallery` 会独立保存，并在创建素材草稿时自动加入视频区，不与评论视频混合。
 
 ## 安装
 
