@@ -222,6 +222,50 @@ func TestItemsSyncFromRemoteReconcilesAndPreservesLocalSettings(t *testing.T) {
 	}
 }
 
+func TestItemsSyncFromRemoteUpdatesMultiSpecBothDirections(t *testing.T) {
+	store, cleanup := newTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	ok, err := store.Users.Create(ctx, "multi-spec-sync-user", "multi-spec-sync@example.com", "password")
+	if err != nil || !ok {
+		t.Fatalf("create test user: ok=%v err=%v", ok, err)
+	}
+	user, err := store.Users.GetByUsername(ctx, "multi-spec-sync-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Cookies.Save(ctx, "acc1", "unb=1", user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Items.Upsert(ctx, &ItemInfoRow{CookieID: "acc1", ItemID: "changing-item", ItemTitle: "变更商品", IsMultiSpec: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := store.Items.SyncFromRemote(ctx, "acc1", []ItemInfoRow{{ItemID: "changing-item", IsMultiSpec: false}})
+	if err != nil || result.Saved != 1 {
+		t.Fatalf("multi to single sync failed: result=%+v err=%v", result, err)
+	}
+	item, err := store.Items.Get(ctx, "acc1", "changing-item")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.IsMultiSpec {
+		t.Fatal("single-spec remote result must clear the previous multi-spec flag")
+	}
+
+	result, err = store.Items.SyncFromRemote(ctx, "acc1", []ItemInfoRow{{ItemID: "changing-item", IsMultiSpec: true}})
+	if err != nil || result.Saved != 1 {
+		t.Fatalf("single to multi sync failed: result=%+v err=%v", result, err)
+	}
+	item, err = store.Items.Get(ctx, "acc1", "changing-item")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !item.IsMultiSpec {
+		t.Fatal("multi-spec remote result must replace the previous single-spec flag")
+	}
+}
+
 func TestItemsDeleteSoftDeletesRelatedAutomationRule(t *testing.T) {
 	store, cleanup := newTestDB(t)
 	defer cleanup()

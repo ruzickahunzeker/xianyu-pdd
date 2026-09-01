@@ -393,6 +393,9 @@ func TestSyncItemsFromAccountSuccess(t *testing.T) {
 	srv.MTop = withMTopTransport(roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		body := `{"ret":["SUCCESS::调用成功"],"data":{"cardList":[` +
 			`{"cardData":{"id":"it-sync-1","title":"同步商品A","priceInfo":{"price":"12.50","preText":"¥"},"picInfo":{"picUrl":"https://img.alicdn.com/a.png"},"categoryId":"9","detailParams":{"itemId":"it-sync-1"}}}]}}`
+		if strings.Contains(req.URL.String(), "mtop.taobao.idle.pc.detail") {
+			body = `{"ret":["SUCCESS::调用成功"],"data":{"multiSKU":true,"skuDO":{"skuList":[{"id":"sku-a"},{"id":"sku-b"}]}}}`
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
@@ -457,6 +460,40 @@ func TestSyncItemsFromAccountDetectsMultiSpecFromDetail(t *testing.T) {
 	item, err := store.Items.Get(context.Background(), "acc1", "multi-item")
 	if err != nil || !item.IsMultiSpec {
 		t.Fatalf("item=%+v err=%v", item, err)
+	}
+}
+
+func TestSyncItemsFromAccountClearsStaleMultiSpecFromDetail(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	ctx := context.Background()
+	if err := store.Items.Upsert(ctx, &db.ItemInfoRow{CookieID: "acc1", ItemID: "single-item", ItemTitle: "旧多规格商品", IsMultiSpec: true}); err != nil {
+		t.Fatal(err)
+	}
+	srv.MTop = withMTopTransport(roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		body := `{"ret":["SUCCESS::调用成功"],"data":{}}`
+		if strings.Contains(req.URL.String(), "mtop.idle.web.xyh.item.list") {
+			body = `{"ret":["SUCCESS::调用成功"],"data":{"cardList":[{"cardData":{"id":"single-item","title":"已改单规格商品","detailParams":{"itemId":"single-item"}}}]}}`
+		} else if strings.Contains(req.URL.String(), "mtop.taobao.idle.pc.detail") {
+			body = `{"ret":["SUCCESS::调用成功"],"data":{"multiSKU":false,"skuDO":{"skuList":[]}}}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
+	}))
+	h := srv.Router()
+	cookie := loginHelper(t, h)
+	req := httptest.NewRequest(http.MethodPost, "/items/get-all-from-account", strings.NewReader(`{"cookie_id":"acc1","page_size":10}`))
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	item, err := store.Items.Get(ctx, "acc1", "single-item")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.IsMultiSpec {
+		t.Fatalf("stale multi-spec flag was not cleared: %+v", item)
 	}
 }
 

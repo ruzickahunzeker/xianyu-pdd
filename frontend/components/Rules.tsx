@@ -1392,7 +1392,7 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                         {displayVariants.map((variant, index) => (
                           <div
                             key={variant.id || index}
-                            className={`grid grid-cols-1 gap-3 items-end rounded-2xl border border-gray-200 p-4 ${isMultiSpecRule ? 'md:grid-cols-[1fr_1fr_1.4fr_110px_40px]' : 'md:grid-cols-[1.4fr_110px_40px]'}`}
+                            className={`rules-delivery-grid grid min-w-0 grid-cols-1 gap-3 items-end rounded-2xl border border-gray-200 p-4 ${isMultiSpecRule ? 'rules-delivery-grid-multi' : ''}`}
                           >
                             {isMultiSpecRule && (
                               <>
@@ -1440,6 +1440,18 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                                 className="w-full ios-input px-3 py-2.5 rounded-lg"
                               />
                             </div>
+                            <button
+                              type="button"
+                              disabled={displayVariants.length === 1}
+                              onClick={() => setEditingAutomationRule({
+                                ...editingAutomationRule,
+                                variants: displayVariants.filter((_, variantIndex) => variantIndex !== index),
+                              })}
+                              className="w-10 h-10 flex items-center justify-center rounded-lg text-red-500 hover:bg-red-50 disabled:opacity-25"
+                              title="删除发货内容"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
                             <div className="md:col-span-full flex flex-wrap items-center gap-3 rounded-xl bg-gray-50 px-3 py-2">
                               <label className="flex items-center gap-2 text-xs font-bold text-gray-600 cursor-pointer">
                                 <input
@@ -1463,18 +1475,6 @@ const Rules: React.FC<RulesProps> = ({ initialDeliveryTarget, onDeliveryTargetHa
                               )}
                               <span className="text-xs text-gray-500">{variant.delay_override ? `本动作延时 ${variant.delay_seconds || 0} 秒` : '使用卡密默认延时'}</span>
                             </div>
-                            <button
-                              type="button"
-                              disabled={displayVariants.length === 1}
-                              onClick={() => setEditingAutomationRule({
-                                ...editingAutomationRule,
-                                variants: displayVariants.filter((_, variantIndex) => variantIndex !== index),
-                              })}
-                              className="w-10 h-10 flex items-center justify-center rounded-lg text-red-500 hover:bg-red-50 disabled:opacity-25"
-                              title="删除发货内容"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
                           </div>
                         ))}
                       </div>

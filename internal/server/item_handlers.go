@@ -629,13 +629,16 @@ func (s *Server) syncSyncedItems(ctx context.Context, cookieID string, items []m
 }
 
 func (s *Server) enrichSyncedItemDetails(ctx context.Context, client mtop.Client, cookies, cookieID string, items []mtop.ItemListItem) (saved, failed int) {
+	// 详情不可用或单个商品探测失败时保留旧值；只有成功读取最新详情后才允许双向覆盖。
+	for index := range items {
+		items[index].IsMultiSpec = items[index].IsMultiSpec || s.Store.Items.IsMultiSpec(ctx, cookieID, items[index].ID)
+	}
 	fetcher, ok := client.(mtop.ItemDetailFetcher)
 	if !ok {
 		return 0, 0
 	}
 	for index := range items {
-		// 列表接口可能不返回多规格标记；必须读取详情后才能可靠识别并保存 SKU。
-		knownMultiSpec := items[index].IsMultiSpec || s.Store.Items.IsMultiSpec(ctx, cookieID, items[index].ID)
+		// 列表接口可能不返回多规格标记；每次以最新详情为准，允许多规格与单规格双向变化。
 		detail, err := fetcher.FetchItemDetail(ctx, cookies, items[index].ID)
 		if err != nil {
 			failed++
@@ -651,7 +654,7 @@ func (s *Server) enrichSyncedItemDetails(ctx context.Context, client mtop.Client
 			}
 			continue
 		}
-		items[index].IsMultiSpec = knownMultiSpec || detail.IsMultiSpec
+		items[index].IsMultiSpec = detail.IsMultiSpec
 		_ = s.Store.Items.SetMultiSpec(ctx, cookieID, items[index].ID, items[index].IsMultiSpec)
 		saved++
 	}
