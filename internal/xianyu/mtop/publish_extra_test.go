@@ -16,7 +16,7 @@ import (
 	"testing"
 )
 
-// publish.go 用常量 URL（UploadMediaAPI / RecommendItemAPI / DefaultLocationAPI / PublishItemAPI），
+// publish.go 用常量 URL（UploadMediaAPI / RecommendItemAPI / PublishItemAPI），
 // 通过 dispatchTransport 按 api query 参数分发到不同本地 handler，覆盖各 mtop 调用路径。
 
 type dispatchTransport struct {
@@ -110,6 +110,7 @@ func TestPublishItemDescriptionDefaultsToTitle(t *testing.T) {
 		Quantity:     1,
 		PostageMode:  "fixed",
 		PostageCents: 500,
+		Virtual:      true,
 		Images:       []PublishImage{{Filename: "a.png", ContentType: "image/png", Data: png1}},
 	}
 	res, err := client.PublishItem(context.Background(), consignCookies, req)
@@ -210,7 +211,7 @@ func TestPublishItemRecommendCategoryMissingDataUsesElectronicMaterials(t *testi
 	}
 }
 
-// TestPublishItemLocationFailure: 默认地址缺失。
+// TestPublishItemLocationFailure: 实物商品必须显式提供浏览器选中的有效 POI。
 func TestPublishItemLocationFailure(t *testing.T) {
 	png1 := tinyPNG(t)
 	dt := &dispatchTransport{handlers: map[string]http.HandlerFunc{
@@ -219,9 +220,6 @@ func TestPublishItemLocationFailure(t *testing.T) {
 		},
 		"mtop.taobao.idle.kgraph.property.recommend": func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"categoryPredictResult":{"catId":"c1","catName":"类目"}}}`)
-		},
-		"mtop.taobao.idle.local.poi.get": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"commonAddresses":[]}}`)
 		},
 	}}
 	client := &ClientImpl{HTTPClient: &http.Client{Transport: dt}}
@@ -232,7 +230,7 @@ func TestPublishItemLocationFailure(t *testing.T) {
 		Images:     []PublishImage{{Filename: "a.png", ContentType: "image/png", Data: png1}},
 	}
 	_, err := client.PublishItem(context.Background(), consignCookies, req)
-	if err == nil || !strings.Contains(err.Error(), "缺少默认发货地址") {
+	if err == nil || !strings.Contains(err.Error(), "必须选择发货地") {
 		t.Fatalf("err=%v", err)
 	}
 }
@@ -272,6 +270,35 @@ func TestPublishVirtualItemSkipsLocation(t *testing.T) {
 	}
 	if _, exists := publishedData["itemAddrDTO"]; exists {
 		t.Fatalf("虚拟商品不应发送 itemAddrDTO: %+v", publishedData["itemAddrDTO"])
+	}
+}
+
+func TestPublishPhysicalItemSendsSelectedAdministrativePOI(t *testing.T) {
+	png1 := tinyPNG(t)
+	var publishedData map[string]any
+	dt := &dispatchTransport{handlers: map[string]http.HandlerFunc{
+		"_upload": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"object":{"url":"https://cdn/a.jpg","pix":"800x600"}}`)
+		},
+		"mtop.taobao.idle.kgraph.property.recommend": func(w http.ResponseWriter, r *http.Request) {
+			fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"categoryPredictResult":{"catId":"c1","catName":"类目"}}}`)
+		},
+		"mtop.idle.pc.idleitem.publish": func(w http.ResponseWriter, r *http.Request) {
+			publishedData, _ = parseDataURL(readBody(r))
+			fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"itemId":"physical-item-1"}}`)
+		},
+	}}
+	location := &PublishLocation{Area: "福田区", City: "深圳市", DivisionID: "440304", Longitude: 114.085947, Latitude: 22.547, POIID: "B0TEST", POIName: "测试地点", Province: "广东省"}
+	client := &ClientImpl{HTTPClient: &http.Client{Transport: dt}}
+	if _, err := client.PublishItem(context.Background(), consignCookies, PublishItemRequest{
+		Title: "实物商品", PriceCents: 1000, Quantity: 1, Location: location,
+		Images: []PublishImage{{Filename: "a.png", ContentType: "image/png", Data: png1}},
+	}); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	address, _ := publishedData["itemAddrDTO"].(map[string]any)
+	if address["divisionId"] != "440304" || address["poiId"] != "B0TEST" || address["gps"] != "22.547,114.085947" {
+		t.Fatalf("itemAddrDTO=%+v", address)
 	}
 }
 
@@ -378,6 +405,7 @@ func TestPublishItemFinalPublishFailure(t *testing.T) {
 		Quantity:     1,
 		PostageMode:  "fixed",
 		PostageCents: 500,
+		Virtual:      true,
 		Images:       []PublishImage{{Filename: "a.png", ContentType: "image/png", Data: png1}},
 	}
 	_, err := client.PublishItem(context.Background(), consignCookies, req)
@@ -412,6 +440,7 @@ func TestPublishItemStockPermissionError(t *testing.T) {
 		Title:      "T",
 		PriceCents: 1000,
 		Quantity:   1,
+		Virtual:    true,
 		Images:     []PublishImage{{Filename: "a.png", ContentType: "image/png", Data: png1}},
 	}
 	_, err := client.PublishItem(context.Background(), consignCookies, req)
@@ -618,35 +647,14 @@ func TestRecommendPublishCategoryEmptyCatId(t *testing.T) {
 	}
 }
 
-// ---- defaultPublishLocation 直接测试 ----
-
-func TestDefaultPublishLocationSuccess(t *testing.T) {
-	dt := &dispatchTransport{handlers: map[string]http.HandlerFunc{
-		"mtop.taobao.idle.local.poi.get": func(w http.ResponseWriter, r *http.Request) {
-			fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"commonAddresses":[{"area":"A","city":"C","divisionId":"1","poiId":"p","poi":"P","prov":"PR"}]}}`)
-		},
-	}}
-	client := &ClientImpl{HTTPClient: &http.Client{Transport: dt}}
-	loc, _, err := client.defaultPublishLocation(context.Background(), consignCookies)
-	if err != nil {
-		t.Fatalf("err=%v", err)
+func TestValidPublishLocationRequiresCompletePOI(t *testing.T) {
+	valid := PublishLocation{Area: "福田区", City: "深圳市", DivisionID: "440304", Longitude: 114.08, Latitude: 22.54, POIID: "B0TEST", POIName: "测试地点", Province: "广东省"}
+	if !validPublishLocation(valid) {
+		t.Fatal("complete POI should be valid")
 	}
-	if loc["area"] != "A" || loc["city"] != "C" {
-		t.Fatalf("loc=%+v", loc)
-	}
-}
-
-func TestDefaultPublishLocationMalformedAddress(t *testing.T) {
-	dt := &dispatchTransport{handlers: map[string]http.HandlerFunc{
-		"mtop.taobao.idle.local.poi.get": func(w http.ResponseWriter, r *http.Request) {
-			// commonAddresses[0] 不是 map
-			fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"commonAddresses":["not-a-map"]}}`)
-		},
-	}}
-	client := &ClientImpl{HTTPClient: &http.Client{Transport: dt}}
-	_, _, err := client.defaultPublishLocation(context.Background(), consignCookies)
-	if err == nil || !strings.Contains(err.Error(), "默认地址格式异常") {
-		t.Fatalf("err=%v", err)
+	valid.POIID = ""
+	if validPublishLocation(valid) {
+		t.Fatal("location without POI id must be rejected")
 	}
 }
 

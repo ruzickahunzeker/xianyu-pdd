@@ -21,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"xianyu-go/internal/auth"
+	"xianyu-go/internal/xianyu/mtop"
 )
 
 type materialSKU struct {
@@ -146,7 +147,8 @@ func (s *Server) mountMaterials(r chi.Router) {
 }
 
 type publishMaterialInput struct {
-	CookieID string `json:"cookie_id"`
+	CookieID string                `json:"cookie_id"`
+	Location *mtop.PublishLocation `json:"location,omitempty"`
 }
 
 func normalizePublishedMaterialSKU(sourceType string, row map[string]any) {
@@ -186,6 +188,14 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 		"cookie_id": input.CookieID, "title": fmt.Sprint(material["title"]),
 		"description": fmt.Sprint(material["description"]), "postage_mode": fmt.Sprint(material["postage_mode"]),
 		"postage": fmt.Sprintf("%.2f", float64(material["postage_cent"].(int64))/100),
+	}
+	if input.Location != nil {
+		rawLocation, marshalErr := json.Marshal(input.Location)
+		if marshalErr != nil {
+			writeErr(w, http.StatusBadRequest, "发货地数据无效")
+			return
+		}
+		fields["location"] = string(rawLocation)
 	}
 	skus, _ := material["skus"].([]any)
 	enabledSKUs := make([]any, 0, len(skus))

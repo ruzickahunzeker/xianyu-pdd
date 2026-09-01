@@ -26,6 +26,7 @@ func TestPublishBatches_CreateGetRows(t *testing.T) {
 	uid, _ := seedAccount(t, s)
 
 	batch := makePublishBatch(uid, "b1")
+	batch.LocationJSON = `{"division_id":"440304","poi_id":"B0TEST"}`
 	rows := []ItemPublishBatchRow{
 		{RowNo: 1, Title: "商品A", Price: "9.9", Quantity: 0, PostageMode: ""}, // 缺省值补 1 / free
 		{RowNo: 2, Title: "商品B", Price: "19.9", Quantity: 5, PostageMode: "buyer", Status: ""},
@@ -42,6 +43,9 @@ func TestPublishBatches_CreateGetRows(t *testing.T) {
 	}
 	if got.TotalCount != 3 || got.SuccessCount != 0 || got.FailedCount != 0 || got.Status != "pending" {
 		t.Fatalf("batch 字段: %#v", got)
+	}
+	if got.LocationJSON != batch.LocationJSON {
+		t.Fatalf("location=%q want %q", got.LocationJSON, batch.LocationJSON)
 	}
 	// Get 隔离校验：不同 user_id 应 ErrNotFound。
 	if _, err := s.PublishBatches.Get(ctx, uid+999, "b1"); !errors.Is(err, ErrNotFound) {

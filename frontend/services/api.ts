@@ -664,6 +664,7 @@ export const publishItem = async (form: {
     postage?: string;
     images: File[];
     skus?: Array<{price_cent:number;quantity:number;properties:Array<{name:string;value:string;image_url?:string}>}>;
+    location?: PublishLocation;
 }): Promise<any> => {
     const body = new FormData();
     body.set('cookie_id', form.cookie_id);
@@ -675,10 +676,22 @@ export const publishItem = async (form: {
     body.set('postage_mode', form.postage_mode);
     body.set('postage', form.postage || '');
     if (form.skus?.length) body.set('skus', JSON.stringify(form.skus));
+    if (form.location) body.set('location', JSON.stringify(form.location));
     for (const file of form.images) {
       body.append('images', file);
     }
     return postForm('/items/publish', body);
+}
+
+export interface PublishLocation {
+  area: string;
+  city: string;
+  division_id: string;
+  longitude: number;
+  latitude: number;
+  poi_id: string;
+  poi_name: string;
+  province: string;
 }
 
 export const recommendPublishCategory = async (cookieId: string, keyword: string): Promise<{
@@ -703,6 +716,7 @@ export const previewItemPublishBatch = async (form: {
       channelCatId?: string;
       tbCatId?: string;
     };
+    location?: PublishLocation;
 }): Promise<any> => {
     const body = new FormData();
     body.set('file', form.file);
@@ -712,6 +726,7 @@ export const previewItemPublishBatch = async (form: {
     body.set('fallback_category_name', form.fallbackCategory.catName);
     body.set('fallback_channel_category_id', form.fallbackCategory.channelCatId || '');
     body.set('fallback_tb_category_id', form.fallbackCategory.tbCatId || '');
+    if (form.location) body.set('location', JSON.stringify(form.location));
     return postForm('/items/publish-batches/preview', body);
 }
 
@@ -1251,7 +1266,7 @@ export const updateMaterial = (id:number,data:Omit<ProductMaterial,'id'|'source_
 export const deleteMaterial = (id:number) => del(`/materials/${id}`);
 export const uploadMaterialImage = (file:File):Promise<{url:string}> => { const body=new FormData();body.append('image',file);return postForm('/materials/images',body) };
 export const getPDDReviewMedia = (goodsId:string,type:'image'|'video'):Promise<PDDReviewMedia[]> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}/review-media?type=${type}`);
-export const publishMaterial = (id:number,cookieId:string):Promise<any> => post(`/materials/${id}/publish`,{cookie_id:cookieId},{timeoutMs:120_000});
+export const publishMaterial = (id:number,cookieId:string,location?:PublishLocation):Promise<any> => post(`/materials/${id}/publish`,{cookie_id:cookieId,location},{timeoutMs:120_000});
 export const getMaterialPublishRecords = (id:number):Promise<MaterialPublishRecord[]> => get(`/materials/${id}/publish-records`);
 export const getMaterialSourceDiff = (id:number):Promise<{added:any[];changed:any[];removed:string[]}> => get(`/materials/${id}/source-diff`);
 export const syncMaterialSource = (id:number,options:{prices:boolean;stock:boolean;images:boolean;add_new:boolean;disable_removed:boolean}) => post(`/materials/${id}/sync-source`,options);

@@ -194,6 +194,16 @@ func (s *Server) previewItemPublishBatch(w http.ResponseWriter, r *http.Request)
 		ChannelCatID: strings.TrimSpace(r.FormValue("fallback_channel_category_id")),
 		TBCatID:      strings.TrimSpace(r.FormValue("fallback_tb_category_id")),
 	}
+	locationJSON := strings.TrimSpace(r.FormValue("location"))
+	if locationJSON == "" {
+		locationJSON = "{}"
+	} else {
+		var location mtop.PublishLocation
+		if json.Unmarshal([]byte(locationJSON), &location) != nil {
+			writeErr(w, http.StatusBadRequest, "发货地格式错误，请重新定位")
+			return
+		}
+	}
 	hasDefaultCategory := fallbackCategory.CatID != "" || fallbackCategory.CatName != "" || fallbackCategory.ChannelCatID != "" || fallbackCategory.TBCatID != ""
 	if hasDefaultCategory && (fallbackCategory.CatID == "" || fallbackCategory.CatName == "" || fallbackCategory.ChannelCatID == "") {
 		writeErr(w, http.StatusBadRequest, "默认类目信息不完整，请重新通过关键词获取")
@@ -331,6 +341,7 @@ func (s *Server) previewItemPublishBatch(w http.ResponseWriter, r *http.Request)
 		DefaultCookieID: defaultCookieID,
 		Filename:        sourceName,
 		UploadDir:       uploadDir,
+		LocationJSON:    locationJSON,
 		Status:          "preview",
 	}, rows); err != nil {
 		writeErr(w, http.StatusInternalServerError, "保存预检结果失败")
@@ -854,6 +865,18 @@ func (s *Server) publishBatchRow(ctx context.Context, userID int64, client mtop.
 	if err != nil {
 		return errors.New("批量任务不存在")
 	}
+	var location mtop.PublishLocation
+	locationJSON := strings.TrimSpace(batch.LocationJSON)
+	if locationJSON == "" {
+		locationJSON = "{}"
+	}
+	if err := json.Unmarshal([]byte(locationJSON), &location); err != nil {
+		return errors.New("批量任务发货地配置损坏，请重新创建任务")
+	}
+	var selectedLocation *mtop.PublishLocation
+	if strings.TrimSpace(location.DivisionID) != "" {
+		selectedLocation = &location
+	}
 	cookieValue, err := s.cookieValueForUser(ctx, userID, row.CookieID)
 	if err != nil {
 		return err
@@ -918,7 +941,8 @@ func (s *Server) publishBatchRow(ctx context.Context, userID int64, client mtop.
 				Quantity:           row.Quantity,
 				PostageMode:        row.PostageMode,
 				PostageCents:       postageCents,
-				Virtual:            true,
+				Virtual:            selectedLocation == nil,
+				Location:           selectedLocation,
 				PreferredCategory:  preferredCategory,
 				Images:             images,
 			})
@@ -1308,6 +1332,10 @@ func (s *Server) validatePublishAutomation(ctx context.Context, userID int64, cf
 }
 
 func publishBatchToMap(batch *db.ItemPublishBatch, rows []db.ItemPublishBatchRow) map[string]any {
+	locationJSON := strings.TrimSpace(batch.LocationJSON)
+	if locationJSON == "" {
+		locationJSON = "{}"
+	}
 	outRows := make([]map[string]any, 0, len(rows))
 	pending := 0
 	running := 0
@@ -1342,7 +1370,7 @@ func publishBatchToMap(batch *db.ItemPublishBatch, rows []db.ItemPublishBatchRow
 	return map[string]any{
 		"id": batch.ID, "status": batch.Status, "filename": batch.Filename,
 		"total": batch.TotalCount, "success": batch.SuccessCount, "failed": batch.FailedCount,
-		"pending": pending, "running": running, "retryable": retryable, "rows": outRows,
+		"pending": pending, "running": running, "retryable": retryable, "rows": outRows, "location": json.RawMessage(locationJSON),
 		"created_at": batch.CreatedAt, "updated_at": batch.UpdatedAt,
 	}
 }

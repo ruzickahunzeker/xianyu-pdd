@@ -229,7 +229,7 @@ func TestPublishItemNoImages(t *testing.T) {
 }
 
 // TestPublishItemSuccess mtop PublishItem 成功路径。
-// 由于 PublishItem 内部串行调用上传图片/类目/定位/发布多个端点，mock 按 URL 分发。
+// 由于 PublishItem 内部串行调用上传图片、类目和发布多个端点，mock 按 URL 分发。
 func TestPublishItemSuccess(t *testing.T) {
 	srv, _, cleanup := newTestServer(t)
 	defer cleanup()
@@ -241,8 +241,6 @@ func TestPublishItemSuccess(t *testing.T) {
 		switch {
 		case strings.Contains(u, "stream-upload.goofish.com"):
 			respBody = `{"object":{"url":"https://img.alicdn.com/published.png","pix":"800_800"}}`
-		case strings.Contains(u, "mtop.taobao.idle.local.poi.get"):
-			respBody = `{"ret":["SUCCESS::调用成功"],"data":{"commonAddresses":[{"address":"北京"}]}}`
 		case strings.Contains(u, "mtop.taobao.idle.kgraph.property.recommend"):
 			respBody = `{"ret":["SUCCESS::调用成功"],"data":{"categoryPredictResult":{"catId":"99","catName":"数码"}}}`
 		case strings.Contains(u, "mtop.idle.pc.idleitem.publish"):
@@ -277,6 +275,31 @@ func TestPublishItemSuccess(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &res)
 	if res["success"] != true || res["item_id"] != "pub-item-1" {
 		t.Fatalf("发布成功响应异常: %+v", res)
+	}
+}
+
+func TestPublishItemForwardsSelectedLocation(t *testing.T) {
+	srv, _, cleanup := newTestServer(t)
+	defer cleanup()
+	var captured mtop.PublishItemRequest
+	srv.MTop = &stubPublishMTop{publish: func(_ context.Context, _ string, req mtop.PublishItemRequest) (*mtop.PublishItemResult, error) {
+		captured = req
+		return &mtop.PublishItemResult{ItemID: "located-item", Title: req.Title}, nil
+	}}
+	h := srv.Router()
+	cookie := loginHelper(t, h)
+	location := `{"area":"福田区","city":"深圳市","division_id":"440304","longitude":114.085947,"latitude":22.547,"poi_id":"B0TEST","poi_name":"测试地点","province":"广东省"}`
+	body, contentType := buildPublishMultipart(t, map[string]string{"cookie_id": "acc1", "title": "实物商品", "price": "12.50", "quantity": "1", "location": location})
+	req := httptest.NewRequest(http.MethodPost, "/items/publish", body)
+	req.Header.Set("Content-Type", contentType)
+	req.AddCookie(cookie)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if captured.Virtual || captured.Location == nil || captured.Location.DivisionID != "440304" || captured.Location.POIID != "B0TEST" {
+		t.Fatalf("captured request=%+v location=%+v", captured, captured.Location)
 	}
 }
 

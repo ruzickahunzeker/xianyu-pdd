@@ -91,6 +91,15 @@ func (s *Server) publishItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var selectedLocation *mtop.PublishLocation
+	if rawLocation := strings.TrimSpace(r.FormValue("location")); rawLocation != "" {
+		var location mtop.PublishLocation
+		if err := json.Unmarshal([]byte(rawLocation), &location); err != nil {
+			writeErr(w, http.StatusBadRequest, "发货地数据格式错误，请重新定位")
+			return
+		}
+		selectedLocation = &location
+	}
 	var publishSKUs []mtop.PublishSKU
 	if raw := strings.TrimSpace(r.FormValue("skus")); raw != "" {
 		if err := json.Unmarshal([]byte(raw), &publishSKUs); err != nil {
@@ -143,7 +152,8 @@ func (s *Server) publishItem(w http.ResponseWriter, r *http.Request) {
 		Quantity:           quantity,
 		PostageMode:        postageMode,
 		PostageCents:       postageCents,
-		Virtual:            true,
+		Virtual:            selectedLocation == nil,
+		Location:           selectedLocation,
 		Images:             images,
 		SKUs:               publishSKUs,
 	})

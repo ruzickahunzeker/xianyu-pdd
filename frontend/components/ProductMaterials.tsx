@@ -1,9 +1,11 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Copy, ImagePlus, PackagePlus, Play, Plus, Save, Search, Send, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Copy, ImagePlus, LocateFixed, PackagePlus, Play, Plus, Save, Search, Send, Trash2, X } from 'lucide-react';
 import {
   deleteMaterial, getAccountDetails, getMaterials, getMaterialPublishRecords, getMaterialSourceDiff, MaterialPublishRecord, ProductMaterial, ProductMaterialSKU,
   getPDDProduct, getPDDReviewMedia, PDDReviewMedia, ProductMaterialVideo, publishMaterial, syncMaterialSource, updateMaterial, uploadMaterialImage,
 } from '../services/api';
+import type {PublishLocation} from '../services/api';
+import {getPublishLocations} from '../services/amapLocation';
 import type { AccountDetail } from '../types';
 
 type EditorMode = 'edit' | 'publish';
@@ -89,6 +91,9 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
   const [cookieID, setCookieID] = useState(accounts.find(account => account.enabled)?.id || '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [locationLoading, setLocationLoading] = useState(false);
+  const [publishLocations, setPublishLocations] = useState<PublishLocation[]>([]);
+  const [publishLocation, setPublishLocation] = useState<PublishLocation | null>(null);
 	const [priceAdjustment, setPriceAdjustment] = useState('');
   const [batchStock, setBatchStock] = useState('');
 	const [publishRecords, setPublishRecords] = useState<MaterialPublishRecord[]>([]);
@@ -337,11 +342,28 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 		image_property_name: draft.image_property_name || '',
 		video_enabled: draft.video_enabled !== false, videos: draft.videos || [],
       });
-      const result = await publishMaterial(draft.id, cookieID);
+      const result = await publishMaterial(draft.id, cookieID, publishLocation || undefined);
       alert(`商品发布成功${result?.item_id ? `，ID：${result.item_id}` : ''}`);
       await onSaved(); onClose();
     } catch (reason: any) { setError(reason?.message || '发布失败'); }
     finally { setBusy(false); }
+  };
+
+  const locateForPublish = () => {
+    if (!cookieID) return setError('请先选择发布账号');
+    if (!navigator.geolocation) return setError('当前浏览器不支持定位');
+    setLocationLoading(true); setError('');
+    navigator.geolocation.getCurrentPosition(async position => {
+      try {
+        const locations = await getPublishLocations(position.coords.longitude, position.coords.latitude);
+        if (!locations.length) throw new Error('当前位置附近没有可用的高德发货地，请稍后重试');
+        setPublishLocations(locations); setPublishLocation(locations[0]);
+      } catch (reason: any) { setError(reason?.message || '获取发货地失败'); }
+      finally { setLocationLoading(false); }
+    }, reason => {
+      setLocationLoading(false);
+      setError(reason.code === reason.PERMISSION_DENIED ? '定位权限被拒绝，请在浏览器设置中允许定位' : '无法获取当前位置，请稍后重试');
+    }, {enableHighAccuracy: true, timeout: 15_000, maximumAge: 60_000});
   };
 
   return <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-100">
@@ -373,7 +395,7 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
       <aside className="space-y-5">
         <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="mb-4 flex justify-between"><h3 className="font-black">商品图片</h3><span className="text-xs text-slate-400">{draft.images.length}/9</span></div><div className="grid grid-cols-3 gap-2">{draft.images.map((url, index) => <div className="group relative aspect-square" key={`${url}-${index}`}><img src={url} referrerPolicy="no-referrer" className="h-full w-full rounded-xl object-cover"/>{index === 0 && <span className="absolute bottom-1 left-1 rounded bg-brand px-1.5 py-0.5 text-[10px] text-white">主图</span>}<div className="absolute inset-x-1 top-1 hidden flex-wrap gap-1 group-hover:flex"><button className="rounded bg-brand px-1.5 py-1 text-[10px] text-white" onClick={()=>setDraft({...draft,images:[url,...draft.images.filter((_,row)=>row!==index)]})}>设为主图</button><button className="rounded bg-black/60 p-1 text-white" onClick={()=>setMediaPreview({type:'image',url})}>预览</button><button disabled={index === 0} className="rounded bg-black/60 p-1 text-white disabled:opacity-30" onClick={() => { const images = [...draft.images]; [images[index - 1], images[index]] = [images[index], images[index - 1]]; setDraft({ ...draft, images }); }}><ArrowUp className="h-3 w-3"/></button><button disabled={index === draft.images.length - 1} className="rounded bg-black/60 p-1 text-white disabled:opacity-30" onClick={() => { const images = [...draft.images]; [images[index + 1], images[index]] = [images[index], images[index + 1]]; setDraft({ ...draft, images }); }}><ArrowDown className="h-3 w-3"/></button><button className="rounded bg-red-500 p-1 text-white" onClick={() => setDraft({ ...draft, images: draft.images.filter((_, row) => row !== index) })}><Trash2 className="h-3 w-3"/></button></div></div>)}</div><div className="mt-3 flex flex-wrap gap-2">{productImageChoices.length>0&&<button className="rounded-lg border px-3 py-2 text-xs font-bold" onClick={()=>setMediaPicker({kind:'product-image',selected:new Set()})}>商品采集图 {productImageChoices.length}</button>}{reviewImageChoices.length>0&&<button className="rounded-lg border px-3 py-2 text-xs font-bold" onClick={()=>setMediaPicker({kind:'review-image',selected:new Set()})}>评论图片 {reviewImageChoices.length}</button>}{draft.images.length < 9 && <label className="cursor-pointer rounded-lg border px-3 py-2 text-xs font-bold">本地上传<input type="file" accept="image/*" multiple className="hidden" onChange={async event => { const files = Array.from(event.target.files || []).slice(0, 9 - draft.images.length); const urls = await Promise.all(files.map(async file => (await uploadMaterialImage(file)).url)); setDraft(current => ({ ...current, images: [...current.images, ...urls] })); }}/></label>}</div></section>
         <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><h3 className="font-black">视频</h3><label className="flex items-center gap-2 text-xs"><input type="checkbox" checked={draft.video_enabled!==false} onChange={e=>setDraft({...draft,video_enabled:e.target.checked})}/>发布视频（默认开启）</label></div><div className="mt-3 grid grid-cols-2 gap-2">{(draft.videos||[]).map((video,index)=><div key={`${video.url}-${index}`} className="relative overflow-hidden rounded-xl border bg-black"><video src={video.url} poster={video.cover_url} controls preload="metadata" className="aspect-video w-full"/><button className="absolute right-1 top-1 rounded bg-red-500 p-1 text-white" onClick={()=>setDraft({...draft,videos:draft.videos.filter((_,row)=>row!==index)})}><Trash2 className="h-3 w-3"/></button></div>)}</div>{reviewVideoChoices.length>0&&<button className="mt-3 rounded-lg border px-3 py-2 text-xs font-bold" onClick={()=>setMediaPicker({kind:'review-video',selected:new Set()})}><Play className="mr-1 inline h-3 w-3"/>评论视频 {reviewVideoChoices.length}</button>}<p className="mt-2 text-xs text-amber-600">视频可保存多个；当前闲鱼发布协议尚未接入，启用且已选视频时会阻止发布并明确提示。</p></section>
-        {mode === 'publish' && <section className="rounded-2xl border bg-white p-5 shadow-sm"><label className="text-sm font-bold">发布账号<select className="mt-2 w-full rounded-xl border p-3 font-normal" value={cookieID} onChange={event => setCookieID(event.target.value)}><option value="">请选择账号</option>{accounts.map(account => <option key={account.id} value={account.id}>{account.nickname || account.remark || account.id}{account.enabled ? '' : '（未启用）'}</option>)}</select></label></section>}
+        {mode === 'publish' && <section className="rounded-2xl border bg-white p-5 shadow-sm space-y-4"><label className="text-sm font-bold">发布账号<select className="mt-2 w-full rounded-xl border p-3 font-normal" value={cookieID} onChange={event => {setCookieID(event.target.value);setPublishLocations([]);setPublishLocation(null);}}><option value="">请选择账号</option>{accounts.map(account => <option key={account.id} value={account.id}>{account.nickname || account.remark || account.id}{account.enabled ? '' : '（未启用）'}</option>)}</select></label><div className="rounded-xl border border-sky-200 bg-sky-50 p-3"><div className="flex items-center justify-between gap-2"><div><h4 className="text-sm font-black">实物商品发货地</h4><p className="text-xs text-sky-700">定位后提交正确行政区；虚拟商品可留空。</p></div><button type="button" disabled={locationLoading||!cookieID} onClick={locateForPublish} className="flex shrink-0 items-center gap-1 rounded-lg bg-sky-600 px-3 py-2 text-xs font-bold text-white disabled:opacity-50"><LocateFixed className="h-4 w-4"/>{locationLoading?'定位中…':'获取当前位置'}</button></div>{publishLocations.length>0&&<select className="mt-3 w-full rounded-xl border bg-white p-3 text-sm" value={String(Math.max(0,publishLocations.indexOf(publishLocation!)))} onChange={event=>setPublishLocation(publishLocations[Number(event.target.value)]||null)}>{publishLocations.map((item,index)=><option key={`${item.division_id}-${item.poi_id}-${index}`} value={index}>{[item.province,item.city,item.area,item.poi_name].filter(Boolean).join(' ')}</option>)}</select>}</div></section>}
 		<section className="rounded-2xl border bg-white p-5 shadow-sm"><h3 className="font-black">发布记录</h3>{publishRecords.length===0?<p className="mt-2 text-xs text-slate-500">暂无发布记录</p>:<div className="mt-3 space-y-2">{publishRecords.slice(0,5).map(record=><div key={record.id} className="rounded-lg bg-slate-50 p-2 text-xs"><b>{record.status==='success'?'成功':'失败'}</b> · {record.cookie_id}<br/>{record.published_item_id&&<>闲鱼商品：{record.published_item_id}<br/></>}{record.mapping_counts&&<>SKU 映射：成功 {record.mapping_counts.mapped||0} / 待处理 {record.mapping_counts.pending||0} / 未匹配 {record.mapping_counts.unmapped||0} / 冲突 {record.mapping_counts.ambiguous||0}<br/></>}{new Date(record.created_at*1000).toLocaleString()}</div>)}</div>}</section>
         {error && <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm font-bold text-red-600">{error}</div>}
         <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="space-y-3"><button disabled={busy} onClick={() => void save()} className="flex w-full items-center justify-center gap-2 rounded-xl border p-3 font-black disabled:opacity-50"><Save className="h-4 w-4"/>保存素材</button>{mode === 'publish' && <button disabled={busy} onClick={() => void publish()} className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand p-3 font-black text-white disabled:opacity-50"><Send className="h-4 w-4"/>{busy ? '正在发布…' : '保存并发布'}</button>}</div></section>
