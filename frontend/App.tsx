@@ -274,7 +274,7 @@ const App: React.FC = () => {
                 <YdisksBrandIcon sizeClass="w-24 h-24" logoClassName="w-full h-full text-white group-hover:scale-110 transition-transform" />
              </div>
              <h2 className="text-3xl font-extrabold text-gray-900 mb-2 tracking-tight">欢迎回来</h2>
-             <p className="text-gray-500 font-medium">Ydisks闲鱼助手 · 自动发货与管家系统</p>
+             <p className="text-gray-500 font-medium">闲鱼拼多多助手 · 自动发货与履约系统</p>
           </div>
           
           <form onSubmit={handleLogin} className="space-y-5">
@@ -319,7 +319,7 @@ const App: React.FC = () => {
           <div className="mt-8 pt-6 border-t border-gray-100">
              <div className="mt-6 text-center">
                  <span className="text-xs text-gray-400 font-medium tracking-widest uppercase">
-                    Ydisks闲鱼助手 v1.0
+                    闲鱼拼多多助手 v1.0
                  </span>
              </div>
           </div>

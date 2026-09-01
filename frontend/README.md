@@ -1,6 +1,6 @@
-# Ydisks闲鱼助手前端
+# 闲鱼拼多多助手前端
 
-React + Vite + TypeScript 单页应用，作为 Ydisks闲鱼助手 Go 后端的管理面板。
+React + Vite + TypeScript 单页应用，作为闲鱼拼多多助手 Go 后端的管理面板。
 
 ## 目录结构
 
@@ -19,7 +19,7 @@ frontend/
 ## 开发
 
 ```bash
-cd /Users/christ/Workspace/git/xianyu/Ydisks-Xianyu-Helper/frontend
+cd /path/to/xianyu-pdd/frontend
 npm install
 npm run dev      # http://localhost:3000，API 代理到 localhost:59188
 ```

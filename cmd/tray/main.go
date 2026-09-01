@@ -114,7 +114,7 @@ func configureTrayLogger() func() {
 func onReady() {
 	systray.SetTitle("")
 	systray.SetIcon(trayIconBytes(false))
-	systray.SetTooltip("Ydisks闲鱼助手服务")
+	systray.SetTooltip("闲鱼拼多多助手服务")
 
 	statusItem := systray.AddMenuItem("服务状态：检查中", "读取后台服务状态")
 	openItem := systray.AddMenuItem("打开管理页面", "在默认浏览器打开管理页面")
@@ -142,7 +142,7 @@ func onReady() {
 		for range logItem.ClickedCh {
 			if err := openLogDirectory(); err != nil {
 				statusItem.SetTitle("日志目录：打开失败")
-				systray.SetTooltip(fmt.Sprintf("Ydisks闲鱼助手：打开日志目录失败：%v", err))
+				systray.SetTooltip(fmt.Sprintf("闲鱼拼多多助手：打开日志目录失败：%v", err))
 			}
 		}
 	}()
@@ -187,15 +187,15 @@ func refreshStatusOnce(item *systray.MenuItem, client *http.Client) {
 	if err != nil {
 		systray.SetIcon(trayIconBytes(false))
 		item.SetTitle("服务状态：未运行")
-		systray.SetTooltip("Ydisks闲鱼助手：后台服务未运行")
+		systray.SetTooltip("闲鱼拼多多助手：后台服务未运行")
 	} else if status.Status == "ok" && status.Database == "ok" {
 		systray.SetIcon(trayIconBytes(true))
 		item.SetTitle("服务状态：运行正常")
-		systray.SetTooltip("Ydisks闲鱼助手：运行正常")
+		systray.SetTooltip("闲鱼拼多多助手：运行正常")
 	} else {
 		systray.SetIcon(trayIconBytes(false))
 		item.SetTitle("服务状态：异常")
-		systray.SetTooltip("Ydisks闲鱼助手：数据库或服务异常")
+		systray.SetTooltip("闲鱼拼多多助手：数据库或服务异常")
 	}
 }
 
@@ -212,36 +212,36 @@ func runServiceAction(statusItem *systray.MenuItem, actionName, transitionTitle,
 
 	systray.SetIcon(trayIconBytes(false))
 	statusItem.SetTitle("服务状态：" + transitionTitle)
-	systray.SetTooltip("Ydisks闲鱼助手：" + transitionTitle)
+	systray.SetTooltip("闲鱼拼多多助手：" + transitionTitle)
 	client := &http.Client{Timeout: 2 * time.Second}
 	if action == "start" {
 		if health, err := readHealth(client); err == nil && health.Status == "ok" && health.Database == "ok" {
 			statusItem.SetTitle("服务状态：运行正常")
 			systray.SetIcon(trayIconBytes(true))
-			systray.SetTooltip("Ydisks闲鱼助手：运行正常")
+			systray.SetTooltip("闲鱼拼多多助手：运行正常")
 			return
 		}
 	}
 	if err := serviceAction(action); err != nil {
 		log.Printf("服务操作失败: %s: %v", actionName, err)
 		statusItem.SetTitle("服务状态：操作失败")
-		systray.SetTooltip(fmt.Sprintf("Ydisks闲鱼助手：%s失败：%v", actionName, err))
+		systray.SetTooltip(fmt.Sprintf("闲鱼拼多多助手：%s失败：%v", actionName, err))
 		return
 	}
 	wantRunning := action != "stop"
 	if err := waitForService(client, wantRunning, 30*time.Second); err != nil {
 		log.Printf("服务操作状态确认失败: %s: %v", actionName, err)
 		statusItem.SetTitle("服务状态：操作失败")
-		systray.SetTooltip(fmt.Sprintf("Ydisks闲鱼助手：%s后状态确认失败：%v", actionName, err))
+		systray.SetTooltip(fmt.Sprintf("闲鱼拼多多助手：%s后状态确认失败：%v", actionName, err))
 		return
 	}
 	if wantRunning {
 		statusItem.SetTitle("服务状态：运行正常")
 		systray.SetIcon(trayIconBytes(true))
-		systray.SetTooltip("Ydisks闲鱼助手：运行正常")
+		systray.SetTooltip("闲鱼拼多多助手：运行正常")
 	} else {
 		statusItem.SetTitle("服务状态：未运行")
-		systray.SetTooltip("Ydisks闲鱼助手：后台服务已停止")
+		systray.SetTooltip("闲鱼拼多多助手：后台服务已停止")
 	}
 	log.Printf("服务操作完成: %s", actionName)
 }
@@ -258,22 +258,22 @@ func exitTray(statusItem *systray.MenuItem, actionItems ...*systray.MenuItem) {
 
 	systray.SetIcon(trayIconBytes(false))
 	statusItem.SetTitle("托盘状态：正在退出")
-	systray.SetTooltip("Ydisks闲鱼助手：正在停止后台服务")
+	systray.SetTooltip("闲鱼拼多多助手：正在停止后台服务")
 	if err := quitTray(); err != nil {
 		log.Printf("退出托盘停止服务失败: %v", err)
 		statusItem.SetTitle("托盘状态：退出失败")
-		systray.SetTooltip(fmt.Sprintf("Ydisks闲鱼助手：后台服务停止失败：%v", err))
+		systray.SetTooltip(fmt.Sprintf("闲鱼拼多多助手：后台服务停止失败：%v", err))
 		setMenuItemsDisabled(false, actionItems...)
 		return
 	}
 	if err := waitForService(&http.Client{Timeout: 2 * time.Second}, false, 30*time.Second); err != nil {
 		log.Printf("退出托盘等待服务停止失败: %v", err)
 		statusItem.SetTitle("托盘状态：退出失败")
-		systray.SetTooltip(fmt.Sprintf("Ydisks闲鱼助手：后台服务仍未退出：%v", err))
+		systray.SetTooltip(fmt.Sprintf("闲鱼拼多多助手：后台服务仍未退出：%v", err))
 		setMenuItemsDisabled(false, actionItems...)
 		return
 	}
-	systray.SetTooltip("Ydisks闲鱼助手：后台服务已退出")
+	systray.SetTooltip("闲鱼拼多多助手：后台服务已退出")
 	exitRequested.Store(true)
 	systray.Quit()
 }

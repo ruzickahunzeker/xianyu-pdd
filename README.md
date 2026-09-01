@@ -1,13 +1,17 @@
-# Ydisks闲鱼助手
+# 闲鱼拼多多助手
 
-![Ydisks闲鱼助手Slogan](https://raw.githubusercontent.com/Christ9038/Ydisks-Xianyu-Helper/main/docs/img/slogan.png)
+![闲鱼拼多多助手](docs/img/slogan.png)
 
 基于 Go 与 React 构建的闲鱼多账号管理、消息回复与自动发货系统
+
+> 为兼容已有安装和数据，`YdisksXianyuHelper`、`ydisks-xianyu-helper`、
+> `com.ydisks.xianyu-helper` 等内部服务标识、安装路径和数据目录暂不改名；它们仅作为
+> 历史兼容标识保留，不代表项目品牌或外部依赖。
 
 [![Go](https://img.shields.io/badge/Go-1.26-00ADD8?logo=go&logoColor=white)](go.mod)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](frontend/package.json)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](compose.yml)
-[![Docker Image](https://github.com/Christ9038/Ydisks-Xianyu-Helper/actions/workflows/docker-publish.yml/badge.svg?branch=main)](https://github.com/Christ9038/Ydisks-Xianyu-Helper/actions/workflows/docker-publish.yml)
+[![Docker Image](https://github.com/ruzickahunzeker/xianyu-pdd/actions/workflows/docker-publish.yml/badge.svg?branch=main)](https://github.com/ruzickahunzeker/xianyu-pdd/actions/workflows/docker-publish.yml)
 
 [功能特性](#功能特性) · [快速开始](#快速开始) · [配置说明](#配置说明) ·
 [Docker 部署](#docker-部署) · [开发指南](#开发指南) · [开源协议](#开源协议)
@@ -22,25 +26,13 @@
 
 ## 项目简介
 
-Ydisks闲鱼助手是一个面向闲鱼卖家的自托管管理系统。它将账号运行、即时消息、订单、
+闲鱼拼多多助手是一个面向闲鱼卖家的自托管管理系统。它将账号运行、即时消息、订单、
 商品、卡密库存、自动化规则、AI 回复和异常通知整合到同一个 Web 管理后台，适合需要
 同时维护多个闲鱼账号或交付虚拟商品的个人与小型团队。
 
 项目采用 Go 语言实现闲鱼登录、Cookie 续期、MTOP 请求和 WebSocket 消息链路。
 扫码登录、人脸验证流程、消息连接、凭证更新和绝大部分业务逻辑均由 Go 客户端完成。
 使用 Chromium 处理必须依赖浏览器环境的滑块风控。
-
-### 与 Ydisks 网盘拉新助手协同使用
-
-如果你通过网盘资料、教程包或数字资源做闲鱼推广，推荐搭配
-[Ydisks 网盘拉新助手](https://www.ydisks.com) 使用：先为不同商品、渠道或推广账号
-创建独立短链，再在 Ydisks 控制台查看短链与目标页面的 PV、UV、趋势、排行及渠道/账号报表。
-这样，Ydisks 负责识别“链接从哪里带来访问与转化线索”，Ydisks闲鱼助手负责承接账号消息、
-订单和自动发货，帮助你把投放复盘与日常交付放进一套更清晰的运营流程。
-
-Ydisks 支持管理渠道、推广账号、原始链接、推广短链与域名，适用于网盘拉新和推广投放场景；
-可从 [Ydisks 网盘拉新助手使用文档](https://docs.ydisks.com/guide/quick-start) 开始创建推广链接并查看数据。
-
 
 ### 适用场景
 
@@ -61,7 +53,7 @@ Ydisks 支持管理渠道、推广账号、原始链接、推广短链与域名�
 | 自动化中心 | 付款后自动发货、评价后赠品、超时未评价提醒、失败任务恢复与幂等检查点 |
 | 账号自动任务 | 账号级持续扫描待评价订单并统一好评、按北京时间每日擦亮、手动立即执行、执行记录与幂等保护 |
 | 卡密库存 | 文本、批量卡密和图片三种交付类型，库存追加、批量导入、规格与延迟发送 |
-| 商品管理 | 商品同步、手工关联、单商品发布、CSV + ZIP 批量铺货、关键词获取默认类目、逐行类目优先、自动识别与“电子资料”最终兜底、任务恢复与结果导出 |
+| 商品管理 | 商品同步、拼多多采集、素材库采购价/闲鱼售价分离、稳定 SKU 来源映射、手工关联、单商品发布、CSV + ZIP 批量铺货、关键词获取默认类目、逐行类目优先、自动识别与“电子资料”最终兜底、任务恢复与结果导出 |
 | 订单管理 | 订单同步、多规格 SKU 完整解析与履约映射、插入、编辑、平台发货、补发卡密、仅确认发货及异常状态处理 |
 | AI 回复 | OpenAI 兼容 API、模型发现、自定义提示词、议价轮次和让价范围控制 |
 | 数据看板 | 活跃账号、订单、营收、库存、商品销量与金额统计 |
@@ -98,12 +90,12 @@ flowchart LR
 
 ## 页面预览
 
-![Ydisks闲鱼助手预览](https://raw.githubusercontent.com/Christ9038/Ydisks-Xianyu-Helper/main/docs/img/preview_account.png)
+![闲鱼拼多多助手预览](docs/img/preview_account.png)
 
-![Ydisks闲鱼助手预览](https://raw.githubusercontent.com/Christ9038/Ydisks-Xianyu-Helper/main/docs/img/preview_im.png)
+![闲鱼拼多多助手预览](docs/img/preview_im.png)
 
 
-![Ydisks闲鱼助手预览](https://raw.githubusercontent.com/Christ9038/Ydisks-Xianyu-Helper/main/docs/img/preview_auto.png)
+![闲鱼拼多多助手预览](docs/img/preview_auto.png)
 
 
 ## 快速开始
@@ -116,8 +108,8 @@ Docker Desktop，并使用 Docker Compose v2。
 Docker 部署会使用容器内 Chromium 的原生 Linux 指纹执行官网静默续期；续期是否成功由闲鱼响应决定，不会因宿主系统是 Linux 而跳过。
 
 ```bash
-git clone https://github.com/Christ9038/Ydisks-Xianyu-Helper.git
-cd Ydisks-Xianyu-Helper
+git clone https://github.com/ruzickahunzeker/xianyu-pdd.git
+cd xianyu-pdd
 cp .env.example .env
 ```
 
@@ -165,8 +157,8 @@ docker compose up -d
 构建前端：
 
 ```bash
-git clone https://github.com/Christ9038/Ydisks-Xianyu-Helper.git
-cd Ydisks-Xianyu-Helper
+git clone https://github.com/ruzickahunzeker/xianyu-pdd.git
+cd xianyu-pdd
 npm --prefix frontend ci
 npm --prefix frontend run build
 ```
@@ -194,7 +186,7 @@ Playwright driver 与 Chromium runtime，安装后无需用户再下载浏览器
 | 平台 | 后台服务 | 托盘/菜单栏程序 | 数据与日志 |
 | --- | --- | --- | --- |
 | Windows | `YdisksXianyuHelper` Windows Service | 当前用户登录启动的 `xianyu-tray.exe` | `C:\ProgramData\YdisksXianyuHelper\data`、`C:\ProgramData\YdisksXianyuHelper\logs` |
-| macOS | `com.ydisks.xianyu-helper.server` LaunchAgent | `Ydisks闲鱼助手.app` 内的菜单栏程序 | `~/Library/Application Support/YdisksXianyuHelper`、`~/Library/Logs/YdisksXianyuHelper` |
+| macOS | `com.ydisks.xianyu-helper.server` LaunchAgent | 安装包内的菜单栏程序 | `~/Library/Application Support/YdisksXianyuHelper`、`~/Library/Logs/YdisksXianyuHelper` |
 | Linux | `ydisks-xianyu-helper.service` systemd unit | 无桌面托盘 | `/var/lib/ydisks-xianyu-helper`、`/var/log/ydisks-xianyu-helper` |
 
 Windows 和 macOS 托盘启动时会自动启动后台服务，并显示检查中、启动中、运行正常、正在停止
@@ -436,7 +428,7 @@ docker compose up -d
 | 服务 | 用途 |
 | --- | --- |
 | `postgres` | PostgreSQL 17 数据库，仅在 Compose 内部网络开放 5432 |
-| `app` | Ydisks闲鱼助手主服务、前端和 Chromium |
+| `app` | 闲鱼拼多多助手主服务、前端和 Chromium |
 
 `app` 会在首次启动时自动创建 `admin`；如果管理员已存在，后续 `up`、重启或升级均不会
 修改其密码。
@@ -455,8 +447,8 @@ docker compose up -d
 ### 完整部署步骤
 
 ```bash
-git clone https://github.com/Christ9038/Ydisks-Xianyu-Helper.git
-cd Ydisks-Xianyu-Helper
+git clone https://github.com/ruzickahunzeker/xianyu-pdd.git
+cd xianyu-pdd
 cp .env.example .env
 ```
 
@@ -703,7 +695,7 @@ go run ./cmd/server -init-admin -db data/xianyu_data.db -admin-password '新密�
 
 ## 开源协议
 
-本项目采用 [Apache License 2.0](LICENSE) 开源，版权所有 © 2026 Christ9038。
+本项目采用 [Apache License 2.0](LICENSE) 开源，由 xianyu-pdd 贡献者维护；原项目版权与署名按 LICENSE 和 NOTICE 保留。
 
 完整许可条款见 [LICENSE](LICENSE)，
 原项目名称、版权与署名声明见 [NOTICE](NOTICE)。分发原始或衍生作品时，请保留这两个

@@ -116,7 +116,7 @@ switch ($Mode) {
         } else {
             Invoke-ScChecked config $ServiceName 'binPath=' $binaryPath 'start=' 'delayed-auto'
         }
-        Invoke-ScChecked description $ServiceName 'Ydisks闲鱼助手后台服务'
+        Invoke-ScChecked description $ServiceName '闲鱼拼多多助手后台服务'
         Grant-InteractiveUserServiceControl
 
         Start-Service -Name $ServiceName -ErrorAction Stop

@@ -1,6 +1,6 @@
-#define AppName "Ydisks Xianyu Helper"
+#define AppName "闲鱼拼多多助手"
 #define AppVersion GetEnv("APP_VERSION")
-#define AppPublisher "Christ9038"
+#define AppPublisher "xianyu-pdd contributors"
 #define AppExeName "xianyu-server.exe"
 #define AppDataDir "{commonappdata}\YdisksXianyuHelper"
 

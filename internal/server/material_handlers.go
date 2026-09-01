@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,17 +24,40 @@ import (
 )
 
 type materialSKU struct {
-	MaterialSKUID    string             `json:"material_sku_id"`
-	SourceGoodsID    string             `json:"source_goods_id,omitempty"`
-	SourceSKUID      string             `json:"source_sku_id,omitempty"`
-	SourceProperties []materialProperty `json:"source_properties,omitempty"`
-	SourceImageURL   string             `json:"source_image_url,omitempty"`
-	PriceCents       int64              `json:"price_cent"`
-	Quantity         int64              `json:"quantity"`
-	Enabled          bool               `json:"enabled"`
-	Properties       []materialProperty `json:"properties"`
-	ImageURL         string             `json:"image_url,omitempty"`
+	MaterialSKUID          string             `json:"material_sku_id"`
+	SourceGoodsID          string             `json:"source_goods_id,omitempty"`
+	SourceSKUID            string             `json:"source_sku_id,omitempty"`
+	SourceProperties       []materialProperty `json:"source_properties,omitempty"`
+	SourceImageURL         string             `json:"source_image_url,omitempty"`
+	SourcePriceCents       int64              `json:"source_price_cent,omitempty"`
+	SourceNormalPriceCents int64              `json:"source_normal_price_cent,omitempty"`
+	SourcePriceUpdatedAt   int64              `json:"source_price_updated_at,omitempty"`
+	SourcePriceOrigin      string             `json:"source_price_origin,omitempty"`
+	PriceCents             int64              `json:"price_cent"`
+	Quantity               int64              `json:"quantity"`
+	Enabled                bool               `json:"enabled"`
+	Properties             []materialProperty `json:"properties"`
+	ImageURL               string             `json:"image_url,omitempty"`
 }
+
+func pddNormalPriceCent(raw string) int64 {
+	var prices map[string]any
+	if json.Unmarshal([]byte(raw), &prices) != nil {
+		return 0
+	}
+	var yuan float64
+	switch value := prices["normal_price"].(type) {
+	case float64:
+		yuan = value
+	case string:
+		_, _ = fmt.Sscan(value, &yuan)
+	}
+	if yuan <= 0 {
+		return 0
+	}
+	return int64(yuan*100 + .5)
+}
+
 type materialProperty struct {
 	Name     string `json:"name"`
 	Value    string `json:"value"`
@@ -625,6 +649,48 @@ func scanMaterial(row interface{ Scan(...any) error }) (map[string]any, error) {
 	return materialMap(id, userID, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos, postage, created, updated, videoEnabled), err
 }
 
+// backfillMaterialSourcePrices upgrades old JSON rows without treating the
+// current PDD price as the historical purchase price. The Xianyu sale price in
+// price_cent is never changed.
+func (s *Server) backfillMaterialSourcePrices(ctx context.Context, material map[string]any) bool {
+	if materialText(material["source_type"]) != "pdd" {
+		return false
+	}
+	var skus []materialSKU
+	raw, _ := json.Marshal(material["skus"])
+	if json.Unmarshal(raw, &skus) != nil {
+		return false
+	}
+	changed := false
+	for index := range skus {
+		if skus[index].SourceSKUID == "" || skus[index].SourcePriceCents > 0 {
+			continue
+		}
+		goodsID := skus[index].SourceGoodsID
+		if goodsID == "" {
+			goodsID = materialText(material["source_id"])
+		}
+		var pricesRaw string
+		var price, collectedAt int64
+		if s.Store.DB.QueryRowContext(ctx, `SELECT prices_json,price_cent,last_collected_at FROM pdd_skus WHERE goods_id=? AND sku_id=?`, goodsID, skus[index].SourceSKUID).Scan(&pricesRaw, &price, &collectedAt) != nil || price <= 0 {
+			continue
+		}
+		skus[index].SourceGoodsID = goodsID
+		skus[index].SourcePriceCents = price
+		skus[index].SourceNormalPriceCents = pddNormalPriceCent(pricesRaw)
+		skus[index].SourcePriceUpdatedAt = collectedAt
+		skus[index].SourcePriceOrigin = "backfilled_current"
+		changed = true
+	}
+	if !changed {
+		return false
+	}
+	encoded, _ := json.Marshal(skus)
+	material["skus"] = jsonValue(string(encoded), []any{})
+	_, _ = s.Store.DB.ExecContext(ctx, `UPDATE product_materials SET skus_json=? WHERE id=?`, string(encoded), jsonInt64(material["id"]))
+	return true
+}
+
 func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
 	query := `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE user_id=? AND deleted_at IS NULL`
@@ -650,6 +716,10 @@ func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, m)
 	}
+	_ = rows.Close()
+	for _, material := range out {
+		s.backfillMaterialSourcePrices(r.Context(), material)
+	}
 	writeJSON(w, 200, out)
 }
 func (s *Server) getMaterial(w http.ResponseWriter, r *http.Request) {
@@ -660,6 +730,7 @@ func (s *Server) getMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "素材不存在")
 		return
 	}
+	s.backfillMaterialSourcePrices(r.Context(), m)
 	writeJSON(w, 200, m)
 }
 func (s *Server) createMaterial(w http.ResponseWriter, r *http.Request) {
@@ -697,7 +768,7 @@ func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "采集商品不存在")
 		return
 	}
-	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,price_cent,stock,is_onsale FROM pdd_skus WHERE product_id=? ORDER BY id`, productID)
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,prices_json,price_cent,stock,is_onsale,last_collected_at FROM pdd_skus WHERE product_id=? ORDER BY id`, productID)
 	if err != nil {
 		writeErr(w, 500, "读取采集 SKU 失败")
 		return
@@ -705,17 +776,17 @@ func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	skus := []materialSKU{}
 	for rows.Next() {
-		var skuID, specRaw, thumb string
-		var price, stock int64
+		var skuID, specRaw, thumb, pricesRaw string
+		var price, stock, collectedAt int64
 		var enabled int
-		_ = rows.Scan(&skuID, &specRaw, &thumb, &price, &stock, &enabled)
+		_ = rows.Scan(&skuID, &specRaw, &thumb, &pricesRaw, &price, &stock, &enabled, &collectedAt)
 		var specs []pddSpecInput
 		_ = json.Unmarshal([]byte(specRaw), &specs)
 		props := []materialProperty{}
 		for _, p := range specs {
 			props = append(props, materialProperty{Name: p.SpecKey, Value: p.RawValue})
 		}
-		skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: append([]materialProperty(nil), props...), SourceImageURL: thumb, PriceCents: price, Quantity: stock, Enabled: enabled != 0, Properties: props, ImageURL: thumb})
+		skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: append([]materialProperty(nil), props...), SourceImageURL: thumb, SourcePriceCents: price, SourceNormalPriceCents: pddNormalPriceCent(pricesRaw), SourcePriceUpdatedAt: collectedAt, SourcePriceOrigin: "collected", PriceCents: price, Quantity: stock, Enabled: enabled != 0, Properties: props, ImageURL: thumb})
 	}
 	normalizeCollectedMaterialSpecifications(skus)
 	var imageList []string
@@ -866,6 +937,7 @@ func (s *Server) materialSourceDiff(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "拼多多来源素材不存在")
 		return
 	}
+	s.backfillMaterialSourcePrices(r.Context(), material)
 	current := map[string]map[string]any{}
 	for _, raw := range material["skus"].([]any) {
 		row, _ := raw.(map[string]any)
@@ -877,23 +949,23 @@ func (s *Server) materialSourceDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	added, changed, seen := []any{}, []any{}, map[string]bool{}
 	for _, goodsID := range materialSourceGoodsIDs(material) {
-		rows, queryErr := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,price_cent,stock,is_onsale FROM pdd_skus WHERE goods_id=? ORDER BY id`, goodsID)
+		rows, queryErr := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,prices_json,price_cent,stock,is_onsale,last_collected_at FROM pdd_skus WHERE goods_id=? ORDER BY id`, goodsID)
 		if queryErr != nil {
 			writeErr(w, 500, "读取来源 SKU 失败")
 			return
 		}
 		for rows.Next() {
-			var skuID, specs, image string
-			var price, stock int64
+			var skuID, specs, image, pricesRaw string
+			var price, stock, collectedAt int64
 			var onSale int
-			_ = rows.Scan(&skuID, &specs, &image, &price, &stock, &onSale)
+			_ = rows.Scan(&skuID, &specs, &image, &pricesRaw, &price, &stock, &onSale, &collectedAt)
 			key := materialSourceKey(goodsID, skuID)
 			seen[key] = true
 			old := current[key]
-			entry := map[string]any{"source_goods_id": goodsID, "source_sku_id": skuID, "source_properties": jsonValue(specs, []any{}), "source_image_url": image, "price_cent": price, "quantity": stock, "enabled": onSale != 0}
+			entry := map[string]any{"source_goods_id": goodsID, "source_sku_id": skuID, "source_properties": jsonValue(specs, []any{}), "source_image_url": image, "source_price_cent": price, "source_normal_price_cent": pddNormalPriceCent(pricesRaw), "source_price_updated_at": collectedAt, "quantity": stock, "enabled": onSale != 0}
 			if old == nil {
 				added = append(added, entry)
-			} else if jsonInt64(old["price_cent"]) != price || jsonInt64(old["quantity"]) != stock || fmt.Sprint(old["source_image_url"]) != image {
+			} else if jsonInt64(old["source_price_cent"]) != price || jsonInt64(old["source_normal_price_cent"]) != pddNormalPriceCent(pricesRaw) || jsonInt64(old["quantity"]) != stock || fmt.Sprint(old["source_image_url"]) != image {
 				changed = append(changed, entry)
 			}
 		}
@@ -929,6 +1001,7 @@ func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "拼多多来源素材不存在")
 		return
 	}
+	s.backfillMaterialSourcePrices(r.Context(), material)
 	var skus []materialSKU
 	raw, _ := json.Marshal(material["skus"])
 	_ = json.Unmarshal(raw, &skus)
@@ -941,16 +1014,16 @@ func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
 	}
 	seen := map[string]bool{}
 	for _, goodsID := range materialSourceGoodsIDs(material) {
-		rows, queryErr := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,price_cent,stock,is_onsale FROM pdd_skus WHERE goods_id=? ORDER BY id`, goodsID)
+		rows, queryErr := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,prices_json,price_cent,stock,is_onsale,last_collected_at FROM pdd_skus WHERE goods_id=? ORDER BY id`, goodsID)
 		if queryErr != nil {
 			writeErr(w, 500, "读取来源 SKU 失败")
 			return
 		}
 		for rows.Next() {
-			var skuID, specsRaw, image string
-			var price, stock int64
+			var skuID, specsRaw, image, pricesRaw string
+			var price, stock, collectedAt int64
 			var onSale int
-			_ = rows.Scan(&skuID, &specsRaw, &image, &price, &stock, &onSale)
+			_ = rows.Scan(&skuID, &specsRaw, &image, &pricesRaw, &price, &stock, &onSale, &collectedAt)
 			key := materialSourceKey(goodsID, skuID)
 			seen[key] = true
 			var specs []pddSpecInput
@@ -961,7 +1034,7 @@ func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
 			}
 			sku := bySource[key]
 			if sku == nil && input.AddNew {
-				skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: props, SourceImageURL: image, Properties: append([]materialProperty(nil), props...), PriceCents: price, Quantity: stock, Enabled: onSale != 0})
+				skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: props, SourceImageURL: image, SourcePriceCents: price, SourceNormalPriceCents: pddNormalPriceCent(pricesRaw), SourcePriceUpdatedAt: collectedAt, SourcePriceOrigin: "synced", Properties: append([]materialProperty(nil), props...), PriceCents: price, Quantity: stock, Enabled: onSale != 0})
 				continue
 			}
 			if sku == nil {
@@ -970,7 +1043,10 @@ func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
 			sku.SourceProperties = props
 			sku.SourceImageURL = image
 			if input.Prices {
-				sku.PriceCents = price
+				sku.SourcePriceCents = price
+				sku.SourceNormalPriceCents = pddNormalPriceCent(pricesRaw)
+				sku.SourcePriceUpdatedAt = collectedAt
+				sku.SourcePriceOrigin = "synced"
 			}
 			if input.Stock {
 				sku.Quantity = stock

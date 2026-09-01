@@ -39,7 +39,7 @@ const Sidebar: React.FC<SidebarProps> = ({
         <YdisksBrandIcon sizeClass="h-10 w-10" />
         {!collapsed && (
           <div className="min-w-0 leading-tight">
-            <div className="truncate text-base font-black tracking-tight text-slate-950">Ydisks 闲鱼助手</div>
+            <div className="truncate text-base font-black tracking-tight text-slate-950">闲鱼拼多多助手</div>
             <div className="mt-1 text-[10px] font-extrabold uppercase tracking-[0.22em] text-sky-600">Operations</div>
           </div>
         )}

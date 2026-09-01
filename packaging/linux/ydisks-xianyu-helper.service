@@ -1,5 +1,5 @@
 [Unit]
-Description=Ydisks Xianyu Helper
+Description=闲鱼拼多多助手
 After=network-online.target
 Wants=network-online.target
 
