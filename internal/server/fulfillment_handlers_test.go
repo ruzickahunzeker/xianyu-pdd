@@ -230,6 +230,15 @@ func TestFulfillmentPropertiesMatch(t *testing.T) {
 	if fulfillmentPropertiesMatch(properties, "", "") {
 		t.Fatal("empty order specification must not guess a mapping")
 	}
+	if !fulfillmentPropertiesMatch(properties, "款式 / 长度", "USB 转 Type-C / 1米") {
+		t.Fatal("all properties in a multi-spec combination should match")
+	}
+	if fulfillmentPropertiesMatch(properties, "款式 / 长度", "USB 转 Type-C / 2米") {
+		t.Fatal("one mismatched property must reject the whole SKU combination")
+	}
+	if !fulfillmentPropertiesMatch([]materialProperty{{Name: "接口", Value: "USB/Type-C"}}, "接口", "USB/Type-C") {
+		t.Fatal("slash inside a property value must not be treated as a combination separator")
+	}
 }
 
 func TestFulfillmentHistoryRepairOnlyTouchesUntouchedTerminalOrders(t *testing.T) {

@@ -154,6 +154,23 @@ func fulfillmentPropertiesMatch(properties []materialProperty, specName, specVal
 	if value == "" {
 		return false
 	}
+	names, values := strings.Split(name, " / "), strings.Split(value, " / ")
+	if len(names) > 1 && len(names) == len(values) {
+		for index := range names {
+			if !fulfillmentPropertyMatch(properties, names[index], values[index]) {
+				return false
+			}
+		}
+		return true
+	}
+	return fulfillmentPropertyMatch(properties, name, value)
+}
+
+func fulfillmentPropertyMatch(properties []materialProperty, specName, specValue string) bool {
+	name, value := strings.TrimSpace(specName), strings.TrimSpace(specValue)
+	if value == "" {
+		return false
+	}
 	for _, property := range properties {
 		if strings.TrimSpace(property.Value) == value && (name == "" || strings.TrimSpace(property.Name) == name) {
 			return true

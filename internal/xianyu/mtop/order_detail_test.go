@@ -45,6 +45,22 @@ func TestFetchOrderDetailParsesCombinedSKUInfo(t *testing.T) {
 	}
 }
 
+func TestFetchOrderDetailPreservesAllCombinedSpecs(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"components":[{"render":"orderInfoVO","data":{"itemInfo":{"skuText":"款式：25*25cm【5条装】 / 重量:单条11g"}}}]}}`)
+	}))
+	defer server.Close()
+
+	client := &ClientImpl{HTTPClient: server.Client(), OrderDetailURL: server.URL + "/"}
+	res, err := client.FetchOrderDetail(context.Background(), consignCookies, "order-multi-spec")
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if res.SpecName != "款式 / 重量" || res.SpecValue != "25*25cm【5条装】 / 单条11g" {
+		t.Fatalf("res=%+v", res)
+	}
+}
+
 func TestFetchOrderDetailPrefersStructuredSpecOverSKUInfo(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"ret":["SUCCESS::调用成功"],"data":{"components":[{"render":"orderInfoVO","data":{"itemInfo":{"specName":"颜色","specValue":"红色","skuInfo":"款式:蓝色"}}}]}}`)
@@ -58,6 +74,33 @@ func TestFetchOrderDetailPrefersStructuredSpecOverSKUInfo(t *testing.T) {
 	}
 	if res.SpecName != "颜色" || res.SpecValue != "红色" {
 		t.Fatalf("res=%+v", res)
+	}
+}
+
+func TestOrderSpecFromItemInfoSupportsKnownShapes(t *testing.T) {
+	tests := []struct {
+		name      string
+		itemInfo  map[string]any
+		wantName  string
+		wantValue string
+	}{
+		{name: "snake case", itemInfo: map[string]any{"spec_name": "颜色", "spec_value": "红色"}, wantName: "颜色", wantValue: "红色"},
+		{name: "nested text", itemInfo: map[string]any{"skuInfo": map[string]any{"skuText": "套餐=标准版"}}, wantName: "套餐", wantValue: "标准版"},
+		{name: "property array", itemInfo: map[string]any{"properties": []any{
+			map[string]any{"name": "颜色", "value": "黑色"},
+			map[string]any{"name": "尺寸", "value": "L"},
+		}}, wantName: "颜色 / 尺寸", wantValue: "黑色 / L"},
+		{name: "slash in value", itemInfo: map[string]any{"skuText": "接口:USB/Type-C"}, wantName: "接口", wantValue: "USB/Type-C"},
+		{name: "value only", itemInfo: map[string]any{"skuText": "标准版"}, wantValue: "标准版"},
+		{name: "structured value only", itemInfo: map[string]any{"specValue": "单规格"}, wantValue: "单规格"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gotName, gotValue := orderSpecFromItemInfo(test.itemInfo)
+			if gotName != test.wantName || gotValue != test.wantValue {
+				t.Fatalf("got=(%q,%q) want=(%q,%q)", gotName, gotValue, test.wantName, test.wantValue)
+			}
+		})
 	}
 }
 

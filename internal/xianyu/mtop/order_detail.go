@@ -117,11 +117,7 @@ func (c *ClientImpl) fetchOrderDetailOnce(ctx context.Context, cookiesStr, order
 			if value := mtopString(itemInfo["buyAmount"]); value != "" {
 				result.Quantity = value
 			}
-			result.SpecName = mtopString(itemInfo["specName"])
-			result.SpecValue = mtopString(itemInfo["specValue"])
-			if result.SpecValue == "" {
-				result.SpecName, result.SpecValue = parseOrderSKUInfo(mtopString(itemInfo["skuInfo"]))
-			}
+			result.SpecName, result.SpecValue = orderSpecFromItemInfo(itemInfo)
 		}
 		if priceInfo, ok := componentData["priceInfo"].(map[string]any); ok {
 			if amount, ok := priceInfo["amount"].(map[string]any); ok {
@@ -132,24 +128,151 @@ func (c *ClientImpl) fetchOrderDetailOnce(ctx context.Context, cookiesStr, order
 	return result, decoded.Ret, updated, nil
 }
 
-// parseOrderSKUInfo 兼容新版订单详情把规格合并为 itemInfo.skuInfo 的结构。
-// 闲鱼当前返回形如“款式:红色”或“款式：红色”；没有名称时保留完整值，
-// 让单规格商品仍可按规格值完成映射。
-func parseOrderSKUInfo(raw string) (string, string) {
-	value := strings.TrimSpace(raw)
-	if value == "" {
+type orderSpecPair struct {
+	Name  string
+	Value string
+}
+
+// orderSpecFromItemInfo 兼容订单详情接口已知的规格字段形状。
+// 多规格使用稳定的“ / ”分隔名称和值，保留完整组合供后续 SKU 映射核对。
+func orderSpecFromItemInfo(itemInfo map[string]any) (string, string) {
+	pairs := collectOrderSpecPairs(itemInfo, 0)
+	if len(pairs) == 0 {
 		return "", ""
 	}
-	for _, separator := range []string{"：", ":"} {
-		if index := strings.Index(value, separator); index >= 0 {
-			name := strings.TrimSpace(value[:index])
-			specValue := strings.TrimSpace(value[index+len(separator):])
-			if specValue != "" {
-				return name, specValue
+	names := make([]string, 0, len(pairs))
+	values := make([]string, 0, len(pairs))
+	for _, pair := range pairs {
+		names = append(names, pair.Name)
+		values = append(values, pair.Value)
+	}
+	return strings.Join(names, " / "), strings.Join(values, " / ")
+}
+
+func collectOrderSpecPairs(itemInfo map[string]any, depth int) []orderSpecPair {
+	if itemInfo == nil || depth > 4 {
+		return nil
+	}
+	var valueOnly string
+	for _, fields := range [][2]string{
+		{"specName", "specValue"}, {"spec_name", "spec_value"},
+		{"skuName", "skuValue"}, {"sku_name", "sku_value"},
+		{"propName", "propValue"}, {"propertyName", "propertyValue"},
+		{"name", "value"},
+	} {
+		name := strings.TrimSpace(mtopString(itemInfo[fields[0]]))
+		value := strings.TrimSpace(mtopString(itemInfo[fields[1]]))
+		if name != "" && value != "" {
+			return []orderSpecPair{{Name: name, Value: value}}
+		}
+		if valueOnly == "" && value != "" {
+			valueOnly = value
+		}
+	}
+	for _, key := range []string{"skuText", "sku_text", "specText", "spec_text", "skuDesc", "skuDescText"} {
+		if pairs := splitOrderSpecText(mtopString(itemInfo[key])); len(pairs) > 0 {
+			return pairs
+		}
+	}
+	for _, key := range []string{"skuInfo", "sku_info", "specInfo", "spec_info", "sku", "properties", "props"} {
+		switch nested := itemInfo[key].(type) {
+		case string:
+			if pairs := splitOrderSpecText(nested); len(pairs) > 0 {
+				return pairs
+			}
+		case map[string]any:
+			if pairs := collectOrderSpecPairs(nested, depth+1); len(pairs) > 0 {
+				return pairs
+			}
+		case []any:
+			var pairs []orderSpecPair
+			for _, entry := range nested {
+				child, ok := entry.(map[string]any)
+				if !ok {
+					continue
+				}
+				pairs = appendUniqueOrderSpecPairs(pairs, collectOrderSpecPairs(child, depth+1)...)
+			}
+			if len(pairs) > 0 {
+				return pairs
 			}
 		}
 	}
-	return "", value
+	if valueOnly != "" {
+		return []orderSpecPair{{Value: valueOnly}}
+	}
+	return nil
+}
+
+func appendUniqueOrderSpecPairs(dst []orderSpecPair, values ...orderSpecPair) []orderSpecPair {
+	for _, value := range values {
+		if value.Value == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range dst {
+			if existing == value {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			dst = append(dst, value)
+		}
+	}
+	return dst
+}
+
+// splitOrderSpecText 解析单个或多个“规格名:规格值”文本。
+// 只有每个分段都能解析时才按斜杠分割，避免把“USB/Type-C”这类规格值误拆。
+func splitOrderSpecText(raw string) []orderSpecPair {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return nil
+	}
+	for _, delimiter := range []string{" / ", "；", ";", "\n"} {
+		segments := strings.Split(text, delimiter)
+		if len(segments) < 2 {
+			continue
+		}
+		pairs := make([]orderSpecPair, 0, len(segments))
+		for _, segment := range segments {
+			pair, ok := splitSingleOrderSpecText(segment)
+			if !ok {
+				pairs = nil
+				break
+			}
+			pairs = appendUniqueOrderSpecPairs(pairs, pair)
+		}
+		if len(pairs) > 0 {
+			return pairs
+		}
+	}
+	if pair, ok := splitSingleOrderSpecText(text); ok {
+		return []orderSpecPair{pair}
+	}
+	// 旧版接口偶尔只返回规格值；保留该值，后续可在值唯一时完成映射。
+	return []orderSpecPair{{Value: text}}
+}
+
+func splitSingleOrderSpecText(raw string) (orderSpecPair, bool) {
+	text := strings.TrimSpace(raw)
+	for _, separator := range []string{"：", ":", "="} {
+		index := strings.Index(text, separator)
+		if index <= 0 || index >= len(text)-len(separator) {
+			continue
+		}
+		pair := orderSpecPair{
+			Name:  strings.TrimSpace(text[:index]),
+			Value: strings.TrimSpace(text[index+len(separator):]),
+		}
+		return pair, pair.Name != "" && pair.Value != ""
+	}
+	fields := strings.Fields(text)
+	if len(fields) == 2 {
+		return orderSpecPair{Name: fields[0], Value: fields[1]}, true
+	}
+	return orderSpecPair{}, false
 }
 
 func buildOrderDetailQuery(t, sign string) string {
