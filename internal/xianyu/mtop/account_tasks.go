@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -16,7 +17,7 @@ import (
 const (
 	RateCreateAPI       = "https://h5api.m.goofish.com/h5/mtop.taobao.idle.rate.create/4.0/"
 	PendingRateListAPI  = "https://h5api.m.goofish.com/h5/mtop.taobao.idle.merchant.rate.list/1.0/"
-	PolishItemAPI       = "https://h5api.m.goofish.com/h5/mtop.taobao.idle.item.polish/1.0/"
+	PolishItemAPI       = "https://h5api.m.goofish.com/h5/mtop.taobao.idle.item.polish/2.0/"
 	PolishItemBackupAPI = "https://h5api.m.goofish.com/h5/mtop.idle.item.polish/1.0/"
 )
 
@@ -87,11 +88,15 @@ func (c *ClientImpl) RateBuyer(ctx context.Context, cookiesStr, tradeID, feedbac
 func (c *ClientImpl) PolishItem(ctx context.Context, cookiesStr, itemID string) (*AccountTaskResult, error) {
 	decoded, updated, err := c.accountTaskRequest(ctx, cookiesStr, firstNonEmptyURL(c.PolishItemURL, PolishItemAPI),
 		"mtop.taobao.idle.item.polish", "2.0", map[string]any{"itemId": itemID}, "https://www.goofish.com/")
+	c.logPolishOutcome("主接口", itemID, decoded, err)
 	if err == nil {
 		return &AccountTaskResult{Success: true, Message: firstRet(decoded.Ret), UpdatedCookies: updated}, nil
 	}
 	if duplicatePolishError(err) {
 		return &AccountTaskResult{Success: true, Message: "商品今天已经擦亮", UpdatedCookies: updated}, nil
+	}
+	if IsSessionExpiredErr(err) || IsRiskVerificationErr(err) {
+		return nil, err
 	}
 	primaryErr := err
 	if strings.TrimSpace(updated) == "" {
@@ -100,6 +105,7 @@ func (c *ClientImpl) PolishItem(ctx context.Context, cookiesStr, itemID string) 
 	decoded, backupUpdated, backupErr := c.accountTaskRequest(ctx, updated,
 		firstNonEmptyURL(c.PolishItemBackupURL, PolishItemBackupAPI), "mtop.idle.item.polish", "1.0",
 		map[string]any{"itemId": itemID}, "https://www.goofish.com/")
+	c.logPolishOutcome("备用接口", itemID, decoded, backupErr)
 	if backupErr == nil {
 		return &AccountTaskResult{Success: true, Message: firstRet(decoded.Ret), UpdatedCookies: backupUpdated}, nil
 	}
@@ -107,6 +113,25 @@ func (c *ClientImpl) PolishItem(ctx context.Context, cookiesStr, itemID string) 
 		return &AccountTaskResult{Success: true, Message: "商品今天已经擦亮", UpdatedCookies: backupUpdated}, nil
 	}
 	return nil, fmt.Errorf("擦亮主接口失败: %v；备用接口失败: %w", primaryErr, backupErr)
+}
+
+// logPolishOutcome 记录平台业务响应摘要，不记录 Cookie、签名或完整响应体。
+func (c *ClientImpl) logPolishOutcome(source, itemID string, decoded *accountTaskResponse, err error) {
+	logger := c.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if err != nil {
+		logger.Warn("商品擦亮调用失败", "source", source, "item_id", itemID, "err", err)
+		return
+	}
+	if decoded == nil {
+		logger.Warn("商品擦亮响应为空", "source", source, "item_id", itemID)
+		return
+	}
+	dataJSON, _ := json.Marshal(decoded.Data)
+	logger.Info("商品擦亮响应", "source", source, "item_id", itemID,
+		"ret", firstRet(decoded.Ret), "data", truncate(string(dataJSON), 300))
 }
 
 func duplicatePolishError(err error) bool {
@@ -140,6 +165,9 @@ func (c *ClientImpl) accountTaskRequest(ctx context.Context, cookiesStr, endpoin
 		}
 		if isRiskVerificationRet(decoded.Ret) {
 			return nil, updated, &RiskVerificationError{Ret: decoded.Ret}
+		}
+		if isSessionExpiredRet(decoded.Ret) {
+			return nil, updated, sessionExpiredError(api, decoded.Ret)
 		}
 		if !isTokenExpiredRet(decoded.Ret) {
 			return nil, updated, fmt.Errorf("%s 返回失败: %s", api, firstRet(decoded.Ret))
@@ -193,6 +221,11 @@ func (c *ClientImpl) accountTaskRequestOnce(ctx context.Context, cookiesStr, end
 		query.Set("spm_cnt", "a21ybx.im.0.0")
 		query.Set("spm_pre", "a21ybx.home.sidebar.2.4c053da6MpVe1m")
 		query.Set("log_id", "4c053da6MpVe1m")
+	}
+	if api == "mtop.taobao.idle.item.polish" || api == "mtop.idle.item.polish" {
+		query.Set("spm_cnt", "a21ybx.item.0.0")
+		query.Set("spm_pre", "a21ybx.personal.feeds.1.42f86ac21eZ9zd")
+		query.Set("log_id", "42f86ac21eZ9zd")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"?"+query.Encode(),
 		strings.NewReader("data="+url.QueryEscape(dataVal)))

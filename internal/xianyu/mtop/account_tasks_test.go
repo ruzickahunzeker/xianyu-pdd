@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +100,46 @@ func TestPolishItemFallsBackToAlternateAPI(t *testing.T) {
 	want := []string{"mtop.taobao.idle.item.polish", "mtop.idle.item.polish"}
 	if len(calls) != len(want) || calls[0] != want[0] || calls[1] != want[1] {
 		t.Fatalf("calls=%v want=%v", calls, want)
+	}
+}
+
+func TestPolishItemSendsItemPageSPMContext(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("api") != "mtop.taobao.idle.item.polish" || r.URL.Query().Get("v") != "2.0" {
+			t.Fatalf("api=%q version=%q", r.URL.Query().Get("api"), r.URL.Query().Get("v"))
+		}
+		if r.URL.Query().Get("spm_cnt") != "a21ybx.item.0.0" || r.URL.Query().Get("spm_pre") != "a21ybx.personal.feeds.1.42f86ac21eZ9zd" || r.URL.Query().Get("log_id") != "42f86ac21eZ9zd" {
+			t.Fatalf("擦亮来源上下文错误: %v", r.URL.Query())
+		}
+		_, _ = w.Write([]byte(`{"ret":["SUCCESS::调用成功"],"data":{}}`))
+	}))
+	defer server.Close()
+	client := &ClientImpl{HTTPClient: server.Client(), PolishItemURL: server.URL}
+	result, err := client.PolishItem(context.Background(), "unb=123; _m_h5_tk=token_1", "item-1")
+	if err != nil || result == nil || !result.Success {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestPolishItemDefaultEndpointUsesVersionTwoPath(t *testing.T) {
+	if !strings.HasSuffix(PolishItemAPI, "/mtop.taobao.idle.item.polish/2.0/") {
+		t.Fatalf("默认擦亮端点错误: %q", PolishItemAPI)
+	}
+}
+
+func TestPolishItemSessionExpiredDoesNotCallBackupOrTokenAPI(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		_, _ = w.Write([]byte(`{"ret":["FAIL_SYS_SESSION_EXPIRED::Session过期"],"data":{}}`))
+	}))
+	defer server.Close()
+	client := &ClientImpl{HTTPClient: server.Client(), PolishItemURL: server.URL, PolishItemBackupURL: server.URL, TokenURL: server.URL}
+	_, err := client.PolishItem(context.Background(), "unb=123; _m_h5_tk=token_1", "item-1")
+	if err == nil || !IsSessionExpiredErr(err) {
+		t.Fatalf("err=%v want session expired", err)
+	}
+	if calls != 1 {
+		t.Fatalf("会话失效必须立即停止，calls=%d", calls)
 	}
 }

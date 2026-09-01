@@ -169,6 +169,15 @@ func (c *Center) runAutoPolish(ctx context.Context, settings db.AccountTaskSetti
 	}
 	current := c.persistTaskCookies(ctx, settings.CookieID, cookies, items.UpdatedCookies)
 	summary.Found = len(items.Items)
+	if summary.Found == 0 {
+		const emptyMessage = "商品列表未发现在售商品，未执行擦亮，稍后将自动重试"
+		c.logger.Warn("每日擦亮未发现在售商品", "account", settings.CookieID)
+		if err := c.store.AccountTasks.FinishRun(ctx, runKey, "failed", 0, 0, emptyMessage, time.Now().UTC().Add(10*time.Minute).Unix()); err != nil {
+			return summary, err
+		}
+		summary.Message = emptyMessage
+		return summary, nil
+	}
 	var lastError string
 	for _, item := range items.Items {
 		result, polishErr := c.accountTasks.PolishItem(ctx, current, item.ID)
@@ -177,6 +186,9 @@ func (c *Center) runAutoPolish(ctx context.Context, settings db.AccountTaskSetti
 			lastError = errorString(polishErr)
 			if result != nil && result.Message != "" {
 				lastError = result.Message
+			}
+			if mtop.IsSessionExpiredErr(polishErr) || mtop.IsRiskVerificationErr(polishErr) {
+				break
 			}
 			continue
 		}

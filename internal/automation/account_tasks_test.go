@@ -154,3 +154,47 @@ func TestPolishDueHonorsConfiguredTimeAndDate(t *testing.T) {
 		t.Fatal("task must not run twice on the same Beijing date")
 	}
 }
+
+func TestAccountTaskPolishEmptyItemListDoesNotLockDay(t *testing.T) {
+	store, cleanup := newAutomationTestStore(t)
+	defer cleanup()
+	client := &fakeAccountTaskClient{}
+	center := New(store, testSenderProvider{sender: &testSender{}}, nil)
+	center.SetAccountTaskClient(client)
+	ctx := context.Background()
+	if err := store.AccountTasks.Upsert(ctx, db.AccountTaskSettings{CookieID: "cid", AutoPolishEnabled: true, RateContent: "交易愉快", PolishTime: "00:00"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := center.RunAccountTask(ctx, "cid", TaskAutoPolish)
+	if err != nil || first.Found != 0 || first.Success != 0 || first.Message == "" || client.polishCalls != 0 {
+		t.Fatalf("first=%+v calls=%d err=%v", first, client.polishCalls, err)
+	}
+	settings, err := store.AccountTasks.Get(ctx, "cid")
+	if err != nil || settings.LastPolishDate != "" {
+		t.Fatalf("空商品运行不能锁定当天: settings=%+v err=%v", settings, err)
+	}
+	client.items = []mtop.ItemListItem{{ID: "item-1"}}
+	second, err := center.RunAccountTask(ctx, "cid", TaskAutoPolish)
+	if err != nil || second.Success != 1 || client.polishCalls != 1 {
+		t.Fatalf("second=%+v calls=%d err=%v", second, client.polishCalls, err)
+	}
+}
+
+func TestAccountTaskPolishStopsRemainingItemsOnSessionExpiry(t *testing.T) {
+	store, cleanup := newAutomationTestStore(t)
+	defer cleanup()
+	client := &fakeAccountTaskClient{
+		items:     []mtop.ItemListItem{{ID: "item-1"}, {ID: "item-2"}},
+		polishErr: &mtop.SessionExpiredError{API: "mtop.taobao.idle.item.polish", Ret: []string{"FAIL_SYS_SESSION_EXPIRED"}},
+	}
+	center := New(store, testSenderProvider{sender: &testSender{}}, nil)
+	center.SetAccountTaskClient(client)
+	ctx := context.Background()
+	if err := store.AccountTasks.Upsert(ctx, db.AccountTaskSettings{CookieID: "cid", AutoPolishEnabled: true, RateContent: "交易愉快", PolishTime: "00:00"}); err != nil {
+		t.Fatal(err)
+	}
+	summary, err := center.RunAccountTask(ctx, "cid", TaskAutoPolish)
+	if err == nil || summary.Failed != 1 || client.polishCalls != 1 {
+		t.Fatalf("会话失效应立即停止剩余商品: summary=%+v calls=%d err=%v", summary, client.polishCalls, err)
+	}
+}

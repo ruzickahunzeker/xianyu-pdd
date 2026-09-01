@@ -264,8 +264,40 @@ func isRiskVerificationRet(ret []string) bool {
 	return false
 }
 
+// SessionExpiredError 表示 Cookie/Session 已彻底失效，不应再进入 Token 或备用接口重试。
+type SessionExpiredError struct {
+	API string
+	Ret []string
+}
+
+func (e *SessionExpiredError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("%s Session 过期: ret=%v", e.API, e.Ret)
+}
+
+func isSessionExpiredRet(ret []string) bool {
+	for _, value := range ret {
+		lower := strings.ToLower(value)
+		if strings.Contains(lower, "fail_sys_session_expired") || strings.Contains(lower, "session过期") ||
+			strings.Contains(lower, "session expired") || strings.Contains(lower, "会话过期") {
+			return true
+		}
+	}
+	return false
+}
+
+func sessionExpiredError(api string, ret []string) error {
+	return &SessionExpiredError{API: api, Ret: append([]string(nil), ret...)}
+}
+
 // IsSessionExpiredErr 判断错误是否表示 cookie/session 已彻底失效（需密码登录刷新）。
 func IsSessionExpiredErr(err error) bool {
+	var sessionErr *SessionExpiredError
+	if errors.As(err, &sessionErr) {
+		return true
+	}
 	if err == nil {
 		return false
 	}
