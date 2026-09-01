@@ -66,6 +66,7 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"order_fulfillments", "address_match_status"},
 		{"order_fulfillments", "history_repaired_at"},
 		{"order_fulfillments", "manual_modified_at"},
+		{"order_fulfillments", "publish_record_id"},
 		{"item_pdd_sku_mappings", "source_sku_id"},
 		{"fulfillment_api_keys", "token_hash"},
 		{"order_sync_runs", "trigger_type"},

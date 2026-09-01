@@ -26,6 +26,7 @@ import (
 
 type materialSKU struct {
 	MaterialSKUID          string             `json:"material_sku_id"`
+	SKUType                string             `json:"sku_type,omitempty"`
 	SourceGoodsID          string             `json:"source_goods_id,omitempty"`
 	SourceSKUID            string             `json:"source_sku_id,omitempty"`
 	SourceProperties       []materialProperty `json:"source_properties,omitempty"`
@@ -39,6 +40,107 @@ type materialSKU struct {
 	Enabled                bool               `json:"enabled"`
 	Properties             []materialProperty `json:"properties"`
 	ImageURL               string             `json:"image_url,omitempty"`
+}
+
+const (
+	materialSKUTypeSource      = "source"
+	materialSKUTypePlaceholder = "placeholder"
+	materialSKUTypeManual      = "manual"
+)
+
+func normalizeMaterialSKUIdentity(sourceType, primarySourceID string, sku *materialSKU) {
+	sku.MaterialSKUID = strings.TrimSpace(sku.MaterialSKUID)
+	sku.SourceGoodsID = strings.TrimSpace(sku.SourceGoodsID)
+	sku.SourceSKUID = strings.TrimSpace(sku.SourceSKUID)
+	sku.SKUType = strings.TrimSpace(sku.SKUType)
+	if sku.SourceGoodsID == "" && sku.SourceSKUID != "" {
+		sku.SourceGoodsID = primarySourceID
+	}
+	if sku.SKUType == "" {
+		switch {
+		case sku.SourceSKUID != "":
+			sku.SKUType = materialSKUTypeSource
+		case sourceType == "pdd" && sku.Quantity == 0:
+			sku.SKUType = materialSKUTypePlaceholder
+		default:
+			sku.SKUType = materialSKUTypeManual
+		}
+	}
+}
+
+func validateMaterialSKUIdentity(sourceType, primarySourceID string, sku *materialSKU) error {
+	normalizeMaterialSKUIdentity(sourceType, primarySourceID, sku)
+	switch sku.SKUType {
+	case materialSKUTypeSource:
+		if sku.SourceGoodsID == "" || sku.SourceSKUID == "" {
+			return errors.New("来源 SKU 缺少拼多多商品或 SKU 绑定")
+		}
+	case materialSKUTypePlaceholder:
+		if sku.SourceGoodsID != "" || sku.SourceSKUID != "" {
+			return errors.New("占位 SKU 不能绑定拼多多来源")
+		}
+		sku.Quantity = 0
+	case materialSKUTypeManual:
+		if sku.SourceGoodsID != "" || sku.SourceSKUID != "" {
+			return errors.New("手工 SKU 不能携带拼多多来源绑定")
+		}
+	default:
+		return fmt.Errorf("不支持的 SKU 类型: %s", sku.SKUType)
+	}
+	return nil
+}
+
+// protectMaterialSKUIdentities 使普通编辑只能更改发布属性，不能隐式更换或清空来源身份。
+func protectMaterialSKUIdentities(sourceType, primarySourceID string, oldSKUs, incoming []materialSKU) error {
+	oldByID := make(map[string]materialSKU, len(oldSKUs))
+	for index := range oldSKUs {
+		normalizeMaterialSKUIdentity(sourceType, primarySourceID, &oldSKUs[index])
+		if oldSKUs[index].MaterialSKUID != "" {
+			oldByID[oldSKUs[index].MaterialSKUID] = oldSKUs[index]
+		}
+	}
+	seen := make(map[string]bool, len(incoming))
+	for index := range incoming {
+		if strings.TrimSpace(incoming[index].MaterialSKUID) == "" {
+			incoming[index].MaterialSKUID = uuid.NewString()
+		}
+		id := incoming[index].MaterialSKUID
+		if seen[id] {
+			return fmt.Errorf("素材 SKU 稳定 ID 重复: %s", id)
+		}
+		seen[id] = true
+		if old, exists := oldByID[id]; exists {
+			incoming[index].SKUType = old.SKUType
+			incoming[index].SourceGoodsID = old.SourceGoodsID
+			incoming[index].SourceSKUID = old.SourceSKUID
+			incoming[index].SourceProperties = old.SourceProperties
+			incoming[index].SourceImageURL = old.SourceImageURL
+			incoming[index].SourcePriceCents = old.SourcePriceCents
+			incoming[index].SourceNormalPriceCents = old.SourceNormalPriceCents
+			incoming[index].SourcePriceUpdatedAt = old.SourcePriceUpdatedAt
+			incoming[index].SourcePriceOrigin = old.SourcePriceOrigin
+		}
+		if err := validateMaterialSKUIdentity(sourceType, primarySourceID, &incoming[index]); err != nil {
+			return fmt.Errorf("SKU %s: %w", id, err)
+		}
+	}
+	return validateDistinctMaterialSources(incoming)
+}
+
+func validateDistinctMaterialSources(skus []materialSKU) error {
+	seen := make(map[string]string, len(skus))
+	for index := range skus {
+		sku := &skus[index]
+		if sku.SKUType != materialSKUTypeSource {
+			continue
+		}
+		key := materialSourceKey(sku.SourceGoodsID, sku.SourceSKUID)
+		if previous, exists := seen[key]; exists {
+			return fmt.Errorf("拼多多来源 SKU 重复绑定: %s 与 %s", previous, sku.MaterialSKUID)
+		}
+		seen[key] = sku.MaterialSKUID
+	}
+	return nil
 }
 
 func pddNormalPriceCent(raw string) int64 {
@@ -133,6 +235,7 @@ func normalizeCollectedMaterialSpecifications(skus []materialSKU) {
 
 func (s *Server) mountMaterials(r chi.Router) {
 	r.Get("/materials", s.listMaterials)
+	r.Get("/materials/source-anomalies", s.listMaterialSourceAnomalies)
 	r.Post("/materials", s.createMaterial)
 	r.Post("/materials/from-pdd/{goodsID}", s.createMaterialFromPDD)
 	r.Get("/materials/{id}", s.getMaterial)
@@ -144,6 +247,158 @@ func (s *Server) mountMaterials(r chi.Router) {
 	r.Get("/materials/{id}/publish-records", s.listMaterialPublishRecords)
 	r.Get("/materials/{id}/source-diff", s.materialSourceDiff)
 	r.Post("/materials/{id}/sync-source", s.syncMaterialSource)
+	r.Put("/materials/{id}/skus/{skuID}/source", s.updateMaterialSKUSource)
+}
+
+type materialSKUSourceInput struct {
+	Action        string `json:"action"`
+	SourceGoodsID string `json:"source_goods_id"`
+	SourceSKUID   string `json:"source_sku_id"`
+}
+
+func (s *Server) updateMaterialSKUSource(w http.ResponseWriter, r *http.Request) {
+	uid := auth.SessionFromContext(r.Context()).UserID
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	stableID := strings.TrimSpace(chi.URLParam(r, "skuID"))
+	var input materialSKUSourceInput
+	if stableID == "" || decodeJSON(r, &input) != nil {
+		writeErr(w, 400, "SKU 来源操作无效")
+		return
+	}
+	var sourceType, primarySourceID, rawSKUs string
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT source_type,source_id,skus_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid).Scan(&sourceType, &primarySourceID, &rawSKUs); err != nil {
+		writeErr(w, 404, "素材不存在")
+		return
+	}
+	var skus []materialSKU
+	if json.Unmarshal([]byte(rawSKUs), &skus) != nil {
+		writeErr(w, 500, "素材 SKU 数据损坏")
+		return
+	}
+	index := -1
+	for row := range skus {
+		if skus[row].MaterialSKUID == stableID {
+			index = row
+			break
+		}
+	}
+	if index < 0 {
+		writeErr(w, 404, "素材 SKU 不存在")
+		return
+	}
+	sku := &skus[index]
+	switch strings.TrimSpace(input.Action) {
+	case "bind":
+		goodsID, sourceSKUID := strings.TrimSpace(input.SourceGoodsID), strings.TrimSpace(input.SourceSKUID)
+		if goodsID == "" || sourceSKUID == "" {
+			writeErr(w, 422, "绑定来源时必须选择拼多多商品和 SKU")
+			return
+		}
+		var specsRaw, image, pricesRaw string
+		var price, stock, collectedAt int64
+		var onSale int
+		if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT specs_json,thumb_url,prices_json,price_cent,stock,is_onsale,last_collected_at FROM pdd_skus WHERE goods_id=? AND sku_id=?`, goodsID, sourceSKUID).Scan(&specsRaw, &image, &pricesRaw, &price, &stock, &onSale, &collectedAt); err != nil {
+			writeErr(w, 422, "选择的拼多多 SKU 不存在")
+			return
+		}
+		var specs []pddSpecInput
+		_ = json.Unmarshal([]byte(specsRaw), &specs)
+		properties := make([]materialProperty, 0, len(specs))
+		for _, spec := range specs {
+			properties = append(properties, materialProperty{Name: spec.SpecKey, Value: spec.RawValue})
+		}
+		sku.SKUType, sku.SourceGoodsID, sku.SourceSKUID = materialSKUTypeSource, goodsID, sourceSKUID
+		sku.SourceProperties, sku.SourceImageURL = properties, image
+		sku.SourcePriceCents, sku.SourceNormalPriceCents = price, pddNormalPriceCent(pricesRaw)
+		sku.SourcePriceUpdatedAt, sku.SourcePriceOrigin = collectedAt, "bound"
+		if sku.Quantity == 0 && onSale != 0 {
+			sku.Quantity = stock
+		}
+	case "convert_manual":
+		clearMaterialSKUSource(sku)
+		sku.SKUType = materialSKUTypeManual
+	case "convert_placeholder":
+		clearMaterialSKUSource(sku)
+		sku.SKUType, sku.Quantity = materialSKUTypePlaceholder, 0
+	default:
+		writeErr(w, 400, "不支持的 SKU 来源操作")
+		return
+	}
+	if err := validateMaterialSKUIdentity(sourceType, primarySourceID, sku); err != nil {
+		writeErr(w, 422, err.Error())
+		return
+	}
+	if err := validateDistinctMaterialSources(skus); err != nil {
+		writeErr(w, 422, err.Error())
+		return
+	}
+	encoded, _ := json.Marshal(skus)
+	if _, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET skus_json=?,updated_at=? WHERE id=? AND user_id=?`, string(encoded), time.Now().Unix(), id, uid); err != nil {
+		writeErr(w, 500, "保存 SKU 来源失败")
+		return
+	}
+	writeJSON(w, 200, map[string]any{"success": true, "sku": sku})
+}
+
+func clearMaterialSKUSource(sku *materialSKU) {
+	sku.SourceGoodsID, sku.SourceSKUID, sku.SourceImageURL = "", "", ""
+	sku.SourceProperties = nil
+	sku.SourcePriceCents, sku.SourceNormalPriceCents, sku.SourcePriceUpdatedAt = 0, 0, 0
+	sku.SourcePriceOrigin = ""
+}
+
+func (s *Server) listMaterialSourceAnomalies(w http.ResponseWriter, r *http.Request) {
+	uid := auth.SessionFromContext(r.Context()).UserID
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT id,source_type,source_id,title,skus_json FROM product_materials WHERE user_id=? AND deleted_at IS NULL ORDER BY id`, uid)
+	if err != nil {
+		writeErr(w, 500, "查询 SKU 来源异常失败")
+		return
+	}
+	defer rows.Close()
+	result := []map[string]any{}
+	for rows.Next() {
+		var materialID int64
+		var sourceType, primarySourceID, title, rawSKUs string
+		if rows.Scan(&materialID, &sourceType, &primarySourceID, &title, &rawSKUs) != nil {
+			continue
+		}
+		var skus []materialSKU
+		if json.Unmarshal([]byte(rawSKUs), &skus) != nil {
+			result = append(result, map[string]any{"material_id": materialID, "title": title, "issue": "invalid_json"})
+			continue
+		}
+		seenIDs, seenSources := map[string]bool{}, map[string]bool{}
+		for index := range skus {
+			sku := &skus[index]
+			originalType := sku.SKUType
+			normalizeMaterialSKUIdentity(sourceType, primarySourceID, sku)
+			issue := ""
+			switch {
+			case sku.MaterialSKUID == "":
+				issue = "missing_material_sku_id"
+			case seenIDs[sku.MaterialSKUID]:
+				issue = "duplicate_material_sku_id"
+			case originalType == "" && sourceType == "pdd" && sku.SourceSKUID == "":
+				issue = "legacy_unclassified"
+			case sku.SKUType == materialSKUTypeSource && (sku.SourceGoodsID == "" || sku.SourceSKUID == ""):
+				issue = "source_binding_missing"
+			case sku.SKUType == materialSKUTypePlaceholder && sku.Quantity != 0:
+				issue = "placeholder_stock_nonzero"
+			}
+			seenIDs[sku.MaterialSKUID] = true
+			sourceKey := materialSourceKey(sku.SourceGoodsID, sku.SourceSKUID)
+			if issue == "" && sku.SKUType == materialSKUTypeSource && seenSources[sourceKey] {
+				issue = "duplicate_source_binding"
+			}
+			if sku.SKUType == materialSKUTypeSource {
+				seenSources[sourceKey] = true
+			}
+			if issue != "" {
+				result = append(result, map[string]any{"material_id": materialID, "title": title, "material_sku_id": sku.MaterialSKUID, "sku_type": sku.SKUType, "source_goods_id": sku.SourceGoodsID, "source_sku_id": sku.SourceSKUID, "issue": issue})
+			}
+		}
+	}
+	writeJSON(w, 200, map[string]any{"count": len(result), "items": result})
 }
 
 type publishMaterialInput struct {
@@ -152,7 +407,8 @@ type publishMaterialInput struct {
 }
 
 func normalizePublishedMaterialSKU(sourceType string, row map[string]any) {
-	if sourceType == "pdd" && strings.TrimSpace(fmt.Sprint(row["source_sku_id"])) == "" {
+	skuType := materialText(row["sku_type"])
+	if skuType == materialSKUTypePlaceholder || (skuType == "" && sourceType == "pdd" && materialText(row["source_sku_id"]) == "") {
 		row["quantity"] = int64(0)
 	}
 }
@@ -745,7 +1001,7 @@ func (s *Server) getMaterial(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) createMaterial(w http.ResponseWriter, r *http.Request) {
 	var in materialInput
-	if decodeJSON(r, &in) != nil || validateMaterial(&in) != nil {
+	if decodeJSON(r, &in) != nil || protectMaterialSKUIdentities("manual", "", nil, in.SKUs) != nil || validateMaterial(&in) != nil {
 		writeErr(w, 400, "素材数据无效")
 		return
 	}
@@ -796,7 +1052,7 @@ func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 		for _, p := range specs {
 			props = append(props, materialProperty{Name: p.SpecKey, Value: p.RawValue})
 		}
-		skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: append([]materialProperty(nil), props...), SourceImageURL: thumb, SourcePriceCents: price, SourceNormalPriceCents: pddNormalPriceCent(pricesRaw), SourcePriceUpdatedAt: collectedAt, SourcePriceOrigin: "collected", PriceCents: price, Quantity: stock, Enabled: enabled != 0, Properties: props, ImageURL: thumb})
+		skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SKUType: materialSKUTypeSource, SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: append([]materialProperty(nil), props...), SourceImageURL: thumb, SourcePriceCents: price, SourceNormalPriceCents: pddNormalPriceCent(pricesRaw), SourcePriceUpdatedAt: collectedAt, SourcePriceOrigin: "collected", PriceCents: price, Quantity: stock, Enabled: enabled != 0, Properties: props, ImageURL: thumb})
 	}
 	normalizeCollectedMaterialSpecifications(skus)
 	var imageList []string
@@ -828,6 +1084,10 @@ func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 	}
 	videoEnabled := true
 	in := materialInput{Title: title, Description: title, Images: cleanImages, Category: map[string]any{}, SKUs: skus, PostageMode: "free", VideoEnabled: &videoEnabled, Videos: videos}
+	if err := protectMaterialSKUIdentities("pdd", goodsID, nil, in.SKUs); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	if err := validateMaterial(&in); err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -842,12 +1102,19 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "请求格式错误")
 		return
 	}
-	var primarySourceID string
-	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT source_id FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid).Scan(&primarySourceID)
-	for index := range in.SKUs {
-		if in.SKUs[index].SourceGoodsID == "" && in.SKUs[index].SourceSKUID != "" {
-			in.SKUs[index].SourceGoodsID = primarySourceID
-		}
+	var sourceType, primarySourceID, oldSKUsJSON string
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT source_type,source_id,skus_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid).Scan(&sourceType, &primarySourceID, &oldSKUsJSON); err != nil {
+		writeErr(w, 404, "素材不存在")
+		return
+	}
+	var oldSKUs []materialSKU
+	if json.Unmarshal([]byte(oldSKUsJSON), &oldSKUs) != nil {
+		writeErr(w, 500, "素材 SKU 数据损坏")
+		return
+	}
+	if err := protectMaterialSKUIdentities(sourceType, primarySourceID, oldSKUs, in.SKUs); err != nil {
+		writeErr(w, 422, err.Error())
+		return
 	}
 	if err := validateMaterial(&in); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1044,7 +1311,7 @@ func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
 			}
 			sku := bySource[key]
 			if sku == nil && input.AddNew {
-				skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: props, SourceImageURL: image, SourcePriceCents: price, SourceNormalPriceCents: pddNormalPriceCent(pricesRaw), SourcePriceUpdatedAt: collectedAt, SourcePriceOrigin: "synced", Properties: append([]materialProperty(nil), props...), PriceCents: price, Quantity: stock, Enabled: onSale != 0})
+				skus = append(skus, materialSKU{MaterialSKUID: uuid.NewString(), SKUType: materialSKUTypeSource, SourceGoodsID: goodsID, SourceSKUID: skuID, SourceProperties: props, SourceImageURL: image, SourcePriceCents: price, SourceNormalPriceCents: pddNormalPriceCent(pricesRaw), SourcePriceUpdatedAt: collectedAt, SourcePriceOrigin: "synced", Properties: append([]materialProperty(nil), props...), PriceCents: price, Quantity: stock, Enabled: onSale != 0})
 				continue
 			}
 			if sku == nil {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"xianyu-go/internal/db"
 	"xianyu-go/internal/pddaddress"
 )
 
@@ -16,6 +17,61 @@ type fakePDDAddressUpdater struct {
 	calls  int
 	result pddaddress.UpdateResult
 	err    error
+}
+
+func TestResolveFulfillmentSKUIsolatesPublishAccountAndFreezesOrderedSnapshot(t *testing.T) {
+	server, store, cleanup := newTestServer(t)
+	defer cleanup()
+	admin, err := store.Users.GetByUsername(t.Context(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialResult, err := store.DB.Exec(`INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,status,created_at,updated_at) VALUES(?,'pdd','goods-root','素材','','[]','{}','[]','draft',1,1)`, admin.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialID, _ := materialResult.LastInsertId()
+	insertPublish := func(requestID, cookieID, itemID, materialSKU, sourceSKU string) int64 {
+		result, insertErr := store.DB.Exec(`INSERT INTO material_publish_records(request_id,material_id,user_id,source_type,source_id,cookie_id,published_item_id,status,sku_snapshot_json,created_at,finished_at) VALUES(?,?,?,'pdd','goods-root',?,?,'success','[]',1,1)`, requestID, materialID, admin.ID, cookieID, itemID)
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		recordID, _ := result.LastInsertId()
+		_, insertErr = store.DB.Exec(`INSERT INTO material_publish_sku_mappings(publish_record_id,material_sku_id,source_goods_id,source_sku_id,xianyu_sku_id,published_properties_json,published_price_cent,published_quantity,mapping_status) VALUES(?,?, 'goods-root',?, ?, '[{"name":"款式","value":"A"}]',100,1,'mapped')`, recordID, materialSKU, sourceSKU, "xy-"+sourceSKU)
+		if insertErr != nil {
+			t.Fatal(insertErr)
+		}
+		return recordID
+	}
+	recordA := insertPublish("request-a", "account-a", "item-a", "material-a", "source-a")
+	recordB := insertPublish("request-b", "account-b", "item-b", "material-b", "source-b")
+	for _, orderID := range []string{"order-a", "order-b"} {
+		if _, err = store.DB.Exec(`INSERT INTO order_fulfillments(order_id,user_id,created_at,updated_at) VALUES(?,?,1,1)`, orderID, admin.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/resolve", nil)
+	server.resolveFulfillmentSKU(req, db.Order{OrderID: "order-a", CookieID: "account-a", ItemID: "item-a", SpecName: "款式", SpecValue: "A"}, admin.ID)
+	server.resolveFulfillmentSKU(req, db.Order{OrderID: "order-b", CookieID: "account-b", ItemID: "item-b", SpecName: "款式", SpecValue: "A"}, admin.ID)
+	assertMapping := func(orderID string, wantRecord int64, wantSource string) {
+		var recordID int64
+		var sourceSKU, status string
+		if scanErr := store.DB.QueryRow(`SELECT publish_record_id,source_sku_id,mapping_status FROM order_fulfillments WHERE order_id=?`, orderID).Scan(&recordID, &sourceSKU, &status); scanErr != nil {
+			t.Fatal(scanErr)
+		}
+		if recordID != wantRecord || sourceSKU != wantSource || status != "mapped" {
+			t.Fatalf("order=%s record=%d source=%s status=%s", orderID, recordID, sourceSKU, status)
+		}
+	}
+	assertMapping("order-a", recordA, "source-a")
+	assertMapping("order-b", recordB, "source-b")
+
+	if _, err = store.DB.Exec(`UPDATE order_fulfillments SET pdd_ordered=1,pdd_order_id='pdd-order-a' WHERE order_id='order-a'`); err != nil {
+		t.Fatal(err)
+	}
+	_ = insertPublish("request-a-new", "account-a", "item-a", "material-a-new", "source-a-new")
+	server.resolveFulfillmentSKU(req, db.Order{OrderID: "order-a", CookieID: "account-a", ItemID: "item-a", SpecName: "款式", SpecValue: "A"}, admin.ID)
+	assertMapping("order-a", recordA, "source-a")
 }
 
 func (f *fakePDDAddressUpdater) Update(_ context.Context, _ pddaddress.UpdateRequest) (pddaddress.UpdateResult, error) {

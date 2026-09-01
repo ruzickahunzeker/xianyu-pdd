@@ -97,6 +97,57 @@ func TestNormalizePublishedMaterialSKUZerosUnmappedPDDCombination(t *testing.T) 
 	if got := jsonInt64(manual["quantity"]); got != 12 {
 		t.Fatalf("manual quantity=%d, want 12", got)
 	}
+
+	pddManual := map[string]any{"sku_type": "manual", "source_sku_id": "", "quantity": int64(12)}
+	normalizePublishedMaterialSKU("pdd", pddManual)
+	if got := jsonInt64(pddManual["quantity"]); got != 12 {
+		t.Fatalf("pdd manual quantity=%d, want 12", got)
+	}
+}
+
+func TestProtectMaterialSKUIdentitiesPreservesSourceBindingDuringRename(t *testing.T) {
+	old := []materialSKU{{MaterialSKUID: "stable-1", SKUType: materialSKUTypeSource, SourceGoodsID: "609274612506", SourceSKUID: "pdd-1", SourceProperties: []materialProperty{{Name: "原规格", Value: "A"}}, Quantity: 9, PriceCents: 100, Properties: []materialProperty{{Name: "款式", Value: "A"}}}}
+	incoming := []materialSKU{{MaterialSKUID: "stable-1", Quantity: 7, PriceCents: 200, Enabled: true, Properties: []materialProperty{{Name: "接口类型", Value: "BC车USB-C"}}}}
+	if err := protectMaterialSKUIdentities("pdd", "609274612506", old, incoming); err != nil {
+		t.Fatal(err)
+	}
+	got := incoming[0]
+	if got.MaterialSKUID != "stable-1" || got.SKUType != materialSKUTypeSource || got.SourceGoodsID != "609274612506" || got.SourceSKUID != "pdd-1" || got.Properties[0].Name != "接口类型" || got.PriceCents != 200 || got.Quantity != 7 {
+		t.Fatalf("protected sku=%+v", got)
+	}
+}
+
+func TestProtectMaterialSKUIdentitiesDistinguishesManualAndPlaceholder(t *testing.T) {
+	incoming := []materialSKU{
+		{MaterialSKUID: "manual", SKUType: materialSKUTypeManual, Quantity: 8, PriceCents: 100, Properties: []materialProperty{{Name: "规格", Value: "手工"}}},
+		{MaterialSKUID: "placeholder", SKUType: materialSKUTypePlaceholder, Quantity: 8, PriceCents: 100, Properties: []materialProperty{{Name: "规格", Value: "补位"}}},
+	}
+	if err := protectMaterialSKUIdentities("pdd", "609274612506", nil, incoming); err != nil {
+		t.Fatal(err)
+	}
+	if incoming[0].Quantity != 8 || incoming[1].Quantity != 0 {
+		t.Fatalf("manual=%d placeholder=%d", incoming[0].Quantity, incoming[1].Quantity)
+	}
+}
+
+func TestProtectMaterialSKUIdentitiesRejectsDuplicateStableID(t *testing.T) {
+	incoming := []materialSKU{
+		{MaterialSKUID: "duplicate", SKUType: materialSKUTypeManual, PriceCents: 100, Properties: []materialProperty{{Name: "规格", Value: "A"}}},
+		{MaterialSKUID: "duplicate", SKUType: materialSKUTypeManual, PriceCents: 100, Properties: []materialProperty{{Name: "规格", Value: "B"}}},
+	}
+	if err := protectMaterialSKUIdentities("pdd", "", nil, incoming); err == nil {
+		t.Fatal("duplicate material_sku_id must be rejected")
+	}
+}
+
+func TestProtectMaterialSKUIdentitiesRejectsDuplicateSourceBinding(t *testing.T) {
+	incoming := []materialSKU{
+		{MaterialSKUID: "stable-1", SKUType: materialSKUTypeSource, SourceGoodsID: "goods-1", SourceSKUID: "sku-1"},
+		{MaterialSKUID: "stable-2", SKUType: materialSKUTypeSource, SourceGoodsID: "goods-1", SourceSKUID: "sku-1"},
+	}
+	if err := protectMaterialSKUIdentities("pdd", "goods-1", nil, incoming); err == nil {
+		t.Fatal("expected duplicate source binding to be rejected")
+	}
 }
 
 func TestNormalizeCollectedMaterialSpecificationsHidesFixedDimension(t *testing.T) {

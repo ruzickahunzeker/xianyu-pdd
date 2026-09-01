@@ -19,10 +19,13 @@ describe('item PDD SKU mapping UI', () => {
     expect(collected).toContain('(?:pinduoduo|yangkeduo)');
   });
 
-  test('publishes generated PDD matrix placeholders with zero inventory', () => {
+  test('keeps stable SKU identity and marks generated PDD matrix rows as placeholders', () => {
     const materials = source('components/ProductMaterials.tsx');
-    expect(materials).toContain('quantity: 0, enabled: true, properties');
-    expect(materials).toContain("current.source_type === 'pdd' && !sku.source_sku_id");
+    expect(materials).toContain("sku_type: sourceType === 'pdd' ? 'placeholder' : 'manual'");
+    expect(materials).toContain("sku.sku_type === 'placeholder' ? { ...sku, quantity: 0 }");
+    expect(materials).not.toContain('sameShape ? previous[index]');
+    expect(materials).not.toContain('|| previous[index]');
+    expect(materials).toContain('updateMaterialSKUSource');
   });
 
   test('supports keyboard navigation and selection in collected media preview', () => {

@@ -3,6 +3,7 @@ import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Copy, ImagePlus, PackagePlus
 import {
   deleteMaterial, getAccountDetails, getMaterials, getMaterialPublishRecords, getMaterialSourceDiff, MaterialPublishRecord, ProductMaterial, ProductMaterialSKU,
   getPDDProduct, getPDDReviewMedia, PDDReviewMedia, ProductMaterialVideo, publishMaterial, syncMaterialSource, updateMaterial, uploadMaterialImage,
+	updateMaterialSKUSource,
 } from '../services/api';
 import type {PublishLocation} from '../services/api';
 import {PublishLocationPicker} from './PublishLocationPicker';
@@ -58,15 +59,14 @@ const deriveSpecifications = (skus: ProductMaterialSKU[]): Specification[] => {
   return result.slice(0, 2);
 };
 const skuKey = (properties: Array<{ name: string; value: string }>) => properties.map(item => `${item.name}=${item.value}`).join('\0');
-const generateSKUs = (specifications: Specification[], previous: ProductMaterialSKU[]): ProductMaterialSKU[] => {
+const generateSKUs = (specifications: Specification[], previous: ProductMaterialSKU[], sourceType: string): ProductMaterialSKU[] => {
   if (!specifications.length || specifications.some(item => !item.name.trim() || !item.values.length)) return previous;
   const combinations = specifications.reduce<Array<Array<{ name: string; value: string; image_url?: string }>>>((rows, specification) => rows.flatMap(row => specification.values.filter(item => item.value.trim()).map(item => [...row, { name: specification.name, value: item.value, image_url: specification.supportImage ? item.image_url : undefined }])), [[]]);
   const previousByKey = new Map(previous.map(item => [skuKey(item.properties), item]));
-  const sameShape = combinations.length === previous.length && previous.every(item => item.properties.length === specifications.length);
-  return combinations.slice(0, 200).map((properties, index) => {
+  return combinations.slice(0, 200).map(properties => {
     const projectedMatches = previous.filter(sku => properties.every(property => sku.properties.some(old => old.name === property.name && old.value === property.value)));
-    const matched = previousByKey.get(skuKey(properties)) || (projectedMatches.length === 1 ? projectedMatches[0] : undefined) || (sameShape ? previous[index] : undefined);
-    return matched ? { ...matched, properties } : { price_cent: previous[0]?.price_cent || 100, quantity: 0, enabled: true, properties };
+    const matched = previousByKey.get(skuKey(properties)) || (projectedMatches.length === 1 ? projectedMatches[0] : undefined);
+    return matched ? { ...matched, properties } : { sku_type: sourceType === 'pdd' ? 'placeholder' : 'manual', price_cent: previous[0]?.price_cent || 100, quantity: 0, enabled: true, properties };
   });
 };
 
@@ -85,7 +85,10 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 }) {
   const [draft, setDraft] = useState(() => {
 	const value = clone(initial);
-	if (value.source_type === 'pdd') value.skus = value.skus.map(sku => sku.source_sku_id ? sku : { ...sku, quantity: 0 });
+	value.skus = value.skus.map(sku => {
+		const sku_type = sku.sku_type || (sku.source_sku_id ? 'source' : value.source_type === 'pdd' && sku.quantity === 0 ? 'placeholder' : 'manual');
+		return sku_type === 'placeholder' ? { ...sku, sku_type, quantity: 0 } : { ...sku, sku_type };
+	});
 	return value;
   });
   const [cookieID, setCookieID] = useState(accounts.find(account => account.enabled)?.id || '');
@@ -168,7 +171,7 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 
   const applySpecifications = (next: Specification[]) => {
 	setDraft(current => {
-		if (sourceGoodsIDs.length <= 1) return { ...current, skus: generateSKUs(next, current.skus) };
+		if (sourceGoodsIDs.length <= 1) return { ...current, skus: generateSKUs(next, current.skus, current.source_type) };
 		const remapped = current.skus.flatMap(sku => {
 			const properties = next.map((nextSpec, specIndex) => {
 				const previousSpec = specifications[specIndex];
@@ -255,7 +258,7 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 	const setAllStock = () => {
 		const quantity = Number(batchStock);
 		if (!Number.isInteger(quantity) || quantity < 0) return setError('库存必须是大于等于 0 的整数');
-		setDraft(current => ({ ...current, skus: current.skus.map(sku => current.source_type === 'pdd' && !sku.source_sku_id ? { ...sku, quantity: 0 } : { ...sku, quantity }) }));
+		setDraft(current => ({ ...current, skus: current.skus.map(sku => sku.sku_type === 'placeholder' ? { ...sku, quantity: 0 } : { ...sku, quantity }) }));
 		setError('');
 	};
   const setPropertyImage = (name: string, value: string, imageURL: string) => {
@@ -271,7 +274,7 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 			const product = await getPDDProduct(goodsID);
 			const incoming: ProductMaterialSKU[] = product.skus.map(sku => {
 				const properties = sku.specs.map(spec => ({ name: spec.spec_key, value: spec.raw_value }));
-				return { source_goods_id: goodsID, source_sku_id: sku.sku_id, source_properties: clone(properties), source_image_url: sku.thumb_url, image_url: sku.thumb_url, source_price_cent: sku.price_cent, source_normal_price_cent: pddNormalPriceCent(sku.prices), source_price_updated_at: sku.last_collected_at, source_price_origin: 'collected' as const, price_cent: sku.price_cent, quantity: sku.stock, enabled: sku.is_onsale, properties };
+				return { sku_type: 'source' as const, source_goods_id: goodsID, source_sku_id: sku.sku_id, source_properties: clone(properties), source_image_url: sku.thumb_url, image_url: sku.thumb_url, source_price_cent: sku.price_cent, source_normal_price_cent: pddNormalPriceCent(sku.prices), source_price_updated_at: sku.last_collected_at, source_price_origin: 'collected' as const, price_cent: sku.price_cent, quantity: sku.stock, enabled: sku.is_onsale, properties };
 			});
 			if (!incoming.length) throw new Error('该采集商品没有可合并的 SKU');
 			const names = Array.from(new Set([...draft.skus, ...incoming].flatMap(sku => sku.properties.map(property => property.name))));
@@ -292,6 +295,23 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 		setDraft(current => ({ ...current, source_ids: sourceGoodsIDs.filter(id => id !== goodsID), skus: remaining }));
 		setSpecifications(deriveSpecifications(remaining));
 		setError('');
+	};
+	const changeSKUSource = async (index: number, action: 'bind'|'convert_manual'|'convert_placeholder') => {
+		const sku = draft.skus[index];
+		if (!sku.material_sku_id) return setError('请先保存素材，再修改 SKU 来源');
+		let source_goods_id = '', source_sku_id = '';
+		if (action === 'bind') {
+			source_goods_id = window.prompt('输入已采集的拼多多 goods_id', sku.source_goods_id || draft.source_id) || '';
+			if (!source_goods_id.trim()) return;
+			source_sku_id = window.prompt('输入对应的拼多多 sku_id', sku.source_sku_id || '') || '';
+			if (!source_sku_id.trim()) return;
+		} else if (!window.confirm(action === 'convert_manual' ? '确认解除拼多多来源并转为手工 SKU？' : '确认转为库存强制为 0 的占位 SKU？')) return;
+		setBusy(true); setError('');
+		try {
+			const result = await updateMaterialSKUSource(draft.id, sku.material_sku_id, {action, source_goods_id, source_sku_id});
+			setDraft(current => ({...current, skus: current.skus.map((row, rowIndex) => rowIndex === index ? result.sku : row)}));
+		} catch (reason: any) { setError(reason?.message || '修改 SKU 来源失败'); }
+		finally { setBusy(false); }
 	};
   const validate = () => {
     if (!draft.title.trim()) return '请填写商品标题';
@@ -367,8 +387,8 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
           <div className="overflow-x-auto"><table className="w-full min-w-[980px] text-sm"><thead><tr>{dimensions.map(name => <th className="p-2 text-left" key={name}>{name}</th>)}{draft.source_type === 'pdd' && <><th className="p-2 text-left">拼多多采购价</th><th className="p-2 text-left">拼多多原价</th></>}<th className="p-2 text-left">闲鱼售价（元）</th>{draft.source_type === 'pdd' && <th className="p-2 text-left">预计毛利</th>}<th className="p-2 text-left">库存</th><th>操作</th></tr></thead>
             <tbody>{draft.skus.map((sku, index) => <tr className="border-t" key={sku.material_sku_id || `${sku.source_goods_id}-${sku.source_sku_id}` || index}>{dimensions.map(name => { const property = sku.properties.find(item => item.name === name); return <td className="p-2" key={name}><input className="w-28 rounded-lg border p-2" value={property?.value || ''} onChange={event => patchSKU(index, { properties: sku.properties.map(item => item.name === name ? { ...item, value: event.target.value } : item) })}/></td>; })}{draft.source_type === 'pdd' && <><td className="p-2 font-medium">{sku.source_price_cent ? `¥${money(sku.source_price_cent)}` : '-'}</td><td className="p-2 text-slate-500">{sku.source_normal_price_cent ? `¥${money(sku.source_normal_price_cent)}` : '-'}</td></>}<td className="p-2"><PriceInput cents={sku.price_cent} onChange={price_cent => patchSKU(index, { price_cent })}/></td>{draft.source_type === 'pdd' && <td className={`p-2 font-medium ${(grossProfit(sku) ?? 0) < 0 ? 'text-red-600' : 'text-emerald-600'}`}>{grossProfit(sku) === null ? '-' : <>{grossProfit(sku)! >= 0 ? '+' : '-'}¥{money(Math.abs(grossProfit(sku)!))}<span className="ml-1 text-xs text-slate-400">({grossMargin(sku)!.toFixed(1)}%)</span></>}</td>}<td className="p-2"><input type="number" min="0" className="w-24 rounded-lg border p-2" value={sku.quantity} onChange={event => patchSKU(index, { quantity: Number(event.target.value) })}/></td><td className="p-2 text-center"><button disabled={draft.skus.length <= 1} title="删除 SKU" className="text-red-500 disabled:opacity-30" onClick={() => setDraft({ ...draft, skus: draft.skus.filter((_, row) => row !== index) })}><Trash2 className="h-4 w-4"/></button></td></tr>)}</tbody></table></div>
           <p className="mt-3 text-xs text-slate-500">拼多多价格只由采集来源同步；每个组合可单独设置闲鱼售价和库存。</p>
-          <button className="mt-4 flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-bold" onClick={() => { const properties = dimensions.map(name => ({ name, value: '' })); setDraft({ ...draft, skus: [...draft.skus, { price_cent: draft.skus[0]?.price_cent || 100, quantity: 1, enabled: true, properties }] }); }}><Plus className="h-4 w-4"/>添加 SKU</button>
-		  <details className="mt-4 rounded-xl border bg-slate-50 p-3"><summary className="cursor-pointer font-bold">SKU 来源映射</summary><div className="mt-3 overflow-x-auto"><table className="w-full min-w-[900px] text-xs"><thead><tr><th className="p-2 text-left">本地 SKU</th><th className="p-2 text-left">拼多多商品</th><th className="p-2 text-left">拼多多 SKU</th><th className="p-2 text-left">原始规格</th><th className="p-2 text-left">发布规格</th><th className="p-2 text-left">来源图片</th></tr></thead><tbody>{draft.skus.map((sku,index)=><tr className="border-t" key={sku.material_sku_id||`${sku.source_goods_id}-${sku.source_sku_id}`||index}><td className="p-2 font-mono">{sku.material_sku_id||'保存后生成'}</td><td className="p-2 font-mono">{sku.source_goods_id||(sku.source_sku_id?draft.source_id:'手工')}</td><td className="p-2 font-mono">{sku.source_sku_id||'手工'}</td><td className="p-2">{(sku.source_properties||[]).map(p=>`${p.name}=${p.value}`).join(' / ')||'-'}</td><td className="p-2">{sku.properties.map(p=>`${p.name}=${p.value}`).join(' / ')}</td><td className="p-2">{sku.source_image_url?<img src={sku.source_image_url} className="h-10 w-10 rounded object-cover"/>:'-'}</td></tr>)}</tbody></table></div></details>
+          <button className="mt-4 flex items-center gap-2 rounded-xl border px-4 py-2 text-sm font-bold" onClick={() => { const properties = dimensions.map(name => ({ name, value: '' })); setDraft({ ...draft, skus: [...draft.skus, { sku_type: 'manual', price_cent: draft.skus[0]?.price_cent || 100, quantity: 1, enabled: true, properties }] }); }}><Plus className="h-4 w-4"/>添加手工 SKU</button>
+		  <details className="mt-4 rounded-xl border bg-slate-50 p-3"><summary className="cursor-pointer font-bold">SKU 来源映射</summary><div className="mt-3 overflow-x-auto"><table className="w-full min-w-[1120px] text-xs"><thead><tr><th className="p-2 text-left">本地 SKU</th><th className="p-2 text-left">类型</th><th className="p-2 text-left">拼多多商品</th><th className="p-2 text-left">拼多多 SKU</th><th className="p-2 text-left">原始规格</th><th className="p-2 text-left">发布规格</th><th className="p-2 text-left">来源图片</th><th className="p-2 text-left">来源操作</th></tr></thead><tbody>{draft.skus.map((sku,index)=><tr className="border-t" key={sku.material_sku_id||`${sku.source_goods_id}-${sku.source_sku_id}`||index}><td className="p-2 font-mono">{sku.material_sku_id||'保存后生成'}</td><td className="p-2 font-bold">{sku.sku_type==='source'?'来源':sku.sku_type==='placeholder'?'占位':'手工'}</td><td className="p-2 font-mono">{sku.source_goods_id||(sku.source_sku_id?draft.source_id:'-')}</td><td className="p-2 font-mono">{sku.source_sku_id||'-'}</td><td className="p-2">{(sku.source_properties||[]).map(p=>`${p.name}=${p.value}`).join(' / ')||'-'}</td><td className="p-2">{sku.properties.map(p=>`${p.name}=${p.value}`).join(' / ')}</td><td className="p-2">{sku.source_image_url?<img src={sku.source_image_url} className="h-10 w-10 rounded object-cover"/>:'-'}</td><td className="p-2"><div className="flex flex-wrap gap-1"><button disabled={busy||!sku.material_sku_id} className="rounded border bg-white px-2 py-1 font-bold" onClick={()=>void changeSKUSource(index,'bind')}>绑定/更换</button><button disabled={busy||!sku.material_sku_id} className="rounded border bg-white px-2 py-1" onClick={()=>void changeSKUSource(index,'convert_manual')}>转手工</button><button disabled={busy||!sku.material_sku_id} className="rounded border bg-white px-2 py-1" onClick={()=>void changeSKUSource(index,'convert_placeholder')}>转占位</button></div></td></tr>)}</tbody></table></div></details>
         </section>
         <section className="rounded-2xl border bg-white p-5 shadow-sm"><h3 className="mb-4 font-black">发货设置</h3><div className="grid gap-4 sm:grid-cols-2"><label className="text-sm font-bold">运费方式<select className="mt-2 w-full rounded-xl border p-3 font-normal" value={draft.postage_mode} onChange={event => setDraft({ ...draft, postage_mode: event.target.value })}><option value="free">包邮</option><option value="fixed">固定邮费</option></select></label>{draft.postage_mode === 'fixed' && <label className="text-sm font-bold">邮费（元）<input type="number" min="0.01" step="0.01" className="mt-2 w-full rounded-xl border p-3 font-normal" value={money(draft.postage_cent)} onChange={event => setDraft({ ...draft, postage_cent: Math.round(Number(event.target.value) * 100) })}/></label>}</div></section>
 		{draft.source_type === 'pdd' && <section className="rounded-2xl border bg-white p-5 shadow-sm"><div className="flex items-center justify-between"><div><h3 className="font-black">采集来源更新</h3><p className="text-xs text-slate-500">检查并同步全部 {sourceGoodsIDs.length} 个来源商品；不会覆盖发布规格文字和闲鱼售价。</p></div><button className="rounded-lg border px-3 py-2 text-sm font-bold" onClick={async()=>setSourceDiff(await getMaterialSourceDiff(draft.id))}>检查差异</button></div>{sourceDiff&&<div className="mt-3 rounded-xl bg-slate-50 p-3 text-sm"><p>新增 {sourceDiff.added.length} · 变化 {sourceDiff.changed.length} · 下架 {sourceDiff.removed.length}</p><div className="mt-3 flex flex-wrap gap-2"><button className="rounded-lg bg-brand px-3 py-2 font-bold text-white" onClick={async()=>{await syncMaterialSource(draft.id,{prices:true,stock:true,images:true,add_new:true,disable_removed:true});await onSaved();setError('拼多多价格、库存、图片及新 SKU 已同步；闲鱼售价未改动，请关闭后重新打开素材查看');}}>同步来源价格、库存、图片及新 SKU</button><button className="rounded-lg border bg-white px-3 py-2 font-bold" onClick={async()=>{await syncMaterialSource(draft.id,{prices:false,stock:true,images:false,add_new:false,disable_removed:true});await onSaved();setError('全部来源库存与下架状态已同步，请关闭后重新打开素材查看');}}>仅同步库存/下架</button></div></div>}</section>}

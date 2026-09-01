@@ -101,7 +101,7 @@ func boolInt(value bool) int {
 
 func (s *Server) resolveFulfillmentSKU(r *http.Request, order db.Order, userID int64) {
 	type candidate struct {
-		materialID, id                                         int64
+		publishRecordID, materialID, id                        int64
 		materialSKU, goodsID, sourceSKU, xianyuSKU, properties string
 	}
 	candidates := []candidate{}
@@ -117,14 +117,14 @@ func (s *Server) resolveFulfillmentSKU(r *http.Request, order db.Order, userID i
 		_ = manualRows.Close()
 	}
 	if len(candidates) == 0 {
-		rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT p.material_id,m.id,m.material_sku_id,m.source_goods_id,m.source_sku_id,m.xianyu_sku_id,m.published_properties_json FROM material_publish_records p JOIN material_publish_sku_mappings m ON m.publish_record_id=p.id WHERE p.id=(SELECT MAX(latest.id) FROM material_publish_records latest WHERE latest.user_id=? AND latest.cookie_id=? AND latest.published_item_id=? AND latest.status='success') ORDER BY m.id`, userID, order.CookieID, order.ItemID)
+		rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT p.id,p.material_id,m.id,m.material_sku_id,m.source_goods_id,m.source_sku_id,m.xianyu_sku_id,m.published_properties_json FROM material_publish_records p JOIN material_publish_sku_mappings m ON m.publish_record_id=p.id WHERE p.id=(SELECT MAX(latest.id) FROM material_publish_records latest WHERE latest.user_id=? AND latest.cookie_id=? AND latest.published_item_id=? AND latest.status='success') ORDER BY m.id`, userID, order.CookieID, order.ItemID)
 		if err != nil {
 			return
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var row candidate
-			if rows.Scan(&row.materialID, &row.id, &row.materialSKU, &row.goodsID, &row.sourceSKU, &row.xianyuSKU, &row.properties) == nil {
+			if rows.Scan(&row.publishRecordID, &row.materialID, &row.id, &row.materialSKU, &row.goodsID, &row.sourceSKU, &row.xianyuSKU, &row.properties) == nil {
 				candidates = append(candidates, row)
 			}
 		}
@@ -146,7 +146,7 @@ func (s *Server) resolveFulfillmentSKU(r *http.Request, order db.Order, userID i
 	} else if len(candidates) == 0 {
 		status = "pending"
 	}
-	_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET material_id=?,material_sku_id=?,source_goods_id=?,source_sku_id=?,xianyu_sku_id=?,mapping_status=?,updated_at=? WHERE order_id=? AND user_id=?`, selected.materialID, selected.materialSKU, selected.goodsID, selected.sourceSKU, selected.xianyuSKU, status, time.Now().Unix(), order.OrderID, userID)
+	_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET publish_record_id=?,material_id=?,material_sku_id=?,source_goods_id=?,source_sku_id=?,xianyu_sku_id=?,mapping_status=?,updated_at=? WHERE order_id=? AND user_id=? AND pdd_ordered=0 AND pdd_order_id='' AND manual_modified_at=0`, selected.publishRecordID, selected.materialID, selected.materialSKU, selected.goodsID, selected.sourceSKU, selected.xianyuSKU, status, time.Now().Unix(), order.OrderID, userID)
 }
 
 func fulfillmentPropertiesMatch(properties []materialProperty, specName, specValue string) bool {
