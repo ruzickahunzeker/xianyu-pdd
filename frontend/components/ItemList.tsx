@@ -28,8 +28,8 @@ import {
   PDDProductDetail
 } from '../services/api';
 import type {PublishLocation} from '../services/api';
-import {getPublishLocations} from '../services/amapLocation';
-import { ArrowRight, Box, CheckCircle2, CircleDashed, Edit, Eye, Filter, Link2, LocateFixed, PackagePlus, Plus, RefreshCw, Save, Search, ShoppingBag, Trash2, UploadCloud, User, X } from 'lucide-react';
+import {PublishLocationPicker} from './PublishLocationPicker';
+import { ArrowRight, Box, CheckCircle2, CircleDashed, Edit, Eye, Filter, Link2, PackagePlus, Plus, RefreshCw, Save, Search, ShoppingBag, Trash2, UploadCloud, User, X } from 'lucide-react';
 
 interface ItemListProps {
   onConfigureDelivery: (item: Item) => void;
@@ -109,10 +109,7 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
   const [batchImagesZip, setBatchImagesZip] = useState<File | null>(null);
   const [batchCategoryKeyword, setBatchCategoryKeyword] = useState('');
   const [batchCategoryLoading, setBatchCategoryLoading] = useState(false);
-  const [locationLoading, setLocationLoading] = useState(false);
-  const [publishLocations, setPublishLocations] = useState<PublishLocation[]>([]);
   const [publishLocation, setPublishLocation] = useState<PublishLocation | null>(null);
-  const [batchLocations, setBatchLocations] = useState<PublishLocation[]>([]);
   const [batchLocation, setBatchLocation] = useState<PublishLocation | null>(null);
   const [batchFallbackCategory, setBatchFallbackCategory] = useState({
     catId: '',
@@ -406,7 +403,6 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
     setBatchImagesZip(null);
     setBatchCategoryKeyword('');
     setBatchFallbackCategory({ catId: '', catName: '', channelCatId: '', tbCatId: '' });
-    setBatchLocations([]);
     setBatchLocation(null);
     setShowBatchModal(true);
     setBatchLoading(true);
@@ -584,33 +580,8 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
 
   const openPublishModal = () => {
     setPublishForm(prev => ({ ...prev, cookie_id: selectedAccount || prev.cookie_id }));
-    setPublishLocations([]);
     setPublishLocation(null);
     setShowPublishModal(true);
-  };
-
-  const locateForPublish = (batch = false) => {
-    if (!(batch ? selectedAccount : publishForm.cookie_id)) return alert('请先选择发布账号');
-    if (!navigator.geolocation) return alert('当前浏览器不支持定位');
-    setLocationLoading(true);
-    navigator.geolocation.getCurrentPosition(async position => {
-      try {
-        const locations = await getPublishLocations(position.coords.longitude, position.coords.latitude);
-        if (!locations.length) throw new Error('当前位置附近没有可用的高德发货地，请稍后重试');
-        if (batch) {
-          setBatchLocations(locations); setBatchLocation(locations[0]);
-        } else {
-          setPublishLocations(locations); setPublishLocation(locations[0]);
-        }
-      } catch (error: any) {
-        alert(error?.message || '获取发货地失败');
-      } finally {
-        setLocationLoading(false);
-      }
-    }, error => {
-      setLocationLoading(false);
-      alert(error.code === error.PERMISSION_DENIED ? '定位权限被拒绝，请在浏览器设置中允许定位' : '无法获取当前位置，请稍后重试');
-    }, {enableHighAccuracy: true, timeout: 15_000, maximumAge: 60_000});
   };
 
   const rulesForItem = (item: Item) => shippingRules.filter(rule =>
@@ -994,17 +965,7 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
                   <input className="w-full ios-input px-4 py-3 rounded-xl" placeholder="例如 8.00" value={publishForm.postage} onChange={e => setPublishForm({...publishForm, postage: e.target.value})} />
                 </div>
               )}
-              <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4 space-y-3">
-                <div className="flex items-center justify-between gap-3">
-                  <div><div className="text-sm font-extrabold text-gray-900">实物商品发货地</div><p className="mt-1 text-xs text-sky-800">定位后选择附近地点，系统会提交正确的行政区和经纬度；虚拟商品可留空。</p></div>
-                  <button type="button" disabled={locationLoading || !publishForm.cookie_id} onClick={() => locateForPublish(false)} className="ios-btn-primary flex shrink-0 items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold disabled:opacity-50">
-                    <LocateFixed className="h-4 w-4" />{locationLoading ? '定位中...' : '获取当前位置'}
-                  </button>
-                </div>
-                {publishLocations.length > 0 && <select className="w-full ios-input rounded-xl bg-white px-4 py-3" value={String(Math.max(0, publishLocations.indexOf(publishLocation!)))} onChange={event => setPublishLocation(publishLocations[Number(event.target.value)] || null)}>
-                  {publishLocations.map((item, index) => <option key={`${item.division_id}-${item.poi_id}-${index}`} value={index}>{[item.province, item.city, item.area, item.poi_name].filter(Boolean).join(' ')}</option>)}
-                </select>}
-              </div>
+              <PublishLocationPicker accountID={publishForm.cookie_id} value={publishLocation} onChange={setPublishLocation}/>
               <div className="space-y-2">
                 <label className="block text-sm font-bold text-gray-700">商品图片（1-9 张）</label>
                 <label className="flex min-h-[120px] cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-center hover:border-emerald-300 hover:bg-emerald-50/50 transition-colors">
@@ -1151,10 +1112,7 @@ const ItemList: React.FC<ItemListProps> = ({ onConfigureDelivery }) => {
                     ) : null}
                   </div>
 
-                  <div className="rounded-xl border border-sky-200 bg-sky-50 p-4 space-y-3">
-                    <div className="flex items-center justify-between gap-3"><div><div className="text-sm font-extrabold text-gray-900">批次实物发货地</div><p className="mt-1 text-xs text-sky-800">选择后整批任务保存并复用同一行政区和 POI；虚拟商品可留空。</p></div><button type="button" disabled={locationLoading || !selectedAccount} onClick={() => locateForPublish(true)} className="ios-btn-primary flex shrink-0 items-center gap-2 rounded-xl px-4 py-2 text-sm font-bold disabled:opacity-50"><LocateFixed className="h-4 w-4"/>{locationLoading?'定位中...':'获取当前位置'}</button></div>
-                    {batchLocations.length>0&&<select className="w-full ios-input rounded-xl bg-white px-4 py-3" value={String(Math.max(0,batchLocations.indexOf(batchLocation!)))} onChange={event=>setBatchLocation(batchLocations[Number(event.target.value)]||null)}>{batchLocations.map((item,index)=><option key={`${item.division_id}-${item.poi_id}-${index}`} value={index}>{[item.province,item.city,item.area,item.poi_name].filter(Boolean).join(' ')}</option>)}</select>}
-                  </div>
+                  <PublishLocationPicker accountID={selectedAccount} value={batchLocation} onChange={setBatchLocation} title="批次实物发货地"/>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <label className="flex min-h-[150px] cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-center hover:border-blue-300 hover:bg-blue-50 transition-colors">

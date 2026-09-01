@@ -15,6 +15,7 @@ export interface AMapPOI {
 
 interface AMapAPI {
   PlaceSearch: new (options: {extensions: 'all'; pageSize: number}) => {
+    search(keyword: string, callback: (status: string, result: {poiList?: {pois?: AMapPOI[]}}) => void): void;
     searchNearBy(keyword: string, center: [number, number], radius: number,
       callback: (status: string, result: {poiList?: {pois?: AMapPOI[]}}) => void): void;
   };
@@ -67,6 +68,23 @@ const loadAMap = (): Promise<AMapAPI> => {
   return amapLoadPromise;
 };
 
+const mapSearchResult = (result: {poiList?: {pois?: AMapPOI[]}}): PublishLocation[] =>
+  (result?.poiList?.pois || []).map(amapPOIToPublishLocation).filter((item): item is PublishLocation => item !== null);
+
+export const searchPublishLocations = async (keyword: string): Promise<PublishLocation[]> => {
+  const query = keyword.trim();
+  if (query.length < 2) throw new Error('请输入至少 2 个字的省市区、商圈或地点名称');
+  const amap = await loadAMap();
+  return new Promise<PublishLocation[]>((resolve, reject) => {
+    const search = new amap.PlaceSearch({extensions: 'all', pageSize: 20});
+    search.search(query, (status, result) => {
+      if (status === 'no_data') return resolve([]);
+      if (status !== 'complete') return reject(new Error('高德地图地点搜索失败，请稍后重试'));
+      resolve(mapSearchResult(result));
+    });
+  });
+};
+
 const validCoordinate = (value: number): boolean => Number.isFinite(value) && value !== 0;
 
 export const amapPOIToPublishLocation = (poi: AMapPOI): PublishLocation | null => {
@@ -97,7 +115,7 @@ export const getPublishLocations = async (longitude: number, latitude: number): 
     search.searchNearBy('', [longitude, latitude], 1_000, (status, result) => {
       if (status === 'no_data') return resolve([]);
       if (status !== 'complete') return reject(new Error('高德地图附近地址查询失败，请稍后重试'));
-      resolve((result?.poiList?.pois || []).map(amapPOIToPublishLocation).filter((item): item is PublishLocation => item !== null));
+      resolve(mapSearchResult(result));
     });
   });
 };
