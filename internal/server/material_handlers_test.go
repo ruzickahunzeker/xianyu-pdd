@@ -23,6 +23,75 @@ func TestPDDNormalPriceCent(t *testing.T) {
 	}
 }
 
+func TestSplitMaterialPreservesStableSourceIdentity(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	skus := `[{"material_sku_id":"stable-a","sku_type":"source","source_goods_id":"goods-1","source_sku_id":"pdd-a","price_cent":100,"quantity":8,"enabled":true,"properties":[{"name":"颜色","value":"红"}]},{"material_sku_id":"stable-b","sku_type":"source","source_goods_id":"goods-1","source_sku_id":"pdd-b","price_cent":200,"quantity":9,"enabled":true,"properties":[{"name":"颜色","value":"蓝"}]}]`
+	result, err := store.DB.Exec(`INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,status,created_at,updated_at) VALUES(1,'pdd','goods-1','原素材','描述','["https://img/1.jpg"]','{}',?,'draft',1,1)`, skus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialID, _ := result.LastInsertId()
+	payload := `{"idempotency_key":"split-test-1","groups":[{"name":"红色组","title":"红色商品","material_sku_ids":["stable-a"]},{"name":"蓝色组","material_sku_ids":["stable-b"]}]}`
+	body := strings.NewReader(payload)
+	req := httptest.NewRequest(http.MethodPost, "/materials/1/split", body)
+	route := chi.NewRouteContext()
+	route.URLParams.Add("id", strconv.FormatInt(materialID, 10))
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, route))
+	req = req.WithContext(auth.WithSession(req.Context(), &db.Session{UserID: 1, Username: "admin", IsAdmin: true}))
+	rec := httptest.NewRecorder()
+	srv.splitMaterial(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("split status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var splitSource, childCount int
+	if err = store.DB.QueryRow(`SELECT is_split_source FROM product_materials WHERE id=?`, materialID).Scan(&splitSource); err != nil || splitSource != 1 {
+		t.Fatalf("split source=%d err=%v", splitSource, err)
+	}
+	if err = store.DB.QueryRow(`SELECT COUNT(*) FROM product_materials WHERE parent_material_id=? AND deleted_at IS NULL`, materialID).Scan(&childCount); err != nil || childCount != 2 {
+		t.Fatalf("child count=%d err=%v", childCount, err)
+	}
+	var childRaw string
+	if err = store.DB.QueryRow(`SELECT skus_json FROM product_materials WHERE parent_material_id=? AND split_group_name='红色组'`, materialID).Scan(&childRaw); err != nil {
+		t.Fatal(err)
+	}
+	var childSKUs []materialSKU
+	if json.Unmarshal([]byte(childRaw), &childSKUs) != nil || len(childSKUs) != 1 || childSKUs[0].MaterialSKUID != "stable-a" || childSKUs[0].SourceSKUID != "pdd-a" {
+		t.Fatalf("child identity changed: %s", childRaw)
+	}
+	replayReq := httptest.NewRequest(http.MethodPost, "/materials/1/split", strings.NewReader(payload))
+	replayRoute := chi.NewRouteContext()
+	replayRoute.URLParams.Add("id", strconv.FormatInt(materialID, 10))
+	replayReq = replayReq.WithContext(context.WithValue(replayReq.Context(), chi.RouteCtxKey, replayRoute))
+	replayReq = replayReq.WithContext(auth.WithSession(replayReq.Context(), &db.Session{UserID: 1, Username: "admin", IsAdmin: true}))
+	replayRec := httptest.NewRecorder()
+	srv.splitMaterial(replayRec, replayReq)
+	if replayRec.Code != http.StatusOK || !strings.Contains(replayRec.Body.String(), `"replayed":true`) {
+		t.Fatalf("replay status=%d body=%s", replayRec.Code, replayRec.Body.String())
+	}
+	if err = store.DB.QueryRow(`SELECT COUNT(*) FROM product_materials WHERE parent_material_id=? AND deleted_at IS NULL`, materialID).Scan(&childCount); err != nil || childCount != 2 {
+		t.Fatalf("idempotent child count=%d err=%v", childCount, err)
+	}
+	var redChildID int64
+	if err = store.DB.QueryRow(`SELECT id FROM product_materials WHERE parent_material_id=? AND split_group_name='红色组'`, materialID).Scan(&redChildID); err != nil {
+		t.Fatal(err)
+	}
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/materials/child", nil)
+	deleteRoute := chi.NewRouteContext()
+	deleteRoute.URLParams.Add("id", strconv.FormatInt(redChildID, 10))
+	deleteReq = deleteReq.WithContext(context.WithValue(deleteReq.Context(), chi.RouteCtxKey, deleteRoute))
+	deleteReq = deleteReq.WithContext(auth.WithSession(deleteReq.Context(), &db.Session{UserID: 1, Username: "admin", IsAdmin: true}))
+	deleteRec := httptest.NewRecorder()
+	srv.deleteMaterial(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete child status=%d body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	var assignmentCount int
+	if err = store.DB.QueryRow(`SELECT COUNT(*) FROM material_split_assignments WHERE child_material_id=?`, redChildID).Scan(&assignmentCount); err != nil || assignmentCount != 0 {
+		t.Fatalf("released assignment count=%d err=%v", assignmentCount, err)
+	}
+}
+
 func TestMaterialSourcePriceBackfillAndSyncPreserveSalePrice(t *testing.T) {
 	srv, store, cleanup := newTestServer(t)
 	defer cleanup()
@@ -40,7 +109,7 @@ func TestMaterialSourcePriceBackfillAndSyncPreserveSalePrice(t *testing.T) {
 		t.Fatal(err)
 	}
 	materialID, _ := result.LastInsertId()
-	material, err := scanMaterial(store.DB.QueryRow(`SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=?`, materialID))
+	material, err := scanMaterial(store.DB.QueryRow(`SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE id=?`, materialID))
 	if err != nil {
 		t.Fatal(err)
 	}

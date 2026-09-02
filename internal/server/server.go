@@ -96,6 +96,7 @@ type Server struct {
 	orderSyncRunning map[int64]bool
 	purchaseMu       sync.Mutex
 	collectorMu      sync.Mutex
+	materialSplitMu  sync.Mutex
 }
 
 // SetChatService installs the shared chat persistence and live event hub.

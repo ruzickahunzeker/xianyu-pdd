@@ -1,11 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Copy, ImagePlus, PackagePlus, Play, Plus, Save, Search, Send, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Copy, ImagePlus, PackagePlus, Play, Plus, Save, Scissors, Search, Send, Trash2, X } from 'lucide-react';
 import {
   deleteMaterial, getAccountDetails, getMaterials, getMaterialPublishRecords, getMaterialSourceDiff, MaterialPublishRecord, ProductMaterial, ProductMaterialSKU,
   getPDDProduct, getPDDReviewMedia, PDDReviewMedia, ProductMaterialVideo, publishMaterial, syncMaterialSource, updateMaterial, uploadMaterialImage,
 	updateMaterialSKUSource,
+	splitMaterial,
 } from '../services/api';
 import type {PublishLocation} from '../services/api';
+import {applyShortcutPlans, buildShortcutSplitPlans} from '../services/materialSplit';
 import {PublishLocationPicker} from './PublishLocationPicker';
 import type { AccountDetail } from '../types';
 
@@ -407,18 +409,87 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
   </div>;
 }
 
+function MaterialSplitDialog({ material, onClose, onSaved }: { material:ProductMaterial;onClose:()=>void;onSaved:()=>Promise<void> }) {
+  const specificationNames=useMemo(()=>Array.from(new Set(material.skus.flatMap(sku=>sku.properties.map(property=>property.name.trim())).filter(Boolean))),[material.skus]);
+  const occupied=useMemo(()=>new Set(material.split_occupied_sku_ids||[]),[material.split_occupied_sku_ids]);
+  const [selectedSpecification,setSelectedSpecification]=useState(specificationNames[0]||'');
+  const [selectedValues,setSelectedValues]=useState<string[]>([]);
+  const [shortcutMode,setShortcutMode]=useState<'separate'|'merge'>('separate');
+  const [groups,setGroups]=useState([{id:'manual-1',name:'分组 1',title:`${material.title} - 分组 1`},{id:'manual-2',name:'分组 2',title:`${material.title} - 分组 2`}]);
+  const [assignments,setAssignments]=useState<Record<string,string>>({});
+  const [filter,setFilter]=useState('');
+  const [bulkGroup,setBulkGroup]=useState('manual-1');
+  const [busy,setBusy]=useState(false);
+  const [error,setError]=useState('');
+  const [idempotencyKey]=useState(()=>globalThis.crypto?.randomUUID?.()||`${Date.now()}-${Math.random()}`);
+  const specificationValues=useMemo(()=>{
+    const values=new Map<string,{total:number;available:number}>();
+    for(const sku of material.skus){
+      const value=sku.properties.find(property=>property.name.trim()===selectedSpecification)?.value.trim();
+      if(!value)continue;
+      const row=values.get(value)||{total:0,available:0};row.total++;if(sku.material_sku_id&&!occupied.has(sku.material_sku_id)&&!assignments[sku.material_sku_id])row.available++;values.set(value,row);
+    }
+    return Array.from(values.entries()).map(([value,counts])=>({value,...counts}));
+  },[material.skus,occupied,selectedSpecification,assignments]);
+  useEffect(()=>setSelectedValues(specificationValues.filter(value=>value.available>0).map(value=>value.value)),[selectedSpecification,assignments]);
+  const rows=material.skus.filter(sku=>`${sku.source_sku_id||''} ${sku.properties.map(p=>`${p.name}=${p.value}`).join(' ')}`.toLowerCase().includes(filter.trim().toLowerCase()));
+  const count=(groupID:string)=>Object.values(assignments).filter(value=>value===groupID).length;
+  const assignedTotal=Object.keys(assignments).length;
+  const missingStableID=material.skus.some(sku=>!sku.material_sku_id);
+  const generateShortcut=(replace=false)=>{
+    setError('');
+    if(!selectedSpecification||selectedValues.length===0)return setError('请选择至少一个仍可拆分的规格值');
+    let generated;
+    const unavailable=new Set(occupied);if(!replace)for(const stableID of Object.keys(assignments))unavailable.add(stableID);
+    try { generated=buildShortcutSplitPlans({materialTitle:material.title,skus:material.skus,occupiedIDs:unavailable,specification:selectedSpecification,selectedValues,mode:shortcutMode}); }
+    catch(reason){return setError(reason instanceof Error?reason.message:'生成拆分预览失败');}
+    const {candidateCount,plans}=generated;
+    if(candidateCount===0)return setError('所选规格值没有可拆分的 SKU');
+    const preview=applyShortcutPlans({existingGroups:groups,existingAssignments:assignments,plans,replace,idPrefix:`shortcut-${idempotencyKey}`});
+    if(preview.groups.length>20)return setError(`追加后会有 ${preview.groups.length} 个子素材，单次最多 20 个；请减少勾选值或使用“清空并重新生成”`);
+    setGroups(preview.groups);setAssignments(preview.assignments);setBulkGroup(preview.groups[preview.groups.length-plans.length]?.id||preview.groups[0]?.id||'');
+  };
+  const submit=async()=>{
+    setError('');
+    const payload=groups.map(group=>({name:group.name.trim(),title:group.title.trim(),material_sku_ids:material.skus.filter(sku=>sku.material_sku_id&&assignments[sku.material_sku_id]===group.id).map(sku=>sku.material_sku_id!)})).filter(group=>group.material_sku_ids.length>0);
+    if(payload.length===0)return setError('请至少给一个分组分配 SKU');
+    if(groups.some(group=>!group.name.trim()))return setError('分组名称不能为空');
+    if(new Set(groups.map(group=>group.name.trim())).size!==groups.length)return setError('分组名称不能重复');
+    if(payload.some(group=>group.material_sku_ids.length>200))return setError('每个子素材最多 200 个 SKU');
+    setBusy(true);
+    try { const result=await splitMaterial(material.id,payload,material.split_version||'',idempotencyKey); await onSaved(); alert(`已创建 ${result.children.length} 个子素材，分配 ${result.selected_count} 个 SKU，未分配 ${result.remaining_count} 个`); onClose(); }
+    catch (reason) { setError(reason instanceof Error?reason.message:'拆分失败'); }
+    finally { setBusy(false); }
+  };
+  return <div className="fixed inset-0 z-50 overflow-auto bg-slate-100 p-4 sm:p-8"><div className="mx-auto max-w-6xl space-y-4">
+    <header className="flex items-start justify-between rounded-2xl border bg-white p-5"><div><h2 className="text-xl font-black">手动拆分素材</h2><p className="mt-1 text-sm text-slate-500">只创建本地子素材；不会修改采集商品、发布记录或平台商品。SKU 来源映射会原样保留。</p></div><button onClick={onClose}><X/></button></header>
+    <section className="rounded-2xl border bg-white p-5"><h3 className="font-black">按规格快捷生成分组</h3><p className="mt-1 text-xs text-slate-500">先选择一个发布规格，再勾选规格值。这里只生成预览，仍可在下方逐个调整 SKU。</p><div className="mt-4 flex flex-wrap gap-2">{specificationNames.map(name=><button key={name} className={`rounded-lg border px-3 py-2 text-sm font-bold ${selectedSpecification===name?'border-brand bg-brand text-white':'bg-white'}`} onClick={()=>setSelectedSpecification(name)}>{name}</button>)}</div>
+      {selectedSpecification&&<div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{specificationValues.map(row=><label key={row.value} className={`flex items-center justify-between rounded-lg border p-3 text-sm ${row.available===0?'bg-slate-50 text-slate-400':''}`}><span className="flex items-center gap-2"><input type="checkbox" disabled={row.available===0} checked={selectedValues.includes(row.value)} onChange={event=>setSelectedValues(current=>event.target.checked?[...current,row.value]:current.filter(value=>value!==row.value))}/><b>{row.value}</b></span><span>{row.available}/{row.total} 可拆</span></label>)}</div>}
+      <div className="mt-4 flex flex-wrap items-center gap-3"><label className="flex items-center gap-2 text-sm"><input type="radio" checked={shortcutMode==='separate'} onChange={()=>setShortcutMode('separate')}/>每个规格值单独成组</label><label className="flex items-center gap-2 text-sm"><input type="radio" checked={shortcutMode==='merge'} onChange={()=>setShortcutMode('merge')}/>勾选值合并成组</label><button className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white" onClick={()=>generateShortcut(false)}>{assignedTotal>0?'追加到拆分预览':'生成拆分预览'}</button>{assignedTotal>0&&<button className="rounded-lg border px-4 py-2 text-sm font-bold" onClick={()=>generateShortcut(true)}>清空并重新生成</button>}<span className="text-xs text-slate-500">超过 200 SKU 自动分段；单次最多 20 组</span></div>
+    </section>
+    <section className="rounded-2xl border bg-white p-5">{assignedTotal>0&&<div className="mb-4 rounded-xl bg-indigo-50 p-3 text-sm font-black text-indigo-700">拆分预览：已分配 {assignedTotal} SKU → {groups.filter(group=>count(group.id)>0).map(group=>count(group.id)).join(' + ')}，共 {groups.filter(group=>count(group.id)>0).length} 组</div>}<div className="flex flex-wrap items-center gap-2"><input className="min-w-64 flex-1 rounded-lg border px-3 py-2" placeholder="筛选规格或拼多多 SKU" value={filter} onChange={event=>setFilter(event.target.value)}/><select className="min-w-0 max-w-full rounded-lg border px-3 py-2" value={bulkGroup} onChange={event=>setBulkGroup(event.target.value)}>{groups.map(group=><option key={group.id} value={group.id}>{group.name}</option>)}</select><button className="rounded-lg border px-3 py-2 font-bold" onClick={()=>setAssignments(current=>{const next={...current};rows.forEach(sku=>{if(sku.material_sku_id&&!occupied.has(sku.material_sku_id))next[sku.material_sku_id]=bulkGroup;});return next;})}>将当前筛选项分配到该组</button></div>
+      <div className="mt-4 space-y-3">{groups.map((group,index)=><div key={group.id} className="rounded-xl border p-3"><div className="flex gap-2"><input className="w-40 rounded-lg border p-2 font-bold" value={group.name} onChange={event=>{const next=[...groups];next[index]={...group,name:event.target.value};setGroups(next);}}/><input className="min-w-0 flex-1 rounded-lg border p-2" value={group.title} onChange={event=>{const next=[...groups];next[index]={...group,title:event.target.value};setGroups(next);}}/><button disabled={groups.length===1} onClick={()=>{setGroups(groups.filter((_,row)=>row!==index));setAssignments(current=>Object.fromEntries(Object.entries(current).filter(([,value])=>value!==group.id)));}}><Trash2 className="h-4 w-4 text-red-500"/></button></div><div className="mt-2 flex items-center justify-between"><p className={`text-sm font-black ${count(group.id)>200?'text-red-600':'text-slate-700'}`}>{count(group.id)} / 200 SKU</p><span className="text-xs text-slate-400">第 {index+1} 组，共 {groups.length} 组</span></div></div>)}</div>
+      <button disabled={groups.length>=20} className="mt-3 flex items-center gap-1 rounded-lg border px-3 py-2 text-sm font-bold" onClick={()=>{const name=`分组 ${groups.length+1}`,id=`manual-${Date.now()}-${groups.length+1}`;setGroups([...groups,{id,name,title:`${material.title} - ${name}`}]);setBulkGroup(id);}}><Plus className="h-4 w-4"/>添加分组</button>
+    </section>
+    <section className="overflow-hidden rounded-2xl border bg-white"><div className="max-h-[52vh] overflow-auto"><table className="w-full min-w-[760px] text-sm"><thead className="sticky top-0 bg-slate-50"><tr><th className="p-3 text-left">发布规格</th><th className="p-3 text-left">拼多多 SKU</th><th className="p-3 text-left">类型</th><th className="p-3 text-left">分配到</th></tr></thead><tbody>{rows.map((sku,index)=>{const isOccupied=!!sku.material_sku_id&&occupied.has(sku.material_sku_id);return <tr className="border-t" key={sku.material_sku_id||index}><td className="p-3">{sku.properties.map(p=>`${p.name}=${p.value}`).join(' / ')||'-'}</td><td className="p-3 font-mono">{sku.source_sku_id||'-'}</td><td className="p-3">{isOccupied?'已被子素材占用':sku.sku_type==='source'?'来源':sku.sku_type==='placeholder'?'占位':'手工'}</td><td className="p-3"><select className="rounded-lg border px-3 py-2" value={sku.material_sku_id?assignments[sku.material_sku_id]||'':''} disabled={!sku.material_sku_id||isOccupied} onChange={event=>sku.material_sku_id&&setAssignments({...assignments,[sku.material_sku_id]:event.target.value})}><option value="">{isOccupied?'不可重复分配':'未分配'}</option>{groups.map(group=><option key={group.id} value={group.id}>{group.name}</option>)}</select></td></tr>})}</tbody></table></div></section>
+    {missingStableID&&<p className="rounded-xl bg-amber-50 p-3 text-sm font-bold text-amber-700">存在未生成稳定 ID 的 SKU，请先进入编辑页保存一次。</p>}{error&&<p className="rounded-xl bg-red-50 p-3 text-sm font-bold text-red-600">{error}</p>}
+    <footer className="flex justify-end gap-3 rounded-2xl border bg-white p-4"><button className="rounded-xl border px-5 py-2" onClick={onClose}>取消</button><button disabled={busy||missingStableID} className="rounded-xl bg-brand px-5 py-2 font-bold text-white disabled:opacity-50" onClick={()=>void submit()}>{busy?'正在拆分…':'创建子素材'}</button></footer>
+  </div></div>;
+}
+
 const ProductMaterials: React.FC = () => {
   const [items, setItems] = useState<ProductMaterial[]>([]);
   const [accounts, setAccounts] = useState<AccountDetail[]>([]);
   const [editor, setEditor] = useState<{ material: ProductMaterial; mode: EditorMode } | null>(null);
+  const [splitTarget,setSplitTarget]=useState<ProductMaterial|null>(null);
   const [search, setSearch] = useState('');
   const [activeSearch, setActiveSearch] = useState('');
   const load = async () => setItems(await getMaterials(activeSearch));
   useEffect(() => { void load(); void getAccountDetails().then(setAccounts); }, []);
   return <div className="space-y-4"><div><h2 className="text-2xl font-black">发布素材库</h2><p className="text-sm text-slate-500">素材和发布使用同一个商品编辑器；发布时选择账号，不会修改采集源数据。</p></div>
     <form className="flex max-w-xl gap-2" onSubmit={async event => { event.preventDefault(); const query=search.trim(); setActiveSearch(query); setItems(await getMaterials(query)); }}><div className="relative flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"/><input className="w-full rounded-xl border bg-white py-2.5 pl-10 pr-3" placeholder="搜索素材标题或拼多多商品 ID" value={search} onChange={event=>setSearch(event.target.value)}/></div><button className="rounded-xl bg-brand px-5 font-bold text-white">搜索</button>{activeSearch&&<button type="button" className="rounded-xl border bg-white px-4 font-bold" onClick={async()=>{setSearch('');setActiveSearch('');setItems(await getMaterials());}}>清除</button>}</form>
-    {items.length === 0 ? <div className="rounded-2xl border bg-white p-10 text-center text-slate-500">{activeSearch?'没有匹配的素材':'暂无素材，请先从采集商品创建素材'}</div> : <div className="grid gap-4 lg:grid-cols-2">{items.map(material => { const sourcePrices = material.skus.map(item=>item.source_price_cent||0).filter(price=>price>0); const salePrices = material.skus.map(item=>item.price_cent); return <article key={material.id} className="rounded-2xl border bg-white p-5 shadow-sm"><div className="flex gap-4">{material.images[0] ? <img src={material.images[0]} referrerPolicy="no-referrer" className="h-24 w-24 rounded-xl object-cover"/> : <div className="h-24 w-24 rounded-xl bg-slate-100"/>}<div className="min-w-0 flex-1"><h3 className="truncate font-black">{material.title}</h3><p className="mt-1 text-xs text-slate-400">来源：{material.source_type === 'pdd' ? '拼多多' : '手工'} · {material.skus.length} SKU · {material.images.length} 图</p>{material.source_type==='pdd'&&<p className="mt-1 text-xs text-slate-500">拼多多商品 ID：<span className="font-mono">{material.source_id}</span></p>}<p className="mt-2 text-sm text-slate-600">闲鱼 ¥{money(Math.min(...salePrices))}{Math.min(...salePrices)!==Math.max(...salePrices)&&`–${money(Math.max(...salePrices))}`}</p>{sourcePrices.length>0&&<p className="text-xs text-slate-400">拼多多 ¥{money(Math.min(...sourcePrices))}{Math.min(...sourcePrices)!==Math.max(...sourcePrices)&&`–${money(Math.max(...sourcePrices))}`}</p>}</div></div><div className="mt-4 flex flex-wrap gap-3"><button onClick={() => setEditor({ material, mode: 'edit' })} className="flex items-center gap-1 font-bold text-brand"><PackagePlus className="h-4 w-4"/>编辑</button><button onClick={() => setEditor({ material, mode: 'publish' })} className="flex items-center gap-1 font-bold text-emerald-600"><Send className="h-4 w-4"/>发布</button><button onClick={() => setEditor({ material: { ...clone(material), id: material.id }, mode: 'edit' })} className="hidden items-center gap-1 font-bold text-slate-500"><Copy className="h-4 w-4"/>复制</button><button onClick={async () => { if (confirm('删除此素材？不会影响采集商品和闲鱼平台商品。')) { await deleteMaterial(material.id); await load(); } }} className="ml-auto flex items-center gap-1 font-bold text-red-500"><Trash2 className="h-4 w-4"/>删除</button></div></article>; })}</div>}
-    {editor && <ProductEditor initial={editor.material} mode={editor.mode} accounts={accounts} onClose={() => setEditor(null)} onSaved={load}/>}</div>;
+    {items.length === 0 ? <div className="rounded-2xl border bg-white p-10 text-center text-slate-500">{activeSearch?'没有匹配的素材':'暂无素材，请先从采集商品创建素材'}</div> : <div className="grid gap-4 lg:grid-cols-2">{items.map(material => { const sourcePrices = material.skus.map(item=>item.source_price_cent||0).filter(price=>price>0); const salePrices = material.skus.map(item=>item.price_cent); return <article key={material.id} className="rounded-2xl border bg-white p-5 shadow-sm"><div className="flex gap-4">{material.images[0] ? <img src={material.images[0]} referrerPolicy="no-referrer" className="h-24 w-24 rounded-xl object-cover"/> : <div className="h-24 w-24 rounded-xl bg-slate-100"/>}<div className="min-w-0 flex-1"><h3 className="truncate font-black">{material.title}</h3><p className="mt-1 text-xs text-slate-400">来源：{material.source_type === 'pdd' ? '拼多多' : '手工'} · {material.skus.length} SKU · {material.images.length} 图</p>{(material.parent_material_id||0)>0&&<p className="mt-1 text-xs font-bold text-indigo-600">拆分组：{material.split_group_name}</p>}{material.is_split_source&&<p className="mt-1 text-xs font-bold text-amber-600">仅作为拆分源，请发布子素材</p>}{material.source_type==='pdd'&&<p className="mt-1 text-xs text-slate-500">拼多多商品 ID：<span className="font-mono">{material.source_id}</span></p>}<p className="mt-2 text-sm text-slate-600">闲鱼 ¥{money(Math.min(...salePrices))}{Math.min(...salePrices)!==Math.max(...salePrices)&&`–${money(Math.max(...salePrices))}`}</p>{sourcePrices.length>0&&<p className="text-xs text-slate-400">拼多多 ¥{money(Math.min(...sourcePrices))}{Math.min(...sourcePrices)!==Math.max(...sourcePrices)&&`–${money(Math.max(...sourcePrices))}`}</p>}</div></div><div className="mt-4 flex flex-wrap gap-3"><button onClick={() => setEditor({ material, mode: 'edit' })} className="flex items-center gap-1 font-bold text-brand"><PackagePlus className="h-4 w-4"/>编辑</button><button disabled={material.is_split_source} onClick={() => setEditor({ material, mode: 'publish' })} className="flex items-center gap-1 font-bold text-emerald-600 disabled:text-slate-300"><Send className="h-4 w-4"/>发布</button>{!material.parent_material_id&&<button onClick={()=>setSplitTarget(material)} className="flex items-center gap-1 font-bold text-indigo-600"><Scissors className="h-4 w-4"/>拆分</button>}<button onClick={() => setEditor({ material: { ...clone(material), id: material.id }, mode: 'edit' })} className="hidden items-center gap-1 font-bold text-slate-500"><Copy className="h-4 w-4"/>复制</button><button onClick={async () => { if (confirm('删除此素材？不会影响采集商品和闲鱼平台商品。')) { await deleteMaterial(material.id); await load(); } }} className="ml-auto flex items-center gap-1 font-bold text-red-500"><Trash2 className="h-4 w-4"/>删除</button></div></article>; })}</div>}
+    {editor && <ProductEditor initial={editor.material} mode={editor.mode} accounts={accounts} onClose={() => setEditor(null)} onSaved={load}/>} {splitTarget&&<MaterialSplitDialog material={splitTarget} onClose={()=>setSplitTarget(null)} onSaved={load}/>}</div>;
 };
 
 export default ProductMaterials;

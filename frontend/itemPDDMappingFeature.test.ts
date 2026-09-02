@@ -37,4 +37,15 @@ describe('item PDD SKU mapping UI', () => {
     expect(materials).toContain('toggleMediaSelection(mediaPreview.key)');
     expect(materials).toContain('pickerChoices[(index + direction + pickerChoices.length) % pickerChoices.length]');
   });
+
+  test('builds stable material split groups from one selected specification', () => {
+    const materials = source('components/ProductMaterials.tsx');
+    const split = source('services/materialSplit.ts');
+    expect(materials).toContain('按规格快捷生成分组');
+    expect(materials).toContain("shortcutMode==='separate'");
+    expect(split).toContain('offset += maxPerGroup');
+    expect(split).toContain('合并组');
+    expect(materials).toContain('split_occupied_sku_ids');
+    expect(materials).toContain("material.split_version||''");
+  });
 });

@@ -3,6 +3,9 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +24,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"xianyu-go/internal/auth"
+	"xianyu-go/internal/db"
 	"xianyu-go/internal/xianyu/mtop"
 )
 
@@ -189,6 +193,24 @@ type materialVideo struct {
 	DurationMS    int64  `json:"duration_ms,omitempty"`
 }
 
+type materialDBTX interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func materialInsertReturningID(ctx context.Context, exec materialDBTX, dialect db.Dialect, query string, args ...any) (int64, error) {
+	if dialect == db.DialectPostgres {
+		var id int64
+		err := exec.QueryRowContext(ctx, query+" RETURNING id", args...).Scan(&id)
+		return id, err
+	}
+	result, err := exec.ExecContext(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
 // normalizeCollectedMaterialSpecifications removes property dimensions that
 // have only one value across the collected SKU set. Xianyu requires every
 // submitted SKU property to contain 2-150 distinct values. The complete PDD
@@ -248,6 +270,7 @@ func (s *Server) mountMaterials(r chi.Router) {
 	r.Get("/materials/{id}/source-diff", s.materialSourceDiff)
 	r.Post("/materials/{id}/sync-source", s.syncMaterialSource)
 	r.Put("/materials/{id}/skus/{skuID}/source", s.updateMaterialSKUSource)
+	r.Post("/materials/{id}/split", s.splitMaterial)
 }
 
 type materialSKUSourceInput struct {
@@ -424,9 +447,13 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请选择发布账号")
 		return
 	}
-	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil {
 		writeErr(w, http.StatusNotFound, "素材不存在")
+		return
+	}
+	if material["is_split_source"] == true {
+		writeErr(w, http.StatusConflict, "该素材已作为拆分源，请发布拆分后的子素材")
 		return
 	}
 	images := stringSlice(material["images"])
@@ -476,6 +503,10 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(enabledSKUs) == 0 {
 		writeErr(w, http.StatusBadRequest, "素材至少需要一个启用的 SKU")
+		return
+	}
+	if len(enabledSKUs) > 200 {
+		writeErr(w, http.StatusUnprocessableEntity, "闲鱼单个商品最多发布 200 个 SKU，请先手动拆分素材")
 		return
 	}
 	// 采集源可能把同一张 SKU 缩略图重复写到每个规格属性。闲鱼只允许
@@ -867,8 +898,8 @@ func validateMaterial(in *materialInput) error {
 			return errors.New("素材视频地址不能为空")
 		}
 	}
-	if len(in.SKUs) == 0 || len(in.SKUs) > 200 {
-		return errors.New("素材必须包含 1 到 200 个 SKU")
+	if len(in.SKUs) == 0 || len(in.SKUs) > 5000 {
+		return errors.New("素材必须包含 1 到 5000 个 SKU；超过 200 个时需先手动拆分再发布")
 	}
 	seen := map[string]bool{}
 	for idx := range in.SKUs {
@@ -902,17 +933,22 @@ func validateMaterial(in *materialInput) error {
 	return nil
 }
 
-func materialMap(id, userID int64, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos string, postage, created, updated int64, videoEnabled int) map[string]any {
+const materialSelectColumns = `id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source`
+
+func materialMap(id, userID int64, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos string, postage, created, updated int64, videoEnabled int, parentMaterialID int64, splitBatchID, splitGroupName string, isSplitSource int) map[string]any {
 	material := map[string]any{"id": id, "user_id": userID, "source_type": sourceType, "source_id": sourceID, "title": title, "description": description, "images": jsonValue(images, []string{}), "category": jsonValue(category, map[string]any{}), "skus": jsonValue(skus, []any{}), "postage_mode": postageMode, "postage_cent": postage, "status": status, "image_property_name": imagePropertyName, "video_enabled": videoEnabled != 0, "videos": jsonValue(videos, []any{}), "created_at": created, "updated_at": updated}
+	material["parent_material_id"], material["split_batch_id"], material["split_group_name"], material["is_split_source"] = parentMaterialID, splitBatchID, splitGroupName, isSplitSource != 0
 	material["source_ids"] = materialSourceGoodsIDs(material)
+	digest := sha256.Sum256([]byte(strings.Join([]string{title, description, images, category, skus, postageMode, strconv.FormatInt(postage, 10), imagePropertyName, strconv.Itoa(videoEnabled), videos}, "\x00")))
+	material["split_version"] = hex.EncodeToString(digest[:])
 	return material
 }
 func scanMaterial(row interface{ Scan(...any) error }) (map[string]any, error) {
-	var id, userID, postage, created, updated int64
-	var videoEnabled int
-	var sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos string
-	err := row.Scan(&id, &userID, &sourceType, &sourceID, &title, &description, &images, &category, &skus, &postageMode, &postage, &status, &created, &updated, &imagePropertyName, &videoEnabled, &videos)
-	return materialMap(id, userID, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos, postage, created, updated, videoEnabled), err
+	var id, userID, postage, created, updated, parentMaterialID int64
+	var videoEnabled, isSplitSource int
+	var sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos, splitBatchID, splitGroupName string
+	err := row.Scan(&id, &userID, &sourceType, &sourceID, &title, &description, &images, &category, &skus, &postageMode, &postage, &status, &created, &updated, &imagePropertyName, &videoEnabled, &videos, &parentMaterialID, &splitBatchID, &splitGroupName, &isSplitSource)
+	return materialMap(id, userID, sourceType, sourceID, title, description, images, category, skus, postageMode, status, imagePropertyName, videos, postage, created, updated, videoEnabled, parentMaterialID, splitBatchID, splitGroupName, isSplitSource), err
 }
 
 // backfillMaterialSourcePrices upgrades old JSON rows without treating the
@@ -959,7 +995,7 @@ func (s *Server) backfillMaterialSourcePrices(ctx context.Context, material map[
 
 func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
-	query := `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE user_id=? AND deleted_at IS NULL`
+	query := `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE user_id=? AND deleted_at IS NULL`
 	args := []any{uid}
 	if keyword := strings.TrimSpace(r.URL.Query().Get("q")); keyword != "" {
 		query += ` AND (title LIKE ? OR source_id LIKE ? OR skus_json LIKE ?)`
@@ -984,20 +1020,56 @@ func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = rows.Close()
 	for _, material := range out {
-		s.backfillMaterialSourcePrices(r.Context(), material)
+		if s.backfillMaterialSourcePrices(r.Context(), material) {
+			if refreshed, refreshErr := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, jsonInt64(material["id"]), uid)); refreshErr == nil {
+				for key := range material {
+					delete(material, key)
+				}
+				for key, value := range refreshed {
+					material[key] = value
+				}
+			}
+		}
+		s.attachMaterialSplitOccupancy(r.Context(), uid, material)
 	}
 	writeJSON(w, 200, out)
 }
 func (s *Server) getMaterial(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	m, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	m, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil {
 		writeErr(w, 404, "素材不存在")
 		return
 	}
-	s.backfillMaterialSourcePrices(r.Context(), m)
+	if s.backfillMaterialSourcePrices(r.Context(), m) {
+		if refreshed, refreshErr := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid)); refreshErr == nil {
+			m = refreshed
+		}
+	}
+	s.attachMaterialSplitOccupancy(r.Context(), uid, m)
 	writeJSON(w, 200, m)
+}
+
+func (s *Server) attachMaterialSplitOccupancy(ctx context.Context, uid int64, material map[string]any) {
+	rootID := jsonInt64(material["parent_material_id"])
+	if rootID == 0 {
+		rootID = jsonInt64(material["id"])
+	}
+	rows, err := s.Store.DB.QueryContext(ctx, `SELECT material_sku_id FROM material_split_assignments WHERE user_id=? AND root_material_id=? ORDER BY material_sku_id`, uid, rootID)
+	if err != nil {
+		material["split_occupied_sku_ids"] = []string{}
+		return
+	}
+	defer rows.Close()
+	occupied := []string{}
+	for rows.Next() {
+		var id string
+		if rows.Scan(&id) == nil {
+			occupied = append(occupied, id)
+		}
+	}
+	material["split_occupied_sku_ids"] = occupied
 }
 func (s *Server) createMaterial(w http.ResponseWriter, r *http.Request) {
 	var in materialInput
@@ -1018,12 +1090,11 @@ func (s *Server) insertMaterial(w http.ResponseWriter, r *http.Request, sourceTy
 		videoEnabled = 1
 	}
 	now := time.Now().Unix()
-	res, err := s.Store.DB.ExecContext(r.Context(), `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now, in.ImagePropertyName, videoEnabled, string(videos))
+	id, err := materialInsertReturningID(r.Context(), s.Store.DB, s.Store.Dialect, `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,is_split_source) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?,?)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now, in.ImagePropertyName, videoEnabled, string(videos), materialBoolInt(len(in.SKUs) > 200))
 	if err != nil {
 		writeErr(w, 500, "创建素材失败")
 		return
 	}
-	id, _ := res.LastInsertId()
 	writeJSON(w, 201, map[string]any{"success": true, "id": id})
 }
 func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
@@ -1103,7 +1174,9 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var sourceType, primarySourceID, oldSKUsJSON string
-	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT source_type,source_id,skus_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid).Scan(&sourceType, &primarySourceID, &oldSKUsJSON); err != nil {
+	var parentMaterialID int64
+	var existingSplitSource int
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT source_type,source_id,skus_json,parent_material_id,is_split_source FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid).Scan(&sourceType, &primarySourceID, &oldSKUsJSON, &parentMaterialID, &existingSplitSource); err != nil {
 		writeErr(w, 404, "素材不存在")
 		return
 	}
@@ -1120,6 +1193,10 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if parentMaterialID > 0 && len(in.SKUs) > 200 {
+		writeErr(w, 422, "拆分子素材最多只能包含 200 个 SKU")
+		return
+	}
 	images, _ := json.Marshal(in.Images)
 	cat, _ := json.Marshal(in.Category)
 	skus, _ := json.Marshal(in.SKUs)
@@ -1128,7 +1205,7 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 	if in.VideoEnabled != nil && *in.VideoEnabled {
 		videoEnabled = 1
 	}
-	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET title=?,description=?,images_json=?,category_json=?,skus_json=?,postage_mode=?,postage_cent=?,image_property_name=?,video_enabled=?,videos_json=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, in.ImagePropertyName, videoEnabled, string(videos), time.Now().Unix(), id, uid)
+	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET title=?,description=?,images_json=?,category_json=?,skus_json=?,postage_mode=?,postage_cent=?,image_property_name=?,video_enabled=?,videos_json=?,is_split_source=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, in.ImagePropertyName, videoEnabled, string(videos), materialBoolInt(existingSplitSource != 0 || len(in.SKUs) > 200), time.Now().Unix(), id, uid)
 	if err != nil {
 		writeErr(w, 500, "更新素材失败")
 		return
@@ -1143,7 +1220,14 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 func (s *Server) deleteMaterial(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET deleted_at=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, time.Now().Unix(), time.Now().Unix(), id, uid)
+	tx, err := s.Store.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, 500, "开始删除事务失败")
+		return
+	}
+	defer tx.Rollback()
+	now := time.Now().Unix()
+	res, err := tx.ExecContext(r.Context(), `UPDATE product_materials SET deleted_at=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, now, now, id, uid)
 	if err != nil {
 		writeErr(w, 500, "删除素材失败")
 		return
@@ -1153,7 +1237,228 @@ func (s *Server) deleteMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "素材不存在")
 		return
 	}
+	if _, err = tx.ExecContext(r.Context(), `DELETE FROM material_split_assignments WHERE user_id=? AND child_material_id=?`, uid, id); err != nil {
+		writeErr(w, 500, "释放拆分 SKU 占用失败")
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeErr(w, 500, "提交删除事务失败")
+		return
+	}
 	writeJSON(w, 200, map[string]any{"success": true})
+}
+
+type materialSplitGroupInput struct {
+	Name           string   `json:"name"`
+	Title          string   `json:"title"`
+	MaterialSKUIDs []string `json:"material_sku_ids"`
+}
+
+type materialSplitInput struct {
+	Groups          []materialSplitGroupInput `json:"groups"`
+	ExpectedVersion string                    `json:"expected_version"`
+	IdempotencyKey  string                    `json:"idempotency_key"`
+}
+
+// splitMaterial only creates local child drafts. It deliberately preserves the
+// stable SKU and source fields byte-for-byte so publishing a child cannot sever
+// fulfillment mappings from its collected PDD SKU.
+func (s *Server) splitMaterial(w http.ResponseWriter, r *http.Request) {
+	uid := auth.SessionFromContext(r.Context()).UserID
+	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+	var input materialSplitInput
+	if id <= 0 || decodeJSON(r, &input) != nil || len(input.Groups) == 0 || len(input.Groups) > 20 {
+		writeErr(w, 400, "拆分请求无效；每批需要 1 到 20 个分组")
+		return
+	}
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if input.IdempotencyKey == "" {
+		input.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	if input.IdempotencyKey == "" {
+		input.IdempotencyKey = uuid.NewString()
+	}
+	if len(input.IdempotencyKey) > 191 {
+		writeErr(w, 400, "幂等键过长")
+		return
+	}
+	if replayMaterialSplit(w, r, s, uid, id, input.IdempotencyKey) {
+		return
+	}
+
+	s.materialSplitMu.Lock()
+	defer s.materialSplitMu.Unlock()
+	if replayMaterialSplit(w, r, s, uid, id, input.IdempotencyKey) {
+		return
+	}
+	tx, err := s.Store.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, 500, "开始拆分事务失败")
+		return
+	}
+	defer tx.Rollback()
+	batchID, now := uuid.NewString(), time.Now().Unix()
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO material_split_batches(id,user_id,source_material_id,idempotency_key,response_json,created_at) VALUES(?,?,?,?,?,?)`, batchID, uid, id, input.IdempotencyKey, "", now); err != nil {
+		_ = tx.Rollback()
+		if replayMaterialSplit(w, r, s, uid, id, input.IdempotencyKey) {
+			return
+		}
+		writeErr(w, 409, "相同拆分请求正在执行，请稍后重试")
+		return
+	}
+	var originalTitle, originalDescription, originalImages, originalCategory, sourceSKUsJSON, originalPostageMode, originalImageProperty, originalVideos string
+	var originalPostage int64
+	var originalVideoEnabled int
+	if err = tx.QueryRowContext(r.Context(), `SELECT title,description,images_json,category_json,skus_json,postage_mode,postage_cent,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid).Scan(&originalTitle, &originalDescription, &originalImages, &originalCategory, &sourceSKUsJSON, &originalPostageMode, &originalPostage, &originalImageProperty, &originalVideoEnabled, &originalVideos); err != nil {
+		writeErr(w, 404, "素材不存在")
+		return
+	}
+	material, err := scanMaterial(tx.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	if err != nil {
+		writeErr(w, 404, "素材不存在")
+		return
+	}
+	if input.ExpectedVersion != "" && input.ExpectedVersion != materialText(material["split_version"]) {
+		writeErr(w, 409, "素材内容已变化，请重新生成拆分预览")
+		return
+	}
+	if jsonInt64(material["parent_material_id"]) > 0 {
+		writeErr(w, 409, "拆分子素材不能再次拆分；请回到原始拆分源调整分组")
+		return
+	}
+	var sourceSKUs []materialSKU
+	if json.Unmarshal([]byte(sourceSKUsJSON), &sourceSKUs) != nil {
+		writeErr(w, 500, "素材 SKU 数据损坏")
+		return
+	}
+	byID := make(map[string]materialSKU, len(sourceSKUs))
+	for _, sku := range sourceSKUs {
+		stableID := strings.TrimSpace(sku.MaterialSKUID)
+		if stableID == "" {
+			writeErr(w, 422, "素材存在未生成稳定 ID 的 SKU，请先保存素材后再拆分")
+			return
+		}
+		byID[stableID] = sku
+	}
+	selected := map[string]bool{}
+	groupNames := map[string]bool{}
+	groupSKUs := make([][]materialSKU, len(input.Groups))
+	for index := range input.Groups {
+		name := strings.TrimSpace(input.Groups[index].Name)
+		if name == "" || len([]rune(name)) > 40 || groupNames[name] || len(input.Groups[index].MaterialSKUIDs) == 0 || len(input.Groups[index].MaterialSKUIDs) > 200 {
+			writeErr(w, 422, "分组名称必须唯一且不超过 40 字，每组必须包含 1 到 200 个 SKU")
+			return
+		}
+		groupNames[name] = true
+		for _, rawID := range input.Groups[index].MaterialSKUIDs {
+			stableID := strings.TrimSpace(rawID)
+			sku, exists := byID[stableID]
+			if !exists {
+				writeErr(w, 422, "分组包含不属于当前素材的 SKU: "+stableID)
+				return
+			}
+			if selected[stableID] {
+				writeErr(w, 422, "同一 SKU 不能同时分配到多个子素材: "+stableID)
+				return
+			}
+			selected[stableID] = true
+			groupSKUs[index] = append(groupSKUs[index], sku)
+		}
+	}
+
+	rootID := jsonInt64(material["parent_material_id"])
+	if rootID == 0 {
+		rootID = id
+	}
+	// An active sibling owns its selected stable IDs until that child is deleted.
+	rows, queryErr := tx.QueryContext(r.Context(), `SELECT skus_json FROM product_materials WHERE user_id=? AND parent_material_id=? AND deleted_at IS NULL`, uid, rootID)
+	if queryErr != nil {
+		writeErr(w, 500, "检查已有拆分素材失败")
+		return
+	}
+	for rows.Next() {
+		var encoded string
+		_ = rows.Scan(&encoded)
+		var siblingSKUs []materialSKU
+		_ = json.Unmarshal([]byte(encoded), &siblingSKUs)
+		for _, sku := range siblingSKUs {
+			if selected[sku.MaterialSKUID] {
+				_ = rows.Close()
+				writeErr(w, 409, "SKU 已存在于未删除的拆分子素材中: "+sku.MaterialSKUID)
+				return
+			}
+		}
+	}
+	_ = rows.Close()
+
+	children := make([]map[string]any, 0, len(input.Groups))
+	for index, group := range input.Groups {
+		encodedSKUs, _ := json.Marshal(groupSKUs[index])
+		title := strings.TrimSpace(group.Title)
+		if title == "" {
+			title = fmt.Sprintf("%s - %s", materialText(material["title"]), strings.TrimSpace(group.Name))
+		}
+		childID, insertErr := materialInsertReturningID(r.Context(), tx, s.Store.Dialect, `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?,?,?,?,0)`, uid, materialText(material["source_type"]), materialText(material["source_id"]), title, materialText(material["description"]), mustJSON(material["images"]), mustJSON(material["category"]), string(encodedSKUs), materialText(material["postage_mode"]), jsonInt64(material["postage_cent"]), now, now, materialText(material["image_property_name"]), materialBoolInt(material["video_enabled"] == true), mustJSON(material["videos"]), rootID, batchID, strings.TrimSpace(group.Name))
+		if insertErr != nil {
+			writeErr(w, 500, "创建拆分子素材失败")
+			return
+		}
+		for _, sku := range groupSKUs[index] {
+			if _, assignErr := tx.ExecContext(r.Context(), `INSERT INTO material_split_assignments(user_id,root_material_id,child_material_id,material_sku_id,split_batch_id,created_at) VALUES(?,?,?,?,?,?)`, uid, rootID, childID, sku.MaterialSKUID, batchID, now); assignErr != nil {
+				writeErr(w, 409, "SKU 已被其他拆分任务占用: "+sku.MaterialSKUID)
+				return
+			}
+		}
+		children = append(children, map[string]any{"id": childID, "name": strings.TrimSpace(group.Name), "title": title, "sku_count": len(groupSKUs[index])})
+	}
+	result, err := tx.ExecContext(r.Context(), `UPDATE product_materials SET is_split_source=1,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL AND title=? AND description=? AND images_json=? AND category_json=? AND skus_json=? AND postage_mode=? AND postage_cent=? AND image_property_name=? AND video_enabled=? AND videos_json=?`, now, id, uid, originalTitle, originalDescription, originalImages, originalCategory, sourceSKUsJSON, originalPostageMode, originalPostage, originalImageProperty, originalVideoEnabled, originalVideos)
+	if err != nil {
+		writeErr(w, 500, "标记拆分源失败")
+		return
+	}
+	changed, _ := result.RowsAffected()
+	if changed == 0 {
+		writeErr(w, 409, "素材内容已变化，请重新生成拆分预览")
+		return
+	}
+	response := map[string]any{"success": true, "batch_id": batchID, "children": children, "selected_count": len(selected), "remaining_count": len(sourceSKUs) - len(selected)}
+	responseRaw, _ := json.Marshal(response)
+	if _, err = tx.ExecContext(r.Context(), `UPDATE material_split_batches SET response_json=? WHERE id=?`, string(responseRaw), batchID); err != nil {
+		writeErr(w, 500, "保存拆分结果失败")
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeErr(w, 500, "提交拆分事务失败")
+		return
+	}
+	writeJSON(w, 201, response)
+}
+
+func replayMaterialSplit(w http.ResponseWriter, r *http.Request, s *Server, uid, materialID int64, key string) bool {
+	var response string
+	err := s.Store.DB.QueryRowContext(r.Context(), `SELECT response_json FROM material_split_batches WHERE user_id=? AND source_material_id=? AND idempotency_key=?`, uid, materialID, key).Scan(&response)
+	if err != nil || strings.TrimSpace(response) == "" {
+		return false
+	}
+	var payload map[string]any
+	if json.Unmarshal([]byte(response), &payload) != nil {
+		return false
+	}
+	payload["replayed"] = true
+	writeJSON(w, 200, payload)
+	return true
+}
+
+func mustJSON(value any) string {
+	raw, _ := json.Marshal(value)
+	return string(raw)
+}
+
+func materialBoolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (s *Server) listMaterialPublishRecords(w http.ResponseWriter, r *http.Request) {
@@ -1209,7 +1514,7 @@ func (s *Server) listMaterialPublishRecords(w http.ResponseWriter, r *http.Reque
 func (s *Server) materialSourceDiff(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID
 	id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil || len(materialSourceGoodsIDs(material)) == 0 {
 		writeErr(w, 404, "拼多多来源素材不存在")
 		return
@@ -1273,7 +1578,7 @@ func (s *Server) syncMaterialSource(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "同步选项无效")
 		return
 	}
-	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
+	material, err := scanMaterial(s.Store.DB.QueryRowContext(r.Context(), `SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, id, uid))
 	if err != nil || len(materialSourceGoodsIDs(material)) == 0 {
 		writeErr(w, 404, "拼多多来源素材不存在")
 		return
