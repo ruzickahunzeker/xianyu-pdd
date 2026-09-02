@@ -50,6 +50,7 @@ const (
 	materialSKUTypeSource      = "source"
 	materialSKUTypePlaceholder = "placeholder"
 	materialSKUTypeManual      = "manual"
+	materialSKUGroupLimit      = 252
 )
 
 func normalizeMaterialSKUIdentity(sourceType, primarySourceID string, sku *materialSKU) {
@@ -452,10 +453,6 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "素材不存在")
 		return
 	}
-	if material["is_split_source"] == true {
-		writeErr(w, http.StatusConflict, "该素材已作为拆分源，请发布拆分后的子素材")
-		return
-	}
 	images := stringSlice(material["images"])
 	if len(images) == 0 || len(images) > 9 {
 		writeErr(w, http.StatusBadRequest, "素材图片必须为 1 到 9 张")
@@ -505,8 +502,8 @@ func (s *Server) publishMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "素材至少需要一个启用的 SKU")
 		return
 	}
-	if len(enabledSKUs) > 200 {
-		writeErr(w, http.StatusUnprocessableEntity, "闲鱼单个商品最多发布 200 个 SKU，请先手动拆分素材")
+	if len(enabledSKUs) > 252 {
+		writeErr(w, http.StatusUnprocessableEntity, "闲鱼单个商品最多发布 252 个启用的 SKU，请拆分素材或停用部分 SKU")
 		return
 	}
 	// 采集源可能把同一张 SKU 缩略图重复写到每个规格属性。闲鱼只允许
@@ -899,7 +896,7 @@ func validateMaterial(in *materialInput) error {
 		}
 	}
 	if len(in.SKUs) == 0 || len(in.SKUs) > 5000 {
-		return errors.New("素材必须包含 1 到 5000 个 SKU；超过 200 个时需先手动拆分再发布")
+		return errors.New("素材必须包含 1 到 5000 个 SKU")
 	}
 	seen := map[string]bool{}
 	for idx := range in.SKUs {
@@ -1090,7 +1087,7 @@ func (s *Server) insertMaterial(w http.ResponseWriter, r *http.Request, sourceTy
 		videoEnabled = 1
 	}
 	now := time.Now().Unix()
-	id, err := materialInsertReturningID(r.Context(), s.Store.DB, s.Store.Dialect, `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,is_split_source) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?,?)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now, in.ImagePropertyName, videoEnabled, string(videos), materialBoolInt(len(in.SKUs) > 200))
+	id, err := materialInsertReturningID(r.Context(), s.Store.DB, s.Store.Dialect, `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,is_split_source) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?,?)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now, in.ImagePropertyName, videoEnabled, string(videos), 0)
 	if err != nil {
 		writeErr(w, 500, "创建素材失败")
 		return
@@ -1193,10 +1190,6 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if parentMaterialID > 0 && len(in.SKUs) > 200 {
-		writeErr(w, 422, "拆分子素材最多只能包含 200 个 SKU")
-		return
-	}
 	images, _ := json.Marshal(in.Images)
 	cat, _ := json.Marshal(in.Category)
 	skus, _ := json.Marshal(in.SKUs)
@@ -1205,7 +1198,7 @@ func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 	if in.VideoEnabled != nil && *in.VideoEnabled {
 		videoEnabled = 1
 	}
-	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET title=?,description=?,images_json=?,category_json=?,skus_json=?,postage_mode=?,postage_cent=?,image_property_name=?,video_enabled=?,videos_json=?,is_split_source=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, in.ImagePropertyName, videoEnabled, string(videos), materialBoolInt(existingSplitSource != 0 || len(in.SKUs) > 200), time.Now().Unix(), id, uid)
+	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE product_materials SET title=?,description=?,images_json=?,category_json=?,skus_json=?,postage_mode=?,postage_cent=?,image_property_name=?,video_enabled=?,videos_json=?,is_split_source=?,updated_at=? WHERE id=? AND user_id=? AND deleted_at IS NULL`, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, in.ImagePropertyName, videoEnabled, string(videos), existingSplitSource, time.Now().Unix(), id, uid)
 	if err != nil {
 		writeErr(w, 500, "更新素材失败")
 		return
@@ -1345,8 +1338,8 @@ func (s *Server) splitMaterial(w http.ResponseWriter, r *http.Request) {
 	groupSKUs := make([][]materialSKU, len(input.Groups))
 	for index := range input.Groups {
 		name := strings.TrimSpace(input.Groups[index].Name)
-		if name == "" || len([]rune(name)) > 40 || groupNames[name] || len(input.Groups[index].MaterialSKUIDs) == 0 || len(input.Groups[index].MaterialSKUIDs) > 200 {
-			writeErr(w, 422, "分组名称必须唯一且不超过 40 字，每组必须包含 1 到 200 个 SKU")
+		if name == "" || len([]rune(name)) > 40 || groupNames[name] || len(input.Groups[index].MaterialSKUIDs) == 0 || len(input.Groups[index].MaterialSKUIDs) > materialSKUGroupLimit {
+			writeErr(w, 422, "分组名称必须唯一且不超过 40 字，每组必须包含 1 到 252 个 SKU")
 			return
 		}
 		groupNames[name] = true

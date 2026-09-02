@@ -572,8 +572,8 @@ func (c *ClientImpl) publishItemOnce(ctx context.Context, cookiesStr string, req
 }
 
 func validatePublishSKUs(skus []PublishSKU) error {
-	if len(skus) < 2 || len(skus) > 200 {
-		return errors.New("多规格商品 SKU 数量必须在 2 到 200 之间")
+	if len(skus) < 2 || len(skus) > 252 {
+		return errors.New("多规格商品 SKU 数量必须在 2 到 252 之间")
 	}
 	seen := map[string]bool{}
 	dimensions := []string{}

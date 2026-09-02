@@ -2,6 +2,7 @@ package mtop
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -108,6 +109,37 @@ func TestValidatePublishSKUsRejectsSingleValueDimension(t *testing.T) {
 	err := validatePublishSKUs(skus)
 	if err == nil || !strings.Contains(err.Error(), "包装") {
 		t.Fatalf("validate error=%v, want single-value 包装 error", err)
+	}
+}
+
+func publishSKUGrid(rows, columns int) []PublishSKU {
+	skus := make([]PublishSKU, 0, rows*columns)
+	for color := 0; color < rows; color++ {
+		for size := 0; size < columns; size++ {
+			skus = append(skus, PublishSKU{
+				PriceCents: 100,
+				Quantity:   1,
+				Properties: []PublishSKUProperty{
+					{Name: "颜色", Value: fmt.Sprintf("颜色%d", color+1)},
+					{Name: "尺寸", Value: fmt.Sprintf("尺寸%d", size+1)},
+				},
+			})
+		}
+	}
+	return skus
+}
+
+func TestValidatePublishSKUsAllowsTwoHundredAndFiftyTwoCombinations(t *testing.T) {
+	skus := publishSKUGrid(14, 18)
+	if err := validatePublishSKUs(skus); err != nil {
+		t.Fatalf("252 SKU should pass local validation: %v", err)
+	}
+}
+
+func TestValidatePublishSKUsRejectsMoreThanTwoHundredAndFiftyTwoCombinations(t *testing.T) {
+	skus := publishSKUGrid(11, 23)
+	if err := validatePublishSKUs(skus); err == nil {
+		t.Fatal("253 SKU should fail local validation")
 	}
 }
 

@@ -13,6 +13,22 @@ export type ShortcutSplitResult = {
 };
 
 export type SplitPreviewGroup = { id: string; name: string; title: string };
+export const MATERIAL_SKU_GROUP_LIMIT = 252;
+
+export function removeSplitPreviewGroup(input: {
+  groups: SplitPreviewGroup[];
+  assignments: Record<string, string>;
+  groupID: string;
+}): { groups: SplitPreviewGroup[]; assignments: Record<string, string> } {
+  return {
+    groups: input.groups.filter(group => group.id !== input.groupID),
+    assignments: Object.fromEntries(Object.entries(input.assignments).filter(([, groupID]) => groupID !== input.groupID)),
+  };
+}
+
+export function clearSplitPreview(): { groups: SplitPreviewGroup[]; assignments: Record<string, string> } {
+  return { groups: [], assignments: {} };
+}
 
 export function applyShortcutPlans(input: {
   existingGroups: SplitPreviewGroup[];
@@ -23,9 +39,12 @@ export function applyShortcutPlans(input: {
 }): { groups: SplitPreviewGroup[]; assignments: Record<string, string> } {
   const assignments = input.replace ? {} : { ...input.existingAssignments };
   const groups = input.replace ? [] : input.existingGroups.filter(group => Object.values(assignments).includes(group.id));
-  const startIndex = groups.length;
+  const usedIDs = new Set(groups.map(group => group.id));
+  let nextIndex = 1;
   input.plans.forEach((plan, index) => {
-    const id = `${input.idPrefix}-${startIndex + index + 1}`;
+    let id = '';
+    do id = `${input.idPrefix}-${nextIndex++}`; while (usedIDs.has(id));
+    usedIDs.add(id);
     groups.push({ id, name: plan.name, title: plan.title });
     for (const sku of plan.skus) if (sku.material_sku_id) assignments[sku.material_sku_id] = id;
   });
@@ -43,7 +62,7 @@ export function buildShortcutSplitPlans(input: {
   mode: 'separate' | 'merge';
   maxPerGroup?: number;
 }): ShortcutSplitResult {
-  const maxPerGroup = input.maxPerGroup || 200;
+  const maxPerGroup = input.maxPerGroup || MATERIAL_SKU_GROUP_LIMIT;
   const selected = new Set(input.selectedValues);
   const seenStableIDs = new Set<string>();
   const candidates = input.skus.filter(sku => {
