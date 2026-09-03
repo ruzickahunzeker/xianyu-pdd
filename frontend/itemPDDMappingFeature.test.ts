@@ -25,6 +25,8 @@ describe('item PDD SKU mapping UI', () => {
     expect(materials).toContain("sku.sku_type === 'placeholder' ? { ...sku, quantity: 0 }");
     expect(materials).not.toContain('sameShape ? previous[index]');
     expect(materials).not.toContain('|| previous[index]');
+    expect(materials).toContain('sameSpecificationShape(specifications, next)');
+    expect(materials).toContain('renameSKUProperties(current.skus, specifications, next)');
     expect(materials).toContain('updateMaterialSKUSource');
   });
 

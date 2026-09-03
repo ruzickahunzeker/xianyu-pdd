@@ -61,6 +61,21 @@ const deriveSpecifications = (skus: ProductMaterialSKU[]): Specification[] => {
   return result.slice(0, 2);
 };
 const skuKey = (properties: Array<{ name: string; value: string }>) => properties.map(item => `${item.name}=${item.value}`).join('\0');
+export const sameSpecificationShape = (before: Specification[], after: Specification[]) => before.length === after.length && before.every((item, index) => item.values.length === after[index]?.values.length);
+// A specification label/value edit is a rename, not a new SKU matrix. Preserve the
+// row identity and source binding by translating every property by its stable position.
+export const renameSKUProperties = (skus: ProductMaterialSKU[], before: Specification[], after: Specification[]): ProductMaterialSKU[] => skus.map(sku => ({
+  ...sku,
+  properties: sku.properties.map(property => {
+    const specificationIndex = before.findIndex(item => item.name === property.name);
+    if (specificationIndex < 0) return property;
+    const valueIndex = before[specificationIndex].values.findIndex(item => item.value === property.value);
+    const nextSpecification = after[specificationIndex];
+    const nextValue = nextSpecification?.values[valueIndex];
+    if (!nextSpecification || !nextValue) return property;
+    return { name: nextSpecification.name, value: nextValue.value, image_url: nextSpecification.supportImage ? nextValue.image_url : undefined };
+  }),
+}));
 const generateSKUs = (specifications: Specification[], previous: ProductMaterialSKU[], sourceType: string): ProductMaterialSKU[] => {
   if (!specifications.length || specifications.some(item => !item.name.trim() || !item.values.length)) return previous;
   const combinations = specifications.reduce<Array<Array<{ name: string; value: string; image_url?: string }>>>((rows, specification) => rows.flatMap(row => specification.values.filter(item => item.value.trim()).map(item => [...row, { name: specification.name, value: item.value, image_url: specification.supportImage ? item.image_url : undefined }])), [[]]);
@@ -173,6 +188,7 @@ function ProductEditor({ initial, mode, accounts, onClose, onSaved }: {
 
   const applySpecifications = (next: Specification[]) => {
 	setDraft(current => {
+		if (sameSpecificationShape(specifications, next)) return { ...current, skus: renameSKUProperties(current.skus, specifications, next) };
 		if (sourceGoodsIDs.length <= 1) return { ...current, skus: generateSKUs(next, current.skus, current.source_type) };
 		const remapped = current.skus.flatMap(sku => {
 			const properties = next.map((nextSpec, specIndex) => {

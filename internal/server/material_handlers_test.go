@@ -186,6 +186,21 @@ func TestProtectMaterialSKUIdentitiesPreservesSourceBindingDuringRename(t *testi
 	}
 }
 
+func TestProtectMaterialSKUIdentitiesRejectsRemovedSourceSKU(t *testing.T) {
+	old := []materialSKU{{MaterialSKUID: "stable-1", SKUType: materialSKUTypeSource, SourceGoodsID: "goods-1", SourceSKUID: "pdd-1"}}
+	incoming := []materialSKU{{MaterialSKUID: "replacement", SKUType: materialSKUTypePlaceholder, PriceCents: 100, Properties: []materialProperty{{Name: "款式", Value: "改名"}}}}
+	if err := protectMaterialSKUIdentities("pdd", "goods-1", old, incoming); err == nil || !strings.Contains(err.Error(), "不能通过普通素材编辑删除或重建") {
+		t.Fatalf("expected removed source SKU rejection, got %v", err)
+	}
+}
+
+func TestProtectMaterialSKUIdentitiesAllowsRemovingPlaceholder(t *testing.T) {
+	old := []materialSKU{{MaterialSKUID: "placeholder-1", SKUType: materialSKUTypePlaceholder, PriceCents: 100, Properties: []materialProperty{{Name: "款式", Value: "无效组合"}}}}
+	if err := protectMaterialSKUIdentities("pdd", "goods-1", old, nil); err != nil {
+		t.Fatalf("removing placeholder: %v", err)
+	}
+}
+
 func TestProtectMaterialSKUIdentitiesDistinguishesManualAndPlaceholder(t *testing.T) {
 	incoming := []materialSKU{
 		{MaterialSKUID: "manual", SKUType: materialSKUTypeManual, Quantity: 8, PriceCents: 100, Properties: []materialProperty{{Name: "规格", Value: "手工"}}},

@@ -98,10 +98,14 @@ func validateMaterialSKUIdentity(sourceType, primarySourceID string, sku *materi
 // protectMaterialSKUIdentities 使普通编辑只能更改发布属性，不能隐式更换或清空来源身份。
 func protectMaterialSKUIdentities(sourceType, primarySourceID string, oldSKUs, incoming []materialSKU) error {
 	oldByID := make(map[string]materialSKU, len(oldSKUs))
+	oldSourceIDs := make(map[string]bool, len(oldSKUs))
 	for index := range oldSKUs {
 		normalizeMaterialSKUIdentity(sourceType, primarySourceID, &oldSKUs[index])
 		if oldSKUs[index].MaterialSKUID != "" {
 			oldByID[oldSKUs[index].MaterialSKUID] = oldSKUs[index]
+			if oldSKUs[index].SKUType == materialSKUTypeSource {
+				oldSourceIDs[oldSKUs[index].MaterialSKUID] = true
+			}
 		}
 	}
 	seen := make(map[string]bool, len(incoming))
@@ -127,6 +131,11 @@ func protectMaterialSKUIdentities(sourceType, primarySourceID string, oldSKUs, i
 		}
 		if err := validateMaterialSKUIdentity(sourceType, primarySourceID, &incoming[index]); err != nil {
 			return fmt.Errorf("SKU %s: %w", id, err)
+		}
+	}
+	for id := range oldSourceIDs {
+		if !seen[id] {
+			return fmt.Errorf("来源 SKU %s 不能通过普通素材编辑删除或重建，请先使用来源映射操作", id)
 		}
 	}
 	return validateDistinctMaterialSources(incoming)
