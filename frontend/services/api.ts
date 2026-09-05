@@ -3,7 +3,7 @@ import {
   LoginResponse, AccountDetail, Order, PaginatedResponse,
   AdminStats, DashboardStats, Card, SystemSettings, ApiResponse, OrderAnalytics,
   Item, AIReplySettings, ShippingRule, ReplyRule, DefaultReply, AutomationAction, AutomationTriggerType,
-  NotificationChannel, NotificationEventType, PDDAccountConfig
+  NotificationChannel, NotificationEventType, PDDAccountConfig, PDDAccountEvent, PDDAccountRuntime
 	, AccountTaskSettings, AccountTaskSummary, ChatSession, ChatMessage
 } from '../types';
 import { formatLocalDate } from '../dateRange';
@@ -1030,6 +1030,10 @@ export const getPDDAccount = async (): Promise<PDDAccountConfig> => get('/api/pd
 export const savePDDAccount = async (input: {name:string;site:'pinduoduo'|'yangkeduo';cookie?:string;default_address_id:string;user_agent?:string;enabled:boolean}): Promise<PDDAccountConfig> => put('/api/pdd/account',input);
 export const verifyPDDAccount = async (): Promise<{success:boolean;credential_status:string;pdd_uid:string;message:string}> => post('/api/pdd/account/verify',{});
 export const deletePDDAccount = async (): Promise<ApiResponse> => del('/api/pdd/account');
+export const getPDDAccountRuntime = async (): Promise<PDDAccountRuntime> => get('/api/pdd/account/runtime');
+export const getPDDAccountEvents = async (): Promise<PDDAccountEvent[]> => get('/api/pdd/account/events');
+export const pausePDDAccount = async (): Promise<ApiResponse> => post('/api/pdd/account/pause',{});
+export const resumePDDAccount = async (): Promise<ApiResponse> => post('/api/pdd/account/resume',{});
 
 export interface FulfillmentAPIKey {
 	id: string;
@@ -1254,15 +1258,22 @@ export interface PDDProductRefreshResult {
   material_stock_updates: number; updated_at: number;
 }
 export const refreshPDDProduct = (goodsId:string):Promise<PDDProductRefreshResult> => post(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}/refresh`,{});
+export interface PDDRemoteSyncResult { success:boolean; goods_id:string; sku_count:number; target_url:string }
+export const testPDDRemoteCollector = (targetUrl:string,deviceToken:string):Promise<{success:boolean;target_url:string}> => post('/api/pdd-collector/remote/test',{target_url:targetUrl,device_token:deviceToken},{timeoutMs:20_000});
+export const syncPDDProductToRemote = (goodsId:string,targetUrl:string,deviceToken:string):Promise<PDDRemoteSyncResult> => post(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}/sync`,{target_url:targetUrl,device_token:deviceToken},{timeoutMs:60_000});
 export const deletePDDProduct = (goodsId:string):Promise<{draft_count:number;message:string}> => del(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
 export interface ProductMaterialSKU { material_sku_id?:string; sku_type?:'source'|'placeholder'|'manual'; source_goods_id?:string; source_sku_id?:string; source_properties?:Array<{name:string;value:string}>; source_image_url?:string; source_price_cent?:number; source_normal_price_cent?:number; source_price_updated_at?:number; source_price_origin?:'collected'|'synced'|'backfilled_current'|'bound'; price_cent:number; quantity:number; enabled:boolean; image_url?:string; properties:Array<{name:string;value:string;image_url?:string}> }
 export interface ProductMaterialVideo { source:'review'|'product'|'upload';source_goods_id?:string;review_id?:string;sku_id?:string;url:string;cover_url?:string;duration_ms?:number }
-export interface ProductMaterial { id:number; source_type:string; source_id:string; source_ids?:string[]; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; image_property_name:string; video_enabled:boolean; videos:ProductMaterialVideo[]; status:string; updated_at:number; parent_material_id?:number; split_batch_id?:string; split_group_name?:string; is_split_source?:boolean; split_version?:string; split_occupied_sku_ids?:string[] }
+export interface MaterialSourceProperty { name:string; values:string[] }
+export interface MaterialImageMetadata { url:string;source:'pdd_product'|'pdd_detail'|'pdd_review'|'sku'|'upload'|'legacy'|string;source_goods_id?:string;source_sku_id?:string;local_path?:string;hash?:string;status:'valid'|'invalid'|'unknown'|string }
+export interface MaterialPriceStrategy { mode:'manual'|'fixed_add'|'percent_add'|'margin';value:number;minimum_profit_cent:number }
+export interface MaterialStockStrategy { mode:'manual'|'mirror'|'cap'|'fixed';cap:number;reserve:number;fixed_quantity:number;disable_when_oos:boolean }
+export interface ProductMaterial { id:number; source_type:string; source_id:string; source_ids?:string[]; title:string; description:string; images:string[]; category:Record<string,unknown>; skus:ProductMaterialSKU[]; postage_mode:string; postage_cent:number; image_property_name:string; video_enabled:boolean; videos:ProductMaterialVideo[]; original_price_cent:number; source_properties:MaterialSourceProperty[]; image_metadata:MaterialImageMetadata[]; price_strategy:MaterialPriceStrategy; stock_strategy:MaterialStockStrategy; revision:number; status:string; updated_at:number; parent_material_id?:number; split_batch_id?:string; split_group_name?:string; is_split_source?:boolean; split_version?:string; split_occupied_sku_ids?:string[] }
 export interface PDDReviewMedia { id:number;goods_id:string;review_id:string;sku_id:string;media_type:'image'|'video';source_type:'initial'|'additional';url:string;cover_url:string;width:number;height:number;duration_ms:number;is_live_photo_image:boolean }
 export interface MaterialPublishRecord { id:number; cookie_id:string; published_item_id:string; status:string; error_message:string; created_at:number; finished_at:number; mapping_counts?:Record<'pending'|'mapped'|'unmapped'|'ambiguous',number> }
 export const createMaterialFromPDD = (goodsId:string):Promise<{id:number}> => post(`/materials/from-pdd/${encodeURIComponent(goodsId)}`,{});
 export const getMaterials = (query = ''):Promise<ProductMaterial[]> => get(`/materials${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''}`);
-export const updateMaterial = (id:number,data:Omit<ProductMaterial,'id'|'source_type'|'source_id'|'status'|'updated_at'>) => put(`/materials/${id}`,data);
+export const updateMaterial = (id:number,data:Omit<ProductMaterial,'id'|'source_type'|'source_id'|'status'|'updated_at'>):Promise<{success:boolean;revision:number}> => put(`/materials/${id}`,data);
 export const deleteMaterial = (id:number) => del(`/materials/${id}`);
 export const uploadMaterialImage = (file:File):Promise<{url:string}> => { const body=new FormData();body.append('image',file);return postForm('/materials/images',body) };
 export const getPDDReviewMedia = (goodsId:string,type:'image'|'video'):Promise<PDDReviewMedia[]> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}/review-media?type=${type}`);

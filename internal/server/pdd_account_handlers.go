@@ -11,7 +11,7 @@ import (
 	"xianyu-go/internal/pddsite"
 )
 
-const defaultPDDUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+const defaultPDDUserAgent = ""
 
 func (s *Server) mountPDDAccountAdmin(r interface {
 	Get(string, http.HandlerFunc)
@@ -23,6 +23,10 @@ func (s *Server) mountPDDAccountAdmin(r interface {
 	r.Put("/api/pdd/account", s.savePDDAccount)
 	r.Delete("/api/pdd/account", s.deletePDDAccount)
 	r.Post("/api/pdd/account/verify", s.verifyPDDAccount)
+	r.Get("/api/pdd/account/runtime", s.pddAccountRuntime)
+	r.Get("/api/pdd/account/events", s.listPDDAccountEvents)
+	r.Post("/api/pdd/account/pause", func(w http.ResponseWriter, r *http.Request) { s.setPDDAccountPaused(w, r, true) })
+	r.Post("/api/pdd/account/resume", func(w http.ResponseWriter, r *http.Request) { s.setPDDAccountPaused(w, r, false) })
 }
 
 func pddAccountJSON(accountID, name string, site pddsite.Site, pddUID, addressID, userAgent, status, lastError string, enabled bool, verifiedAt int64, configured bool) map[string]any {

@@ -14,13 +14,16 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mxschmitt/playwright-go"
 
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/pddaddress"
 	"xianyu-go/internal/pddcheckout"
 	"xianyu-go/internal/pddproduct"
 	"xianyu-go/internal/pddshipping"
@@ -61,11 +64,45 @@ type worker struct {
 	database                       *sql.DB
 	store                          *db.Store
 	pw                             *playwright.Playwright
-	browser                        playwright.Browser
 	lastLogisticsSync              time.Time
 	lastStateReport                time.Time
 	lastReportedState              string
 	lastReportedError              string
+}
+
+type accountBrowserContext struct {
+	playwright.BrowserContext
+	worker   *worker
+	account  *db.PDDAccount
+	site     pddsite.Site
+	lockFile *os.File
+}
+
+func (c *accountBrowserContext) Close(options ...playwright.BrowserContextCloseOptions) error {
+	if c == nil {
+		return nil
+	}
+	// Persist refreshed browser cookies back to the encrypted account record so
+	// curl-backed reads and the persistent browser remain one coherent session.
+	if cookies, err := c.BrowserContext.Cookies(c.site.BaseURL()); err == nil {
+		parts := make([]string, 0, len(cookies))
+		for _, cookie := range cookies {
+			if cookie.Name != "" && cookie.Value != "" {
+				parts = append(parts, cookie.Name+"="+cookie.Value)
+			}
+		}
+		sort.Strings(parts)
+		value := strings.Join(parts, "; ")
+		if pddaddress.PDDUIDFromCookie(value) == c.account.PDDUID && value != "" {
+			_ = c.worker.store.PDDAccounts.UpdateCookie(context.Background(), c.account.ID, c.account.UserID, value)
+		}
+	}
+	err := c.BrowserContext.Close(options...)
+	if c.lockFile != nil {
+		_ = syscall.Flock(int(c.lockFile.Fd()), syscall.LOCK_UN)
+		_ = c.lockFile.Close()
+	}
+	return err
 }
 
 func main() {
@@ -151,11 +188,12 @@ func (w *worker) reportState(state, lastError string) {
 	w.lastReportedState, w.lastReportedError, w.lastStateReport = state, lastError, time.Now()
 }
 
-func (w *worker) runMessageOne() error {
+func (w *worker) runMessageOne() (runErr error) {
 	t, err := w.claimMessage()
 	if err != nil {
 		return err
 	}
+	defer func() { w.recordPDDAccountEvent(t.PDDAccountID, "merchant_message", t.ID, runErr) }()
 	ctx, site, err := w.taskContext(task{PDDAccountID: t.PDDAccountID})
 	if err != nil {
 		return w.messageResult(t, "failed", err.Error(), nil)
@@ -469,7 +507,7 @@ func (w *worker) messageResult(t messageTask, status, reason string, result map[
 var errNoTask = errors.New("没有可领取任务")
 
 func (w *worker) syncLogistics() error { return w.syncLogisticsWithForce(false) }
-func (w *worker) syncLogisticsWithForce(force bool) error {
+func (w *worker) syncLogisticsWithForce(force bool) (runErr error) {
 	enabledRaw, _ := w.store.Settings.Get(context.Background(), "pdd_logistics_sync_enabled")
 	if !force && !settingBool(enabledRaw) {
 		return nil
@@ -489,6 +527,7 @@ func (w *worker) syncLogisticsWithForce(force bool) error {
 	if err := w.database.QueryRow(`SELECT id FROM pdd_accounts WHERE enabled=1 AND is_default=1 ORDER BY updated_at DESC LIMIT 1`).Scan(&accountID); err != nil {
 		return nil
 	}
+	defer func() { w.recordPDDAccountEvent(accountID, "logistics_sync", "", runErr) }()
 	ctx, site, err := w.taskContext(task{PDDAccountID: accountID})
 	if err != nil {
 		return err
@@ -649,10 +688,6 @@ func (w *worker) startBrowser() error {
 	if err != nil {
 		return fmt.Errorf("启动 Playwright: %w", err)
 	}
-	w.browser, err = w.pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{Headless: playwright.Bool(!strings.EqualFold(os.Getenv("PDD_HEADLESS"), "false"))})
-	if err != nil {
-		return fmt.Errorf("启动 Chromium: %w", err)
-	}
 	return nil
 }
 
@@ -672,7 +707,7 @@ func (w *worker) openStore() error {
 	return nil
 }
 
-func (w *worker) taskContext(t task) (playwright.BrowserContext, pddsite.Site, error) {
+func (w *worker) taskContext(t task) (*accountBrowserContext, pddsite.Site, error) {
 	if w.store == nil || w.store.PDDAccounts == nil {
 		return nil, "", errors.New("拼多多账号存储未初始化")
 	}
@@ -690,13 +725,47 @@ func (w *worker) taskContext(t task) (playwright.BrowserContext, pddsite.Site, e
 	if strings.TrimSpace(account.Cookie) == "" {
 		return nil, "", errors.New("任务绑定的拼多多账号 Cookie 为空")
 	}
-	options := playwright.BrowserNewContextOptions{Locale: playwright.String("zh-CN"), TimezoneId: playwright.String("Asia/Shanghai"), Viewport: &playwright.Size{Width: 1280, Height: 900}}
-	if userAgent := strings.TrimSpace(account.UserAgent); userAgent != "" {
+	profileDir := site.ProfileDir(env("PDD_BROWSER_DATA_DIR", "/app/browser_data"), account.ID)
+	if err := os.MkdirAll(profileDir, 0o700); err != nil {
+		return nil, "", fmt.Errorf("创建拼多多浏览器目录: %w", err)
+	}
+	lockFile, err := os.OpenFile(profileDir+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, "", fmt.Errorf("打开拼多多账号锁: %w", err)
+	}
+	lockDeadline := time.Now().Add(30 * time.Second)
+	for {
+		err = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if time.Now().After(lockDeadline) {
+			_ = lockFile.Close()
+			return nil, "", errors.New("拼多多账号正在被另一项任务使用，请稍后重试")
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	options := playwright.BrowserTypeLaunchPersistentContextOptions{Headless: playwright.Bool(!strings.EqualFold(os.Getenv("PDD_HEADLESS"), "false")), Locale: playwright.String("zh-CN"), TimezoneId: playwright.String("Asia/Shanghai"), Viewport: &playwright.Size{Width: 1280, Height: 900}}
+	if userAgent := effectivePDDUserAgent(account.UserAgent); userAgent != "" {
 		options.UserAgent = playwright.String(userAgent)
 	}
-	browserContext, err := w.browser.NewContext(options)
+	browserContext, err := w.pw.Chromium.LaunchPersistentContext(profileDir, options)
 	if err != nil {
-		return nil, "", err
+		_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+		_ = lockFile.Close()
+		return nil, "", fmt.Errorf("启动拼多多持久浏览器: %w", err)
+	}
+	result := &accountBrowserContext{BrowserContext: browserContext, worker: w, account: account, site: site, lockFile: lockFile}
+	existingCookies, _ := browserContext.Cookies(site.BaseURL())
+	hasMatchingLogin := false
+	for _, cookie := range existingCookies {
+		if cookie.Name == "pdd_user_id" && cookie.Value == account.PDDUID {
+			hasMatchingLogin = true
+			break
+		}
+	}
+	if hasMatchingLogin {
+		return result, site, nil
 	}
 	cookies := []playwright.OptionalCookie{}
 	for _, part := range strings.Split(account.Cookie, ";") {
@@ -706,18 +775,24 @@ func (w *worker) taskContext(t task) (playwright.BrowserContext, pddsite.Site, e
 		}
 	}
 	if len(cookies) == 0 {
-		_ = browserContext.Close()
+		_ = result.Close()
 		return nil, "", errors.New("设置中保存的拼多多 Cookie 格式无效")
 	}
 	if err := browserContext.AddCookies(cookies); err != nil {
-		_ = browserContext.Close()
+		_ = result.Close()
 		return nil, "", err
 	}
-	// Ensure every account/site pair owns a distinct profile directory. The
-	// current context is intentionally ephemeral; this path is the stable home
-	// for site-scoped browser state when persistence is enabled.
-	_ = os.MkdirAll(site.ProfileDir(env("PDD_BROWSER_DATA_DIR", "/app/browser_data"), account.ID), 0o700)
-	return browserContext, site, nil
+	return result, site, nil
+}
+
+const legacyPDDUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
+
+func effectivePDDUserAgent(value string) string {
+	value = strings.TrimSpace(value)
+	if value == legacyPDDUserAgent {
+		return ""
+	}
+	return value
 }
 
 func (w *worker) loadGoodsSnapshot(t task, page playwright.Page, site pddsite.Site) (pddproduct.Snapshot, string, bool, error) {
@@ -748,8 +823,12 @@ func (w *worker) loadGoodsSnapshot(t task, page playwright.Page, site pddsite.Si
 	goodsURL := purchaseGoodsURL(capturedURL, t.GoodsID, site)
 	req, _ := http.NewRequest(http.MethodGet, goodsURL, nil)
 	req.Header.Set("Cookie", account.Cookie)
-	if account.UserAgent != "" {
-		req.Header.Set("User-Agent", account.UserAgent)
+	if userAgent := effectivePDDUserAgent(account.UserAgent); userAgent != "" {
+		req.Header.Set("User-Agent", userAgent)
+	} else if value, evalErr := page.Evaluate("() => navigator.userAgent"); evalErr == nil {
+		if userAgent, ok := value.(string); ok && strings.TrimSpace(userAgent) != "" {
+			req.Header.Set("User-Agent", userAgent)
+		}
 	}
 	response, curlErr := w.client.Do(req)
 	if curlErr == nil {
@@ -788,9 +867,6 @@ func (w *worker) validateGoods(t task, snapshot pddproduct.Snapshot, source stri
 }
 
 func (w *worker) close() {
-	if w.browser != nil {
-		_ = w.browser.Close()
-	}
 	if w.pw != nil {
 		_ = w.pw.Stop()
 	}
@@ -799,11 +875,12 @@ func (w *worker) close() {
 	}
 }
 
-func (w *worker) runOne() error {
+func (w *worker) runOne() (runErr error) {
 	t, err := w.claim()
 	if err != nil {
 		return err
 	}
+	defer func() { w.recordPDDAccountEvent(t.PDDAccountID, "purchase", t.ID, runErr) }()
 	browserContext, site, err := w.taskContext(t)
 	if err != nil {
 		return w.abort(t, err.Error())
@@ -1161,6 +1238,47 @@ func (w *worker) snapshot(t task, phase, html string) error {
 		return fmt.Errorf("保存待付款基线失败 HTTP %d: %s", response.StatusCode, raw)
 	}
 	return nil
+}
+
+func (w *worker) recordPDDAccountEvent(accountID, operation, taskID string, operationErr error) {
+	if strings.TrimSpace(accountID) == "" {
+		return
+	}
+	status, errorType, message := "success", "", ""
+	if operationErr != nil {
+		status = "failed"
+		errorType, message = classifyPDDOperationError(operationErr.Error())
+		if errorType == "login_required" || errorType == "captcha_required" || errorType == "access_limited" || errorType == "account_mismatch" {
+			status = "risk"
+		}
+	}
+	account, err := w.store.PDDAccounts.GetByID(context.Background(), accountID)
+	if err != nil {
+		return
+	}
+	_, _ = w.jsonRequest(http.MethodPost, "/api/fulfillment/pdd-account-events", map[string]any{"account_id": accountID, "site": account.Site, "operation": operation, "status": status, "error_type": errorType, "message": message, "task_id": taskID}, nil)
+}
+
+func classifyPDDOperationError(reason string) (string, string) {
+	lower := strings.ToLower(reason)
+	checks := []struct {
+		code   string
+		values []string
+	}{
+		{"captcha_required", []string{"captcha_required", "验证码", "安全验证", "滑块"}},
+		{"login_required", []string{"login_required", "跳转登录", "请更新对应站点 cookie", "cookie 为空"}},
+		{"access_limited", []string{"访问受限", "访问频繁", "too many requests", "账号异常", "无权限访问"}},
+		{"account_mismatch", []string{"account_mismatch", "merchant_mismatch", "账号不一致"}},
+		{"network_error", []string{"network_error", "network", "timeout", "超时", "connection refused"}},
+	}
+	for _, check := range checks {
+		for _, value := range check.values {
+			if strings.Contains(lower, value) {
+				return check.code, check.code
+			}
+		}
+	}
+	return "operation_failed", "operation_failed"
 }
 func (w *worker) browserResult(t task, order pddcheckout.Order) error {
 	payload := map[string]any{"lease_token": t.LeaseToken, "status": "unpaid_order_created", "pdd_order": map[string]any{"order_id": order.OrderID, "group_order_id": order.GroupOrderID, "goods_id": order.GoodsID, "sku_id": order.SKUID, "quantity": order.Quantity, "address_id": order.AddressID, "amount_cent": order.AmountCent, "order_time": order.OrderTime, "payment_deadline": order.PaymentDeadline, "receiver_name": t.ReceiverName, "province": t.Province, "city": t.City, "district": t.District, "detail_address": t.DetailAddress}}

@@ -23,6 +23,47 @@ func TestPDDNormalPriceCent(t *testing.T) {
 	}
 }
 
+func TestNormalizePublishParametersTracksCurrentImages(t *testing.T) {
+	parameters := materialPublishParameters{
+		ImageMetadata: []materialImageMetadata{
+			{URL: "https://img/keep.jpg", Source: "pdd_product"},
+			{URL: "https://img/removed.jpg", Source: "pdd_review"},
+			{URL: "https://img/keep.jpg", Source: "duplicate"},
+		},
+	}
+	normalizePublishParameters(&parameters, []string{"https://img/keep.jpg", "https://img/new.jpg"})
+	if len(parameters.ImageMetadata) != 2 {
+		t.Fatalf("metadata=%+v, want two current images", parameters.ImageMetadata)
+	}
+	if parameters.ImageMetadata[0].URL != "https://img/keep.jpg" || parameters.ImageMetadata[0].Source != "pdd_product" || parameters.ImageMetadata[0].Status != "valid" {
+		t.Fatalf("existing metadata changed: %+v", parameters.ImageMetadata[0])
+	}
+	if parameters.ImageMetadata[1].URL != "https://img/new.jpg" || parameters.ImageMetadata[1].Source != "legacy" {
+		t.Fatalf("new image metadata=%+v", parameters.ImageMetadata[1])
+	}
+}
+
+func TestValidateMaterialPublishParameters(t *testing.T) {
+	enabled := true
+	base := materialInput{
+		Title:              "素材",
+		Images:             []string{"https://img/1.jpg"},
+		OriginalPriceCents: 99,
+		PriceStrategy:      materialPriceStrategy{Mode: "manual", MinimumProfitCent: 50},
+		StockStrategy:      materialStockStrategy{Mode: "manual"},
+		SKUs:               []materialSKU{{PriceCents: 100, Quantity: 1, Enabled: true, Properties: []materialProperty{{Name: "款式", Value: "A"}}}},
+		VideoEnabled:       &enabled,
+	}
+	if err := validateMaterial(&base); err == nil || !strings.Contains(err.Error(), "原价") {
+		t.Fatalf("original price validation error=%v", err)
+	}
+	base.OriginalPriceCents = 199
+	base.StockStrategy.Mode = "unknown"
+	if err := validateMaterial(&base); err == nil || !strings.Contains(err.Error(), "库存策略") {
+		t.Fatalf("stock strategy validation error=%v", err)
+	}
+}
+
 func TestSplitMaterialPreservesStableSourceIdentity(t *testing.T) {
 	srv, store, cleanup := newTestServer(t)
 	defer cleanup()
@@ -109,7 +150,7 @@ func TestMaterialSourcePriceBackfillAndSyncPreserveSalePrice(t *testing.T) {
 		t.Fatal(err)
 	}
 	materialID, _ := result.LastInsertId()
-	material, err := scanMaterial(store.DB.QueryRow(`SELECT id,user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,parent_material_id,split_batch_id,split_group_name,is_split_source FROM product_materials WHERE id=?`, materialID))
+	material, err := scanMaterial(store.DB.QueryRow(`SELECT `+materialSelectColumns+` FROM product_materials WHERE id=?`, materialID))
 	if err != nil {
 		t.Fatal(err)
 	}

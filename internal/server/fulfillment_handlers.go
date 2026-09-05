@@ -56,6 +56,7 @@ func (s *Server) mountFulfillment(r chi.Router) {
 	r.Delete("/api/fulfillment/exceptions", s.clearFulfillmentExceptions)
 	r.Put("/api/fulfillment/exceptions/{event_id}/resolve", s.resolveFulfillmentException)
 	r.Post("/api/fulfillment/logistics/snapshot", s.ingestPDDLogistics)
+	r.Post("/api/fulfillment/pdd-account-events", s.recordPDDAccountEvent)
 	r.Post("/api/fulfillment/orders/{order_id}/shipping-precheck", s.shippingPrecheck)
 	r.Post("/api/fulfillment/orders/{order_id}/ship", s.createShippingOperation)
 	r.Get("/api/fulfillment/shipping-accounts", s.listShippingAccounts)

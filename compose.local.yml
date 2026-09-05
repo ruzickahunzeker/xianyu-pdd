@@ -39,5 +39,7 @@ services:
       PDD_PURCHASE_SUBMIT: ${PDD_PURCHASE_SUBMIT:-false}
       PDD_HEADLESS: ${PDD_HEADLESS:-true}
       PDD_SCREENSHOT_DIR: /app/data/pdd-screenshots
+      PDD_BROWSER_DATA_DIR: /app/browser_data
     volumes:
       - ./data:/app/data
+      - ./data/pdd-browser:/app/browser_data

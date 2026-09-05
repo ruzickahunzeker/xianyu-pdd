@@ -124,7 +124,9 @@ func (s *Server) mountPDDCollectorAdmin(r interface {
 	r.Get("/api/pdd-collector/catalog/{goodsID}", s.pddGetProduct)
 	r.Get("/api/pdd-collector/catalog/{goodsID}/review-media", s.pddListReviewMedia)
 	r.Get("/api/pdd-collector/catalog/{goodsID}/media-summary", s.pddMediaSummary)
+	r.Post("/api/pdd-collector/remote/test", s.pddTestRemoteCollector)
 	r.Post("/api/pdd-collector/catalog/{goodsID}/refresh", s.pddRefreshProduct)
+	r.Post("/api/pdd-collector/catalog/{goodsID}/sync", s.pddSyncProductToRemote)
 	r.Delete("/api/pdd-collector/catalog/{goodsID}", s.pddDeleteProduct)
 }
 

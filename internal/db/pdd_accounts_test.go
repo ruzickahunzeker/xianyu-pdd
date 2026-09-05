@@ -35,3 +35,32 @@ func TestPDDAccountSingleConfigEncryptsCookieAndKeepsIdentity(t *testing.T) {
 		t.Fatalf("byID=%+v err=%v", byID, err)
 	}
 }
+
+func TestPDDAccountUpdateCookiePreservesOwnershipAndEncryption(t *testing.T) {
+	t.Setenv("XIANYU_DATA_KEY", "pdd-account-update-test-key")
+	store, cleanup := newTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	if ok, err := store.Users.Create(ctx, "pdd-update-owner", "pdd-update@example.com", "pw"); err != nil || !ok {
+		t.Fatal(err)
+	}
+	owner, _ := store.Users.GetByUsername(ctx, "pdd-update-owner")
+	account, err := store.PDDAccounts.SaveSingle(ctx, owner.ID, "主账号", "pinduoduo", "pdd_user_id=123; token=old", "123", "609", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = store.PDDAccounts.UpdateCookie(ctx, account.ID, owner.ID, "pdd_user_id=123; token=fresh"); err != nil {
+		t.Fatal(err)
+	}
+	var encrypted string
+	if err = store.DB.QueryRow(`SELECT cookie_encrypted FROM pdd_accounts WHERE id=?`, account.ID).Scan(&encrypted); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(encrypted, "token=fresh") {
+		t.Fatalf("cookie stored in plaintext: %q", encrypted)
+	}
+	updated, err := store.PDDAccounts.GetByID(ctx, account.ID)
+	if err != nil || !strings.Contains(updated.Cookie, "token=fresh") {
+		t.Fatalf("updated account=%+v err=%v", updated, err)
+	}
+}

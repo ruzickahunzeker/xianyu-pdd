@@ -77,6 +77,30 @@ func TestQuantityButtonPlan(t *testing.T) {
 	}
 }
 
+func TestEffectivePDDUserAgentUsesRealBrowserByDefault(t *testing.T) {
+	if got := effectivePDDUserAgent(legacyPDDUserAgent); got != "" {
+		t.Fatalf("legacy mismatched UA=%q", got)
+	}
+	if got := effectivePDDUserAgent(" custom-agent "); got != "custom-agent" {
+		t.Fatalf("custom UA=%q", got)
+	}
+}
+
+func TestClassifyPDDOperationError(t *testing.T) {
+	for input, want := range map[string]string{
+		"拼多多页面跳转登录，请更新 Cookie": "login_required",
+		"页面出现安全验证":             "captcha_required",
+		"账号无权限访问":              "access_limited",
+		"playwright timeout":   "network_error",
+		"解析页面失败":               "operation_failed",
+	} {
+		got, message := classifyPDDOperationError(input)
+		if got != want || message != want {
+			t.Fatalf("classify %q = %q/%q, want %q", input, got, message, want)
+		}
+	}
+}
+
 func TestUnpaidOrdersURLKeepsRequiredListParameters(t *testing.T) {
 	pddUnpaidOrdersURL := unpaidOrdersURL(pddsite.Pinduoduo)
 	for _, value := range []string{"type=1", "comment_tab=1", "combine_orders=1", "main_orders=1", "order_index=0"} {

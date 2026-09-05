@@ -26,6 +26,45 @@ func TestPDDCollectorRejectsMissingToken(t *testing.T) {
 	}
 }
 
+func TestNormalizePDDRemoteTarget(t *testing.T) {
+	got, err := normalizePDDRemoteTarget("http://10.10.1.10:59188/")
+	if err != nil || got != "http://10.10.1.10:59188/api/pdd-collector/products" {
+		t.Fatalf("target=%q err=%v", got, err)
+	}
+	for _, raw := range []string{"ftp://host", "http://host/custom", "http://user:pass@host", "http://host?token=x"} {
+		if _, err := normalizePDDRemoteTarget(raw); err == nil {
+			t.Fatalf("target %q should be rejected", raw)
+		}
+	}
+}
+
+func TestCollectedProductPayloadUsesAuthoritativeCurrentSKU(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	_, err := store.DB.Exec(`INSERT INTO pdd_products(goods_id,mall_sn,final_url,title,images_json,videos_json,properties_json,first_collected_at,last_collected_at) VALUES('123','mall','https://mobile.pinduoduo.com/goods.html?goods_id=123','商品','["https://img.pddpic.com/1.jpg"]','[]','[{"key":"材质","values":["棉"]}]',10,20)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var productID int64
+	if err = store.DB.QueryRow(`SELECT id FROM pdd_products WHERE goods_id='123'`).Scan(&productID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.DB.Exec(`INSERT INTO pdd_skus(product_id,goods_id,sku_id,specs_json,spec_value_ids_json,thumb_url,prices_json,price_cent,stock,is_onsale,raw_snapshot_json,last_collected_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, productID, "123", "456", `[{"spec_key":"颜色","raw_value":"黑"}]`, `["7"]`, "https://img.pddpic.com/sku.jpg", `{"group_price":"9.9"}`, 990, 8, 1, `{"stock":999,"is_onsale":false,"stock_exact":true}`, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := srv.collectedProductPayload(context.Background(), "123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if payload.CollectionMethod != "server_sync" || payload.Goods.MallSN != "mall" || len(payload.SKUs) != 1 {
+		t.Fatalf("payload=%+v", payload)
+	}
+	if payload.SKUs[0].Stock != 8 || !payload.SKUs[0].IsOnsale || payload.SKUs[0].StockExact == nil || !*payload.SKUs[0].StockExact {
+		t.Fatalf("sku=%+v", payload.SKUs[0])
+	}
+}
+
 func TestPDDCollectorDeviceStatusVerifiesTokenAndReturnsDevice(t *testing.T) {
 	srv, store, cleanup := newTestServer(t)
 	defer cleanup()

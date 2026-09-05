@@ -86,6 +86,7 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"product_materials", "videos_json"},
 		{"pdd_products", "videos_json"},
 		{"pdd_review_media", "media_type"},
+		{"pdd_account_events", "error_type"},
 	}
 	for _, c := range checks {
 		if !columnExists(t, db, c.table, c.col) {

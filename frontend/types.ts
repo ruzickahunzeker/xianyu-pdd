@@ -332,9 +332,20 @@ export interface PDDAccountConfig {
   enabled: boolean;
   configured: boolean;
   cookie_configured: boolean;
-  credential_status: 'unconfigured' | 'unchecked' | 'valid' | 'invalid' | 'expired' | 'unknown';
+  credential_status: 'unconfigured' | 'unchecked' | 'valid' | 'invalid' | 'expired' | 'unknown' | 'paused' | 'risk_blocked';
   last_verified_at: number;
   last_error: string;
+}
+
+export interface PDDAccountRuntime {
+  status: string; last_success_at: number; last_failure_at: number;
+  last_error_type: string; last_error: string; consecutive_failures: number;
+  current_task: string; today_operations: number;
+}
+
+export interface PDDAccountEvent {
+  id: number; site: string; operation: string; status: 'success' | 'failed' | 'risk';
+  error_type: string; message: string; task_id: string; created_at: number;
 }
 
 export interface AIReplySettings {

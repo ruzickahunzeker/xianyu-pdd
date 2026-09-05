@@ -100,6 +100,21 @@ func (s *PDDAccountStore) MarkVerified(ctx context.Context, id string, userID in
 	_, err := s.DB.ExecContext(ctx, `UPDATE pdd_accounts SET credential_status=?,last_verified_at=?,last_error=?,updated_at=? WHERE id=? AND user_id=?`, status, time.Now().Unix(), lastError, time.Now().Unix(), id, userID)
 	return err
 }
+
+// UpdateCookie stores cookies refreshed by the account's persistent browser.
+// Ownership is part of the update predicate to prevent cross-user replacement.
+func (s *PDDAccountStore) UpdateCookie(ctx context.Context, id string, userID int64, cookie string) error {
+	cookie = strings.TrimSpace(cookie)
+	if cookie == "" {
+		return errors.New("拼多多 Cookie 不能为空")
+	}
+	encrypted, err := s.codec.encrypt("pdd-cookie", strings.TrimSpace(id), cookie)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.ExecContext(ctx, `UPDATE pdd_accounts SET cookie_encrypted=?,updated_at=? WHERE id=? AND user_id=?`, encrypted, time.Now().Unix(), strings.TrimSpace(id), userID)
+	return err
+}
 func boolIntDB(v bool) int {
 	if v {
 		return 1
