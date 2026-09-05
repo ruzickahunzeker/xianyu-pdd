@@ -1126,6 +1126,20 @@ func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 		pattern := "%" + keyword + "%"
 		args = append(args, pattern, pattern, pattern)
 	}
+	switch strings.TrimSpace(r.URL.Query().Get("publish_status")) {
+	case "unpublished":
+		query += ` AND NOT EXISTS(SELECT 1 FROM material_publish_records p WHERE p.material_id=product_materials.id AND p.user_id=? AND p.status='success')`
+		args = append(args, uid)
+	case "published":
+		query += ` AND EXISTS(SELECT 1 FROM material_publish_records p WHERE p.material_id=product_materials.id AND p.user_id=? AND p.status='success')`
+		args = append(args, uid)
+	case "scheduled":
+		query += ` AND EXISTS(SELECT 1 FROM scheduled_publish_tasks t WHERE t.material_id=product_materials.id AND t.user_id=? AND t.status IN ('pending','publishing','blocked'))`
+		args = append(args, uid)
+	case "failed":
+		query += ` AND EXISTS(SELECT 1 FROM scheduled_publish_tasks t WHERE t.material_id=product_materials.id AND t.user_id=? AND t.status='failed')`
+		args = append(args, uid)
+	}
 	query += ` ORDER BY updated_at DESC`
 	rows, err := s.Store.DB.QueryContext(r.Context(), query, args...)
 	if err != nil {
@@ -1156,7 +1170,58 @@ func (s *Server) listMaterials(w http.ResponseWriter, r *http.Request) {
 		}
 		s.attachMaterialSplitOccupancy(r.Context(), uid, material)
 	}
+	s.attachMaterialPublishSummaries(r.Context(), uid, out)
 	writeJSON(w, 200, out)
+}
+
+func (s *Server) attachMaterialPublishSummaries(ctx context.Context, uid int64, materials []map[string]any) {
+	byID := make(map[int64]map[string]any, len(materials))
+	for _, material := range materials {
+		material["published_accounts"] = []map[string]any{}
+		material["scheduled_accounts"] = []map[string]any{}
+		material["scheduled_failure_count"] = int64(0)
+		byID[jsonInt64(material["id"])] = material
+	}
+	rows, err := s.Store.DB.QueryContext(ctx, `SELECT material_id,cookie_id,COUNT(*),MAX(created_at) FROM material_publish_records WHERE user_id=? AND status='success' GROUP BY material_id,cookie_id ORDER BY MAX(created_at) DESC`, uid)
+	if err == nil {
+		for rows.Next() {
+			var accountID string
+			var materialID, count, lastAt int64
+			if rows.Scan(&materialID, &accountID, &count, &lastAt) == nil {
+				if material := byID[materialID]; material != nil {
+					published := material["published_accounts"].([]map[string]any)
+					material["published_accounts"] = append(published, map[string]any{"account_id": accountID, "count": count, "last_at": lastAt})
+				}
+			}
+		}
+		_ = rows.Close()
+	}
+	pendingRows, pendingErr := s.Store.DB.QueryContext(ctx, `SELECT material_id,account_id,MIN(planned_at) FROM scheduled_publish_tasks WHERE user_id=? AND status IN ('pending','publishing','blocked') GROUP BY material_id,account_id ORDER BY MIN(planned_at)`, uid)
+	if pendingErr == nil {
+		for pendingRows.Next() {
+			var accountID string
+			var materialID, plannedAt int64
+			if pendingRows.Scan(&materialID, &accountID, &plannedAt) == nil {
+				if material := byID[materialID]; material != nil {
+					pending := material["scheduled_accounts"].([]map[string]any)
+					material["scheduled_accounts"] = append(pending, map[string]any{"account_id": accountID, "planned_at": plannedAt})
+				}
+			}
+		}
+		_ = pendingRows.Close()
+	}
+	failureRows, failureErr := s.Store.DB.QueryContext(ctx, `SELECT material_id,COUNT(*) FROM scheduled_publish_tasks WHERE user_id=? AND status='failed' GROUP BY material_id`, uid)
+	if failureErr == nil {
+		for failureRows.Next() {
+			var materialID, failures int64
+			if failureRows.Scan(&materialID, &failures) == nil {
+				if material := byID[materialID]; material != nil {
+					material["scheduled_failure_count"] = failures
+				}
+			}
+		}
+		_ = failureRows.Close()
+	}
 }
 func (s *Server) getMaterial(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID

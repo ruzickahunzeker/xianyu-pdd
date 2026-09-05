@@ -199,6 +199,7 @@ func (s *Server) Router() http.Handler {
 		// 商品
 		s.mountItemsReal(r)
 		s.mountMaterials(r)
+		s.mountScheduledPublish(r)
 		// 关键字 + 指定商品回复
 		s.mountKeywordsReal(r)
 		s.mountItemRepliesReal(r)

@@ -537,7 +537,7 @@ func (s *Server) pddDeleteProduct(w http.ResponseWriter, r *http.Request) {
 
 func jsonValue(raw string, fallback any) any {
 	var value any
-	if json.Unmarshal([]byte(raw), &value) != nil {
+	if json.Unmarshal([]byte(raw), &value) != nil || value == nil {
 		return fallback
 	}
 	return value

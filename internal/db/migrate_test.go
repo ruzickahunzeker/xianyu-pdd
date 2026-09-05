@@ -62,6 +62,8 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"pdd_products", "mall_sn"},
 		{"pdd_products", "gallery_images_json"},
 		{"pdd_products", "detail_images_json"},
+		{"scheduled_publish_batches", "minimum_profit_cent"},
+		{"scheduled_publish_tasks", "idempotency_key"},
 		{"order_fulfillments", "pdd_ordered"},
 		{"order_fulfillments", "pdd_paid"},
 		{"order_fulfillments", "pdd_paid_source"},

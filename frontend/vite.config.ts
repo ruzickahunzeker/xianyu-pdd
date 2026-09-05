@@ -67,6 +67,10 @@ export default defineConfig({
         target: 'http://localhost:59188',
         changeOrigin: true,
       },
+      '/scheduled-publish': {
+        target: 'http://localhost:59188',
+        changeOrigin: true,
+      },
       '/notification-channels': {
         target: 'http://localhost:59188',
         changeOrigin: true,

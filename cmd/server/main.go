@@ -271,6 +271,7 @@ func runServer(parent context.Context, opts serverOptions) error {
 	srv.StartPublishBatchRecovery(ctx)
 	srv.StartOrderSyncScheduler(ctx)
 	srv.StartBackupScheduler(ctx)
+	srv.StartScheduledPublishScheduler(ctx)
 	runErr := srv.Run(ctx)
 	if runErr != nil {
 		logger.Error("HTTP 服务退出", "err", runErr)
