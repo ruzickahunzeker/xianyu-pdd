@@ -60,6 +60,8 @@ func TestMigrate_AppliesCleanSchema(t *testing.T) {
 		{"notification_outbox", "worker_token"},
 		{"material_publish_sku_mappings", "source_goods_id"},
 		{"pdd_products", "mall_sn"},
+		{"pdd_products", "gallery_images_json"},
+		{"pdd_products", "detail_images_json"},
 		{"order_fulfillments", "pdd_ordered"},
 		{"order_fulfillments", "pdd_paid"},
 		{"order_fulfillments", "pdd_paid_source"},

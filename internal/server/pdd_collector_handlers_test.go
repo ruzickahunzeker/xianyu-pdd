@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -14,6 +15,19 @@ import (
 	"xianyu-go/internal/db"
 	"xianyu-go/internal/pddproduct"
 )
+
+func TestNormalizePDDImageURLs(t *testing.T) {
+	got, err := normalizePDDImageURLs([]string{" https://img.pddpic.com/a.jpg ", "https://img.pddpic.com/a.jpg", "https://img.pddpic.com/b.jpg"}, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"https://img.pddpic.com/a.jpg", "https://img.pddpic.com/b.jpg"}; !reflect.DeepEqual(want, got) {
+		t.Fatalf("normalized image URLs mismatch: want=%v got=%v", want, got)
+	}
+	if _, err = normalizePDDImageURLs([]string{"javascript:alert(1)"}, 9); err == nil {
+		t.Fatal("expected invalid image URL to be rejected")
+	}
+}
 
 func TestPDDCollectorRejectsMissingToken(t *testing.T) {
 	srv, _, cleanup := newTestServer(t)

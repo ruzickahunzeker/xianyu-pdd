@@ -1249,7 +1249,7 @@ export interface PDDProductSummary {
   min_price_cent: number; max_price_cent: number;
 }
 export interface PDDProductVideo { url:string; cover_url?:string; width?:number; height?:number; duration_ms?:number }
-export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 'onsale_sku_count' | 'min_price_cent' | 'max_price_cent'> { goods_property:PDDGoodsProperty[]; skus: PDDSKU[] }
+export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 'onsale_sku_count' | 'min_price_cent' | 'max_price_cent'> { gallery_images:string[]; detail_images:string[]; goods_property:PDDGoodsProperty[]; skus: PDDSKU[] }
 export const getPDDProducts = (): Promise<PDDProductSummary[]> => get('/api/pdd-collector/catalog');
 export const getPDDProduct = (goodsId: string): Promise<PDDProductDetail> => get(`/api/pdd-collector/catalog/${encodeURIComponent(goodsId)}`);
 export interface PDDProductRefreshResult {

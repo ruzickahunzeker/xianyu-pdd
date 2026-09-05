@@ -74,6 +74,8 @@ type pddCollectionInput struct {
 		MallSN        string                  `json:"mall_sn"`
 		Title         string                  `json:"title"`
 		Images        []string                `json:"images"`
+		GalleryImages []string                `json:"gallery_images"`
+		DetailImages  []string                `json:"detail_images"`
 		Videos        []pddProductVideoInput  `json:"videos"`
 		GoodsProperty []pddGoodsPropertyInput `json:"goods_property"`
 	} `json:"goods"`
@@ -137,6 +139,27 @@ func validPDDMediaURL(raw string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	return host == "pddpic.com" || strings.HasSuffix(host, ".pddpic.com") || host == "yangkeduo.com" || strings.HasSuffix(host, ".yangkeduo.com") || host == "pinduoduo.com" || strings.HasSuffix(host, ".pinduoduo.com")
+}
+
+func normalizePDDImageURLs(values []string, limit int) ([]string, error) {
+	result := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+			return nil, errors.New("商品图片地址无效")
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+		if len(result) > limit {
+			return nil, errors.New("商品图片数量超过限制")
+		}
+	}
+	return result, nil
 }
 
 func validatePDDReviewMedia(in *pddReviewMediaInput) error {
@@ -547,8 +570,8 @@ func (s *Server) pddGetProduct(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id, firstAt, lastAt int64
-	var mallSN, finalURL, title, images, videos, properties string
-	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,mall_sn,final_url,title,images_json,videos_json,properties_json,first_collected_at,last_collected_at FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&id, &mallSN, &finalURL, &title, &images, &videos, &properties, &firstAt, &lastAt); err != nil {
+	var mallSN, finalURL, title, images, galleryImages, detailImages, videos, properties string
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,mall_sn,final_url,title,images_json,gallery_images_json,detail_images_json,videos_json,properties_json,first_collected_at,last_collected_at FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&id, &mallSN, &finalURL, &title, &images, &galleryImages, &detailImages, &videos, &properties, &firstAt, &lastAt); err != nil {
 		writeErr(w, http.StatusNotFound, "拼多多商品不存在")
 		return
 	}
@@ -575,7 +598,7 @@ func (s *Server) pddGetProduct(w http.ResponseWriter, r *http.Request) {
 		}
 		skus = append(skus, map[string]any{"id": skuRecordID, "sku_id": skuID, "specs": jsonValue(specs, []any{}), "spec_value_ids": jsonValue(specIDs, []any{}), "thumb_url": thumbURL, "prices": jsonValue(prices, map[string]any{}), "price_cent": price, "stock": stock, "stock_exact": stockExact, "is_onsale": onSale != 0, "last_collected_at": collectedAt})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"id": id, "goods_id": goodsID, "mall_sn": mallSN, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "videos": jsonValue(videos, []any{}), "goods_property": jsonValue(properties, []any{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "skus": skus})
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "goods_id": goodsID, "mall_sn": mallSN, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "gallery_images": jsonValue(galleryImages, []string{}), "detail_images": jsonValue(detailImages, []string{}), "videos": jsonValue(videos, []any{}), "goods_property": jsonValue(properties, []any{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "skus": skus})
 }
 
 func tokenDigest(token string) string {
@@ -691,6 +714,16 @@ func validatePDDCollection(in *pddCollectionInput) error {
 	}
 	if len(in.Goods.Videos) > 20 {
 		return errors.New("商品视频不能超过 20 个")
+	}
+	var err error
+	if in.Goods.Images, err = normalizePDDImageURLs(in.Goods.Images, 9); err != nil {
+		return err
+	}
+	if in.Goods.GalleryImages, err = normalizePDDImageURLs(in.Goods.GalleryImages, 50); err != nil {
+		return err
+	}
+	if in.Goods.DetailImages, err = normalizePDDImageURLs(in.Goods.DetailImages, 200); err != nil {
+		return err
 	}
 	videoSeen := map[string]bool{}
 	for i := range in.Goods.Videos {
@@ -864,6 +897,8 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 
 	payload, _ := json.Marshal(in)
 	images, _ := json.Marshal(in.Goods.Images)
+	galleryImages, _ := json.Marshal(in.Goods.GalleryImages)
+	detailImages, _ := json.Marshal(in.Goods.DetailImages)
 	videos, _ := json.Marshal(in.Goods.Videos)
 	properties, _ := json.Marshal(in.Goods.GoodsProperty)
 	collectedAt := time.Now().Unix()
@@ -886,9 +921,9 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	productUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id"}, map[string]string{"mall_sn": "EXCLUDED.mall_sn", "final_url": "EXCLUDED.final_url", "title": "EXCLUDED.title", "images_json": "EXCLUDED.images_json", "videos_json": "EXCLUDED.videos_json", "properties_json": "EXCLUDED.properties_json", "last_collected_at": "EXCLUDED.last_collected_at"})
+	productUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id"}, map[string]string{"mall_sn": "EXCLUDED.mall_sn", "final_url": "EXCLUDED.final_url", "title": "EXCLUDED.title", "images_json": "EXCLUDED.images_json", "gallery_images_json": "EXCLUDED.gallery_images_json", "detail_images_json": "EXCLUDED.detail_images_json", "videos_json": "EXCLUDED.videos_json", "properties_json": "EXCLUDED.properties_json", "last_collected_at": "EXCLUDED.last_collected_at"})
 	collectedPageURL := pddProductURL(in.FinalURL, in.Goods.GoodsID)
-	_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_products(goods_id,mall_sn,final_url,title,images_json,videos_json,properties_json,first_collected_at,last_collected_at) VALUES(?,?,?,?,?,?,?,?,?)`+productUpsert, in.Goods.GoodsID, in.Goods.MallSN, collectedPageURL, in.Goods.Title, string(images), string(videos), string(properties), collectedAt, collectedAt)
+	_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_products(goods_id,mall_sn,final_url,title,images_json,gallery_images_json,detail_images_json,videos_json,properties_json,first_collected_at,last_collected_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`+productUpsert, in.Goods.GoodsID, in.Goods.MallSN, collectedPageURL, in.Goods.Title, string(images), string(galleryImages), string(detailImages), string(videos), string(properties), collectedAt, collectedAt)
 	if err != nil {
 		writeErr(w, 500, "保存拼多多商品失败")
 		return

@@ -79,13 +79,19 @@ func (s *Server) pddTestRemoteCollector(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) collectedProductPayload(ctx context.Context, goodsID string) (pddCollectionInput, error) {
 	var in pddCollectionInput
-	var imagesJSON, videosJSON, propertiesJSON string
+	var imagesJSON, galleryImagesJSON, detailImagesJSON, videosJSON, propertiesJSON string
 	var collectedAt int64
-	if err := s.Store.DB.QueryRowContext(ctx, `SELECT goods_id,mall_sn,final_url,title,images_json,videos_json,properties_json,last_collected_at FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&in.Goods.GoodsID, &in.Goods.MallSN, &in.FinalURL, &in.Goods.Title, &imagesJSON, &videosJSON, &propertiesJSON, &collectedAt); err != nil {
+	if err := s.Store.DB.QueryRowContext(ctx, `SELECT goods_id,mall_sn,final_url,title,images_json,gallery_images_json,detail_images_json,videos_json,properties_json,last_collected_at FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&in.Goods.GoodsID, &in.Goods.MallSN, &in.FinalURL, &in.Goods.Title, &imagesJSON, &galleryImagesJSON, &detailImagesJSON, &videosJSON, &propertiesJSON, &collectedAt); err != nil {
 		return in, err
 	}
 	if err := json.Unmarshal([]byte(imagesJSON), &in.Goods.Images); err != nil {
 		return in, fmt.Errorf("解析商品图片失败: %w", err)
+	}
+	if err := json.Unmarshal([]byte(galleryImagesJSON), &in.Goods.GalleryImages); err != nil {
+		return in, fmt.Errorf("解析商品主图库失败: %w", err)
+	}
+	if err := json.Unmarshal([]byte(detailImagesJSON), &in.Goods.DetailImages); err != nil {
+		return in, fmt.Errorf("解析商品详情图库失败: %w", err)
 	}
 	if err := json.Unmarshal([]byte(videosJSON), &in.Goods.Videos); err != nil {
 		return in, fmt.Errorf("解析商品视频失败: %w", err)

@@ -99,3 +99,20 @@ test("collectPDDProduct includes product videoGallery separately from images", (
   assert.deepEqual(result.goods.videos, [{ url: "https://video5.pddpic.com/a.f30.mp4", cover_url: "", width: 720, height: 960, duration_ms: 0 }]);
   assert.deepEqual(result.video_source_paths, ["store.initDataObj.goods.videoGallery"]);
 });
+
+test("collectPDDProduct preserves the full gallery and detail image libraries", () => {
+  const gallery = Array.from({ length: 5 }, (_, index) => ({ url: `https://img.pddpic.com/gallery-${index + 1}.jpg` }));
+  const details = Array.from({ length: 4 }, (_, index) => ({ url: `https://img.pddpic.com/detail-${index + 1}.jpg` }));
+  const result = collectPDDProduct({ store: { goodsID: 123, goodsName: "图片商品", skus: [{ skuId: 456, goodsId: 123 }], initDataObj: { goods: {
+    topGallery: gallery,
+    detailGallery: details
+  } } } }, "https://mobile.pinduoduo.com/goods.html?goods_id=123");
+  assert.deepEqual(result.goods.gallery_images, gallery.map(item => item.url));
+  assert.deepEqual(result.goods.detail_images, details.map(item => item.url));
+  assert.deepEqual(result.goods.images, [
+    ...gallery.slice(0, 3).map(item => item.url),
+    ...details.slice(0, 3).map(item => item.url),
+    ...gallery.slice(-2).map(item => item.url),
+    details[3].url
+  ]);
+});

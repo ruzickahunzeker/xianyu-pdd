@@ -91,17 +91,20 @@ function collectImages(store) {
       }
     }
   });
+  const galleryImages = uniqueStrings(topGallery.length ? topGallery : fallbackImages).slice(0, 50);
+  const gallerySet = new Set(galleryImages);
+  const detailImages = uniqueStrings(detailGallery).filter((url) => !gallerySet.has(url)).slice(0, 200);
   const selected = [
-    ...topGallery.slice(0, 3),
-    ...detailGallery.slice(0, 3),
-    ...topGallery.slice(-3)
+    ...galleryImages.slice(0, 3),
+    ...detailImages.slice(0, 3),
+    ...galleryImages.slice(-3)
   ];
   const images = uniqueStrings(selected);
   for (const url of uniqueStrings([...topGallery, ...detailGallery, ...fallbackImages])) {
     if (images.length >= 9) break;
     if (!images.includes(url)) images.push(url);
   }
-  return { images: images.slice(0, 9), paths: uniqueStrings(paths) };
+  return { images: images.slice(0, 9), galleryImages, detailImages, paths: uniqueStrings(paths) };
 }
 
 function collectProductVideos(store) {
@@ -347,6 +350,8 @@ export function collectPDDProduct(rawDataOverride, pageURL = globalThis.location
       mall_sn: mallSN.value,
       title: asString(title.value),
       images: imageResult.images,
+      gallery_images: imageResult.galleryImages,
+      detail_images: imageResult.detailImages,
       videos: videoResult.videos,
       goods_property: propertyResult.properties
     },
