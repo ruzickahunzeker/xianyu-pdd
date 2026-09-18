@@ -60,21 +60,64 @@ func compact(value string) string {
 	}, strings.TrimSpace(value))
 }
 
-// Resolve only returns an unambiguous district match. It deliberately rejects
-// generic "其他区" entries because sending those IDs can route an order wrongly.
+// Resolve prefers the first complete province/city/district chain appearing in
+// the address. Once a province or city is known, similarly named districts in
+// other regions must not make the address ambiguous (for example, "金沙城区"
+// must not override an earlier explicit "广东省佛山市南海区").
 func Resolve(cityHint, fullAddress string) (Match, error) {
-	haystack := compact(cityHint + fullAddress)
+	address := compact(fullAddress)
+	hint := compact(cityHint)
+	haystack := hint + address
 	if haystack == "" {
 		return Match{}, errors.New("收货地址为空")
 	}
-	matches := make([]Match, 0, 2)
+	type candidate struct {
+		match Match
+		pos   int
+		len   int
+	}
+	matches := make([]candidate, 0, 2)
+	provinceScoped := false
 	for _, province := range provinces {
+		if name := compact(province.Name); name != "" && strings.Contains(haystack, name) {
+			provinceScoped = true
+			break
+		}
+	}
+	for _, province := range provinces {
+		provinceName := compact(province.Name)
+		if provinceScoped && !strings.Contains(haystack, provinceName) {
+			continue
+		}
+		cityScoped := false
 		for _, city := range province.Cities {
+			if name := compact(city.Name); name != "" && strings.Contains(haystack, name) {
+				cityScoped = true
+				break
+			}
+		}
+		for _, city := range province.Cities {
+			cityName := compact(city.Name)
+			if cityScoped && !strings.Contains(haystack, cityName) {
+				continue
+			}
 			for _, district := range city.Districts {
-				if district.Name == "" || strings.Contains(district.Name, "其他区") || !strings.Contains(haystack, compact(district.Name)) {
+				districtName := compact(district.Name)
+				if districtName == "" || strings.Contains(district.Name, "其他区") {
 					continue
 				}
-				matches = append(matches, Match{ProvinceID: province.ID, ProvinceName: province.Name, CityID: city.ID, CityName: city.Name, DistrictID: district.ID, DistrictName: district.Name})
+				pos := strings.Index(address, districtName)
+				if pos < 0 {
+					pos = strings.Index(hint, districtName)
+				}
+				if pos < 0 {
+					continue
+				}
+				matches = append(matches, candidate{
+					match: Match{ProvinceID: province.ID, ProvinceName: province.Name, CityID: city.ID, CityName: city.Name, DistrictID: district.ID, DistrictName: district.Name},
+					pos:   pos,
+					len:   len([]rune(districtName)),
+				})
 			}
 		}
 	}
@@ -83,16 +126,16 @@ func Resolve(cityHint, fullAddress string) (Match, error) {
 	}
 	selected := matches[0]
 	for _, candidate := range matches[1:] {
-		if candidate.DistrictID != selected.DistrictID {
-			return Match{}, errors.New("地址包含多个可能的行政区，请人工确认")
+		if candidate.pos < selected.pos || (candidate.pos == selected.pos && candidate.len > selected.len) {
+			selected = candidate
 		}
 	}
-	detail := compact(fullAddress)
-	for _, prefix := range []string{selected.ProvinceName, selected.CityName, selected.DistrictName} {
+	detail := address
+	for _, prefix := range []string{selected.match.ProvinceName, selected.match.CityName, selected.match.DistrictName} {
 		detail = strings.TrimPrefix(detail, compact(prefix))
 	}
-	selected.Address = detail
-	return selected, nil
+	selected.match.Address = detail
+	return selected.match, nil
 }
 
 // TemporaryPhone changes the fifth digit. The original phone remains on the
