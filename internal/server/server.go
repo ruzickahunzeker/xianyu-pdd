@@ -95,6 +95,7 @@ type Server struct {
 	orderSyncMu      sync.Mutex
 	orderSyncRunning map[int64]bool
 	purchaseMu       sync.Mutex
+	logisticsMu      sync.Mutex
 	collectorMu      sync.Mutex
 	materialSplitMu  sync.Mutex
 }

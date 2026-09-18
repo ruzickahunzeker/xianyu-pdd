@@ -1,23 +1,37 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Loader2, RefreshCw, Send } from 'lucide-react';
-import { FulfillmentOrder, ShippingAccountConfig, getFulfillmentOrders, getShippingAccounts, saveShippingAccount, shippingPrecheck, submitPhysicalShipment, syncShippingAccountAddresses } from '../services/api';
+import { FulfillmentOrder, LogisticsSyncTask, ShippingAccountConfig, getFulfillmentOrders, getLogisticsSyncTasks, getShippingAccounts, queueLogisticsSync, queueLogisticsSyncBatch, saveShippingAccount, shippingPrecheck, submitPhysicalShipment, syncShippingAccountAddresses } from '../services/api';
 
 const ShippingWorkbench: React.FC = () => {
   const [rows, setRows] = useState<FulfillmentOrder[]>([]);
   const [accounts, setAccounts] = useState<ShippingAccountConfig[]>([]);
+  const [tasks, setTasks] = useState<LogisticsSyncTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('pending');
   const [message, setMessage] = useState('');
   const [shipping, setShipping] = useState('');
+  const [syncing, setSyncing] = useState('');
+  const [batching, setBatching] = useState(false);
 
   const load = async () => {
     setLoading(true);
     try {
-      const [orders, configs] = await Promise.all([getFulfillmentOrders(), getShippingAccounts()]);
-      setRows(orders); setAccounts(configs);
+      const [orders, configs, syncTasks] = await Promise.all([getFulfillmentOrders(), getShippingAccounts(), getLogisticsSyncTasks()]);
+      setRows(orders); setAccounts(configs); setTasks(syncTasks);
     } finally { setLoading(false); }
   };
   useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    if (!tasks.some(task => task.status === 'queued' || task.status === 'processing')) return;
+    const timer = window.setInterval(() => { void load(); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [tasks]);
+
+  const latestTaskByOrder = useMemo(() => {
+    const result = new Map<string, LogisticsSyncTask>();
+    for (const task of tasks) if (!result.has(task.order_id)) result.set(task.order_id, task);
+    return result;
+  }, [tasks]);
 
   const visible = useMemo(() => rows.filter(row => filter === 'all' ||
     (filter === 'pending' && row.pdd_shipped && !row.xianyu_shipped) ||
@@ -48,11 +62,33 @@ const ShippingWorkbench: React.FC = () => {
     try { const result = await syncShippingAccountAddresses(account.cookie_id); setMessage(`已同步 ${result.count} 条卖家发货地址`); await load(); }
     catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
   };
+  const syncOne = async (row: FulfillmentOrder) => {
+    setMessage(''); setSyncing(row.order_id);
+    try { await queueLogisticsSync(row.order_id); setMessage('物流同步任务已加入队列'); await load(); }
+    catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+    finally { setSyncing(''); }
+  };
+  const syncBatch = async () => {
+    setMessage(''); setBatching(true);
+    try { const result=await queueLogisticsSyncBatch(); setMessage(`已加入 ${result.queued} 笔，跳过 ${result.skipped} 笔；每笔间隔 ${result.interval_seconds} 秒`); await load(); }
+    catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
+    finally { setBatching(false); }
+  };
+  const taskLabel = (task?:LogisticsSyncTask) => {
+    if (!task) return '';
+    if (task.status==='queued') return '排队中';
+    if (task.status==='processing') return '同步中';
+    if (task.status==='succeeded') return '同步成功';
+    if (task.status==='not_shipped') return '暂未发货';
+    if (task.status==='blocked') return '账号已阻塞';
+    if (task.status==='failed') return '同步失败';
+    return task.status;
+  };
 
   return <div className="space-y-6">
-    <div className="flex flex-wrap items-center justify-between gap-4"><div><h1 className="text-3xl font-black text-gray-900">发货工作台</h1><p className="mt-2 text-sm text-gray-500">拼多多物流同步、核对与闲鱼实物发货</p></div><button onClick={load} className="px-4 py-2.5 rounded-xl bg-gray-900 text-white font-bold flex gap-2"><RefreshCw className="w-4 h-4"/>刷新</button></div>
+    <div className="flex flex-wrap items-center justify-between gap-4"><div><h1 className="text-3xl font-black text-gray-900">发货工作台</h1><p className="mt-2 text-sm text-gray-500">拼多多物流同步、核对与闲鱼实物发货</p></div><div className="flex gap-2"><button disabled={batching} onClick={syncBatch} className="px-4 py-2.5 rounded-xl bg-blue-600 text-white font-bold flex gap-2 disabled:opacity-50">{batching?<Loader2 className="w-4 animate-spin"/>:<RefreshCw className="w-4"/>}一键同步物流</button><button onClick={load} className="px-4 py-2.5 rounded-xl bg-gray-900 text-white font-bold flex gap-2"><RefreshCw className="w-4 h-4"/>刷新</button></div></div>
     <div className="rounded-xl bg-amber-50 p-4 text-sm text-amber-800 flex gap-2"><AlertTriangle className="w-5 h-5 shrink-0"/><span>拼多多物流自动同步；闲鱼真实发货保持人工审核。预检全部通过后，仍需点击发货按钮才会提交。</span></div>
-    {message && <div className={`rounded-xl p-4 text-sm ${message === '闲鱼发货成功' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{message}</div>}
+    {message && <div className={`rounded-xl p-4 text-sm ${message === '闲鱼发货成功'||message.startsWith('物流同步任务')||message.startsWith('已加入')||message.startsWith('已同步')||message.startsWith('卖家发货地址') ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>{message}</div>}
     <div className="rounded-2xl bg-white border p-5"><h2 className="font-black mb-3">闲鱼账号卖家发货地址</h2><div className="grid md:grid-cols-2 gap-3">{accounts.map(account => <div key={account.cookie_id} className="rounded-xl bg-gray-50 p-4">
       <div className="flex items-center justify-between gap-2 mb-2"><div className="text-sm font-bold">{account.remark || account.cookie_id}</div><button onClick={() => syncAddresses(account)} className="px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 text-xs font-bold">同步地址</button></div>
 		{account.addresses?.length ? <div className="mb-2 space-y-1 text-xs text-gray-500">{account.addresses.map(address => <div key={address.contact_id}>{address.contact_name}｜{address.province_name}{address.city_name}{address.district_name} {address.detail_address}{address.platform_default ? '（平台默认联系人）' : ''}</div>)}</div> : <div className="mb-2 text-xs text-gray-400">尚未同步联系人地址。</div>}
@@ -61,7 +97,7 @@ const ShippingWorkbench: React.FC = () => {
     <div className="flex gap-2 flex-wrap">{Object.entries({ sync: '待同步物流', pending: '待审核发货', problem: '异常', done: '已发货', all: '全部' }).map(([key, label]) => <button key={key} onClick={() => setFilter(key)} className={`px-4 py-2 rounded-xl text-sm font-bold ${filter === key ? 'bg-blue-600 text-white' : 'bg-white border'}`}>{label}</button>)}</div>
     <div className="rounded-2xl bg-white border overflow-hidden">{loading ? <div className="p-12 flex justify-center"><Loader2 className="animate-spin"/></div> : visible.length === 0 ? <div className="p-12 text-center text-gray-400">暂无订单</div> : <div className="overflow-x-auto"><table className="w-full text-sm">
       <thead className="bg-gray-50 text-left"><tr><th className="p-4">闲鱼订单</th><th className="p-4">拼多多订单</th><th className="p-4">商品/SKU</th><th className="p-4">物流</th><th className="p-4">状态</th><th className="p-4"/></tr></thead>
-      <tbody>{visible.map(row => <tr key={row.order_id} className="border-t"><td className="p-4 font-mono">{row.order_id}</td><td className="p-4 font-mono">{row.pdd_order_id || '-'}</td><td className="p-4"><div>{row.spec_name}：{row.spec_value}</div><div className="text-xs text-gray-400 font-mono">{row.source_goods_id} / {row.source_sku_id}</div></td><td className="p-4"><div>{row.logistics_company || '-'}</div><div className="font-mono text-xs">{row.tracking_number || '-'}</div></td><td className="p-4">{row.xianyu_shipped ? <span className="text-green-600 flex gap-1"><CheckCircle2 className="w-4"/>闲鱼已发货</span> : row.pdd_shipped ? <span className="font-bold text-amber-700">待人工审核发货</span> : '待同步物流'}</td><td className="p-4"><button disabled={!row.pdd_shipped || row.xianyu_shipped || shipping === row.order_id} onClick={() => ship(row)} className="px-3 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-40 flex gap-1">{shipping === row.order_id ? <Loader2 className="w-4 animate-spin"/> : <Send className="w-4"/>}{shipping === row.order_id ? '处理中' : '审核并发货'}</button></td></tr>)}</tbody>
+      <tbody>{visible.map(row => {const task=latestTaskByOrder.get(row.order_id);const active=task?.status==='queued'||task?.status==='processing';return <tr key={row.order_id} className="border-t"><td className="p-4 font-mono">{row.order_id}</td><td className="p-4 font-mono">{row.pdd_order_id || '-'}</td><td className="p-4"><div>{row.spec_name}：{row.spec_value}</div><div className="text-xs text-gray-400 font-mono">{row.source_goods_id} / {row.source_sku_id}</div></td><td className="p-4"><div>{row.logistics_company || '-'}</div><div className="font-mono text-xs">{row.tracking_number || '-'}</div>{task&&<div className={`mt-1 text-xs ${task.status==='failed'||task.status==='blocked'?'text-red-600':'text-blue-600'}`}>{taskLabel(task)}{task.last_error?`：${task.last_error}`:''}</div>}</td><td className="p-4">{row.xianyu_shipped ? <span className="text-green-600 flex gap-1"><CheckCircle2 className="w-4"/>闲鱼已发货</span> : row.pdd_shipped ? <span className="font-bold text-amber-700">待人工审核发货</span> : '待同步物流'}</td><td className="p-4"><div className="flex gap-2"><button disabled={!row.pdd_order_id||row.pdd_shipped||row.xianyu_shipped||active||syncing===row.order_id} onClick={()=>syncOne(row)} className="px-3 py-2 rounded-lg bg-gray-100 text-gray-800 disabled:opacity-40 flex gap-1">{active||syncing===row.order_id?<Loader2 className="w-4 animate-spin"/>:<RefreshCw className="w-4"/>}{active?taskLabel(task):'同步物流'}</button><button disabled={!row.pdd_shipped || row.xianyu_shipped || shipping === row.order_id} onClick={() => ship(row)} className="px-3 py-2 rounded-lg bg-blue-600 text-white disabled:opacity-40 flex gap-1">{shipping === row.order_id ? <Loader2 className="w-4 animate-spin"/> : <Send className="w-4"/>}{shipping === row.order_id ? '处理中' : '审核并发货'}</button></div></td></tr>})}</tbody>
     </table></div>}</div>
   </div>;
 };

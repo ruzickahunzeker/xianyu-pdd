@@ -45,6 +45,10 @@ type messageTask struct {
 	TaskType, Message, Action, PDDOrderID                                 string
 }
 
+type logisticsSyncTask struct {
+	ID, OrderID, PDDOrderID, PDDAccountID, LeaseToken string
+}
+
 type pddChatCapture struct {
 	Endpoint string          `json:"endpoint"`
 	Response json.RawMessage `json:"response"`
@@ -154,15 +158,20 @@ func main() {
 			log.Printf("商家消息任务失败: %v", messageErr)
 		}
 
+		logisticsTaskErr := w.runLogisticsOne()
+		if logisticsTaskErr != nil && !errors.Is(logisticsTaskErr, errNoTask) {
+			log.Printf("人工物流同步失败: %v", logisticsTaskErr)
+		}
+
 		var logisticsErr error
-		if errors.Is(purchaseErr, errNoTask) && errors.Is(messageErr, errNoTask) {
+		if errors.Is(purchaseErr, errNoTask) && errors.Is(messageErr, errNoTask) && errors.Is(logisticsTaskErr, errNoTask) {
 			w.reportState("syncing_logistics", "")
 			if logisticsErr = w.syncLogistics(); logisticsErr != nil {
 				log.Printf("物流同步失败: %v", logisticsErr)
 			}
 		}
 		lastError := ""
-		for _, runErr := range []error{purchaseErr, messageErr, logisticsErr} {
+		for _, runErr := range []error{purchaseErr, messageErr, logisticsTaskErr, logisticsErr} {
 			if runErr != nil && !errors.Is(runErr, errNoTask) {
 				lastError = runErr.Error()
 				break
@@ -502,6 +511,86 @@ func (w *worker) messageResult(t messageTask, status, reason string, result map[
 		return errors.New(reason)
 	}
 	return nil
+}
+
+func (w *worker) claimLogisticsTask() (logisticsSyncTask, error) {
+	var raw map[string]any
+	status, err := w.jsonRequest(http.MethodPost, "/api/fulfillment/logistics-sync-tasks/claim", map[string]any{"worker_id": "pdd-worker", "lease_seconds": 120}, &raw)
+	if status == http.StatusNotFound {
+		return logisticsSyncTask{}, errNoTask
+	}
+	if err != nil {
+		return logisticsSyncTask{}, err
+	}
+	text := func(key string) string { value, _ := raw[key].(string); return value }
+	return logisticsSyncTask{ID: text("id"), OrderID: text("order_id"), PDDOrderID: text("pdd_order_id"), PDDAccountID: text("pdd_account_id"), LeaseToken: text("lease_token")}, nil
+}
+
+func (w *worker) logisticsTaskHeartbeat(task logisticsSyncTask) error {
+	_, err := w.jsonRequest(http.MethodPost, "/api/fulfillment/logistics-sync-tasks/"+url.PathEscape(task.ID)+"/heartbeat", map[string]any{"lease_token": task.LeaseToken}, nil)
+	return err
+}
+
+func (w *worker) logisticsTaskResult(task logisticsSyncTask, status, reason string, result map[string]any) error {
+	_, err := w.jsonRequest(http.MethodPost, "/api/fulfillment/logistics-sync-tasks/"+url.PathEscape(task.ID)+"/result", map[string]any{"lease_token": task.LeaseToken, "status": status, "error": reason, "result": result}, nil)
+	return err
+}
+
+func (w *worker) runLogisticsOne() (runErr error) {
+	task, err := w.claimLogisticsTask()
+	if err != nil {
+		return err
+	}
+	defer func() { w.recordPDDAccountEvent(task.PDDAccountID, "logistics_sync", task.ID, runErr) }()
+	finishFailure := func(status string, cause error) error {
+		if resultErr := w.logisticsTaskResult(task, status, cause.Error(), nil); resultErr != nil {
+			return fmt.Errorf("%v（回传失败: %w）", cause, resultErr)
+		}
+		return cause
+	}
+	if strings.TrimSpace(task.PDDOrderID) == "" {
+		return finishFailure("failed", errors.New("物流同步任务缺少拼多多订单号"))
+	}
+	ctx, site, err := w.taskContext(taskToPurchaseTask(task))
+	if err != nil {
+		return finishFailure("blocked", err)
+	}
+	defer ctx.Close()
+	page, err := ctx.NewPage()
+	if err != nil {
+		return finishFailure("failed", err)
+	}
+	defer page.Close()
+	if err = w.logisticsTaskHeartbeat(task); err != nil {
+		return err
+	}
+	orderURL := site.URL("/order.html", url.Values{"order_sn": {task.PDDOrderID}, "page_from": {"1"}, "main_orders": {"1"}})
+	if _, err = page.Goto(orderURL, playwright.PageGotoOptions{WaitUntil: playwright.WaitUntilStateDomcontentloaded}); err != nil {
+		return finishFailure("failed", err)
+	}
+	html, err := page.Content()
+	if err != nil {
+		return finishFailure("failed", err)
+	}
+	parsed := pddshipping.ParseHTML([]byte(html))
+	shipments := make([]pddshipping.Shipment, 0, len(parsed))
+	for _, shipment := range parsed {
+		if shipment.OrderID == task.PDDOrderID && strings.TrimSpace(shipment.TrackingNumber) != "" {
+			shipments = append(shipments, shipment)
+		}
+	}
+	if len(shipments) == 0 {
+		return w.logisticsTaskResult(task, "not_shipped", "", map[string]any{"pdd_order_id": task.PDDOrderID})
+	}
+	var snapshotResult map[string]any
+	if _, err = w.jsonRequest(http.MethodPost, "/api/fulfillment/logistics/snapshot", map[string]any{"shipments": shipments}, &snapshotResult); err != nil {
+		return finishFailure("failed", err)
+	}
+	return w.logisticsTaskResult(task, "succeeded", "", map[string]any{"pdd_order_id": task.PDDOrderID, "shipment_count": len(shipments), "snapshot": snapshotResult})
+}
+
+func taskToPurchaseTask(logisticsTask logisticsSyncTask) task {
+	return task{PDDAccountID: logisticsTask.PDDAccountID}
 }
 
 var errNoTask = errors.New("没有可领取任务")

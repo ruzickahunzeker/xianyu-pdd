@@ -492,6 +492,10 @@ export interface ShippingAccountConfig { cookie_id:string; remark:string; addres
 export const getShippingAccounts = ():Promise<ShippingAccountConfig[]> => get('/api/fulfillment/shipping-accounts');
 export const saveShippingAccount = (cookieId:string,addressId:number,addressSummary=''):Promise<ApiResponse> => put(`/api/fulfillment/shipping-accounts/${encodeURIComponent(cookieId)}`,{address_id:addressId,address_summary:addressSummary});
 export const syncShippingAccountAddresses = (cookieId:string):Promise<{success:boolean;count:number;selected_address_id:number}> => post(`/api/fulfillment/shipping-accounts/${encodeURIComponent(cookieId)}/sync`,{});
+export interface LogisticsSyncTask { id:string;order_id:string;pdd_order_id:string;pdd_account_id:string;source:'single'|'batch'|string;status:string;last_error:string;scheduled_at:number;started_at:number;finished_at:number;created_at:number; }
+export const getLogisticsSyncTasks = ():Promise<LogisticsSyncTask[]> => get('/api/fulfillment/logistics-sync-tasks');
+export const queueLogisticsSync = (orderId:string):Promise<LogisticsSyncTask & {success:boolean}> => post(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/logistics-sync`,{});
+export const queueLogisticsSyncBatch = ():Promise<{success:boolean;eligible:number;queued:number;skipped:number;interval_seconds:number;limit:number}> => post('/api/fulfillment/logistics-sync/batch',{});
 
 export interface PDDMessageTask { id:string;pdd_account_id:string;goods_id:string;sku_id:string;mall_sn:string;task_type:string;message:string;business_id:string;xianyu_order_id:string;pdd_order_id:string;send_mode:string;status:string;attempts:number;sent_at:number;verified_at:number;last_error:string;created_at:number; }
 export interface PDDMessageInput { pdd_account_id?:string;goods_id:string;sku_id?:string;mall_sn?:string;task_type:string;business_id?:string;xianyu_order_id?:string;pdd_order_id?:string;message:string;send_mode:'manual_confirm';metadata?:Record<string,unknown>; }

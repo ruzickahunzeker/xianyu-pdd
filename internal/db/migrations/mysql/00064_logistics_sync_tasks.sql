@@ -1,0 +1,4 @@
+-- +goose Up
+CREATE TABLE pdd_logistics_sync_tasks (id VARCHAR(64) PRIMARY KEY,user_id BIGINT NOT NULL,order_id VARCHAR(191) NOT NULL,pdd_order_id VARCHAR(191) NOT NULL,pdd_account_id VARCHAR(64) NOT NULL,source VARCHAR(32) NOT NULL DEFAULT 'single',status VARCHAR(32) NOT NULL DEFAULT 'queued',scheduled_at BIGINT NOT NULL,worker_id VARCHAR(191) NOT NULL DEFAULT '',lease_token VARCHAR(64) NOT NULL DEFAULT '',lease_expires_at BIGINT NOT NULL DEFAULT 0,result_json LONGTEXT NOT NULL DEFAULT ('{}'),last_error TEXT NOT NULL DEFAULT (''),active_marker TINYINT NULL DEFAULT 1,created_at BIGINT NOT NULL,started_at BIGINT NOT NULL DEFAULT 0,finished_at BIGINT NOT NULL DEFAULT 0,updated_at BIGINT NOT NULL,UNIQUE KEY uq_pdd_logistics_sync_active(user_id,order_id,active_marker),INDEX idx_pdd_logistics_sync_due(user_id,status,scheduled_at),INDEX idx_pdd_logistics_sync_order(user_id,order_id,created_at));
+-- +goose Down
+DROP TABLE IF EXISTS pdd_logistics_sync_tasks;
