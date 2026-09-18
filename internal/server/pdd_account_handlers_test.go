@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,6 +34,66 @@ func TestPDDAccountSettingsDoNotExposeCookie(t *testing.T) {
 	verified := request(http.MethodPost, "/api/pdd/account/verify", `{}`)
 	if verified.Code != http.StatusOK || !strings.Contains(verified.Body.String(), `"credential_status":"valid"`) {
 		t.Fatalf("verify=%d %s", verified.Code, verified.Body.String())
+	}
+}
+
+func TestPDDAccountImportsCollectorConfigWithAddressID(t *testing.T) {
+	t.Setenv("XIANYU_DATA_KEY", "pdd-collector-import-key")
+	server, _, cleanup := newTestServer(t)
+	defer cleanup()
+	router := server.Router()
+	session := loginHelper(t, router)
+	collectorConfig, err := json.Marshal(map[string]any{
+		"site":               "yangkeduo",
+		"cookie":             "token=x; pdd_user_id=6670459375039; secret=do-not-return",
+		"default_address_id": "60984097534",
+		"user_agent":         "collector-user-agent",
+		"captured_at":        "2026-09-18T10:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"name":               "扩展采集账号",
+		"site":               "pinduoduo",
+		"cookie":             string(collectorConfig),
+		"default_address_id": "",
+		"enabled":            true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPut, "/api/pdd/account", strings.NewReader(string(body)))
+	req.AddCookie(session)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save=%d %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "do-not-return") || !strings.Contains(rec.Body.String(), `"default_address_id":"60984097534"`) || !strings.Contains(rec.Body.String(), `"site":"yangkeduo"`) {
+		t.Fatalf("unexpected response: %s", rec.Body.String())
+	}
+	account, err := server.Store.PDDAccounts.Default(t.Context(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Cookie != "token=x; pdd_user_id=6670459375039; secret=do-not-return" || account.DefaultAddressID != "60984097534" || account.Site != "yangkeduo" || account.UserAgent != "collector-user-agent" {
+		t.Fatalf("collector config not imported: %+v", account)
+	}
+}
+
+func TestPDDAccountRejectsMalformedCollectorConfig(t *testing.T) {
+	server, _, cleanup := newTestServer(t)
+	defer cleanup()
+	router := server.Router()
+	req := httptest.NewRequest(http.MethodPut, "/api/pdd/account", strings.NewReader(`{"site":"pinduoduo","cookie":"{not-json","default_address_id":"609"}`))
+	req.AddCookie(loginHelper(t, router))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "扩展账号配置 JSON 无效") {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

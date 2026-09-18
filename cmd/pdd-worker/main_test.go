@@ -152,9 +152,26 @@ func TestPurchaseCheckoutURLCreatesGroupOrFallsBackDirect(t *testing.T) {
 	}
 }
 
-func TestPurchaseCheckoutURLRejectsIncompleteJoinContext(t *testing.T) {
-	_, _, err := purchaseCheckoutURL(pddsite.Pinduoduo, pddproduct.Snapshot{GroupOffers: []pddproduct.GroupOffer{{GroupOrderID: "active"}}}, "936", "188", 1, time.Unix(100, 0))
-	if err == nil || !strings.Contains(err.Error(), "group_id") {
-		t.Fatalf("err=%v", err)
+func TestPurchaseCheckoutURLFallsBackFromIncompleteJoinContext(t *testing.T) {
+	got, mode, err := purchaseCheckoutURL(pddsite.Pinduoduo, pddproduct.Snapshot{GroupOffers: []pddproduct.GroupOffer{{GroupOrderID: "active", DetailID: "detail-only"}}}, "936", "188", 1, time.Unix(100, 0))
+	if err != nil || mode != "direct" || strings.Contains(got, "group_order_id=") || strings.Contains(got, "group_id=") {
+		t.Fatalf("url=%q mode=%q err=%v", got, mode, err)
+	}
+}
+
+func TestOrderPollListTypesOnlyChecksCancelledOnFinalRecoveryAttempt(t *testing.T) {
+	for check := 1; check <= 3; check++ {
+		normal := orderPollListTypes(false, check, 3)
+		if len(normal) != 1 || normal[0] != "1" {
+			t.Fatalf("normal check %d: %#v", check, normal)
+		}
+		recovery := orderPollListTypes(true, check, 3)
+		wantLen := 1
+		if check == 3 {
+			wantLen = 2
+		}
+		if len(recovery) != wantLen || recovery[0] != "1" || (check == 3 && recovery[1] != "0") {
+			t.Fatalf("recovery check %d: %#v", check, recovery)
+		}
 	}
 }

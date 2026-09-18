@@ -2,6 +2,7 @@ package server
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -12,6 +13,32 @@ import (
 )
 
 const defaultPDDUserAgent = ""
+
+type pddCollectorAccountConfig struct {
+	Site             string `json:"site"`
+	Cookie           string `json:"cookie"`
+	DefaultAddressID string `json:"default_address_id"`
+	UserAgent        string `json:"user_agent"`
+}
+
+func parsePDDCollectorAccountConfig(raw string) (pddCollectorAccountConfig, bool, error) {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "{") {
+		return pddCollectorAccountConfig{}, false, nil
+	}
+	var config pddCollectorAccountConfig
+	if err := json.Unmarshal([]byte(trimmed), &config); err != nil {
+		return pddCollectorAccountConfig{}, true, errors.New("扩展账号配置 JSON 无效")
+	}
+	config.Site = strings.TrimSpace(config.Site)
+	config.Cookie = strings.TrimSpace(config.Cookie)
+	config.DefaultAddressID = strings.TrimSpace(config.DefaultAddressID)
+	config.UserAgent = strings.TrimSpace(config.UserAgent)
+	if config.Cookie == "" {
+		return pddCollectorAccountConfig{}, true, errors.New("扩展账号配置中缺少 Cookie")
+	}
+	return config, true, nil
+}
 
 func (s *Server) mountPDDAccountAdmin(r interface {
 	Get(string, http.HandlerFunc)
@@ -60,6 +87,23 @@ func (s *Server) savePDDAccount(w http.ResponseWriter, r *http.Request) {
 	if decodeJSON(r, &in) != nil {
 		writeErr(w, http.StatusBadRequest, "请求格式错误")
 		return
+	}
+	collectorConfig, imported, importErr := parsePDDCollectorAccountConfig(in.Cookie)
+	if importErr != nil {
+		writeErr(w, http.StatusBadRequest, importErr.Error())
+		return
+	}
+	if imported {
+		in.Cookie = collectorConfig.Cookie
+		if collectorConfig.Site != "" {
+			in.Site = collectorConfig.Site
+		}
+		if strings.TrimSpace(in.DefaultAddressID) == "" {
+			in.DefaultAddressID = collectorConfig.DefaultAddressID
+		}
+		if strings.TrimSpace(in.UserAgent) == "" {
+			in.UserAgent = collectorConfig.UserAgent
+		}
 	}
 	userID := auth.SessionFromContext(r.Context()).UserID
 	existing, _ := s.Store.PDDAccounts.Default(r.Context(), userID)

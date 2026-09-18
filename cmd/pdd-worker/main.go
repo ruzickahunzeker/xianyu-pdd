@@ -892,7 +892,7 @@ func (w *worker) runOne() (runErr error) {
 	}
 	defer page.Close()
 	if t.RecoveryOnly {
-		order, recoverErr := w.findCreatedOrder(t, page, site, 15*time.Second)
+		order, recoverErr := w.findCreatedOrder(t, page, site, 30*time.Second)
 		if recoverErr != nil {
 			_ = w.resultUnknown(t, recoverErr.Error())
 			return recoverErr
@@ -991,7 +991,7 @@ func (w *worker) runOne() (runErr error) {
 	for _, order := range before {
 		t.BeforeOrderSNs = append(t.BeforeOrderSNs, order.OrderID)
 	}
-	order, err := w.findCreatedOrder(t, page, site, 45*time.Second)
+	order, err := w.findCreatedOrder(t, page, site, 30*time.Second)
 	if err != nil {
 		return err
 	}
@@ -1028,15 +1028,19 @@ func (w *worker) findCreatedOrder(t task, page playwright.Page, site pddsite.Sit
 	for _, id := range t.BeforeOrderSNs {
 		seen[id] = true
 	}
-	deadline := time.Now().Add(timeout)
+	const pollInterval = 10 * time.Second
+	maxChecks := int(timeout / pollInterval)
+	if maxChecks < 1 {
+		maxChecks = 1
+	}
 	lastCount := 0
 	lastObserved := []string{}
 	var lastHTML string
-	for {
-		listTypes := []string{"1"}
-		if t.RecoveryOnly {
-			listTypes = append(listTypes, "0")
-		}
+	for check := 1; check <= maxChecks; check++ {
+		// Give PDD time to materialize the unpaid order before each bounded
+		// request. Normal creation checks type=1 only at 10s, 20s and 30s.
+		time.Sleep(pollInterval)
+		listTypes := orderPollListTypes(t.RecoveryOnly, check, maxChecks)
 		candidateByID := map[string]pddcheckout.Order{}
 		lastObserved = lastObserved[:0]
 		for _, listType := range listTypes {
@@ -1062,16 +1066,23 @@ func (w *worker) findCreatedOrder(t task, page playwright.Page, site pddsite.Sit
 				return w.verifyCreatedOrder(t, page, site, candidate)
 			}
 		}
-		if time.Now().After(deadline) {
-			if lastHTML != "" {
-				_ = os.MkdirAll(w.screenshotDir, 0o700)
-				_ = os.WriteFile(filepath.Join(w.screenshotDir, t.ID+"-unpaid-recovery.html"), []byte(lastHTML), 0o600)
-				_ = w.screenshot(page, t.ID+"-unpaid-recovery.png")
-			}
-			return pddcheckout.Order{}, fmt.Errorf("等待待付款订单超时（候选=%d，已解析=%s）", lastCount, strings.Join(lastObserved, ","))
-		}
-		time.Sleep(2 * time.Second)
 	}
+	if lastHTML != "" {
+		_ = os.MkdirAll(w.screenshotDir, 0o700)
+		_ = os.WriteFile(filepath.Join(w.screenshotDir, t.ID+"-unpaid-recovery.html"), []byte(lastHTML), 0o600)
+		_ = w.screenshot(page, t.ID+"-unpaid-recovery.png")
+	}
+	return pddcheckout.Order{}, fmt.Errorf("等待待付款订单超时（检查=%d 次，候选=%d，已解析=%s）", maxChecks, lastCount, strings.Join(lastObserved, ","))
+}
+
+func orderPollListTypes(recovery bool, check, maxChecks int) []string {
+	listTypes := []string{"1"}
+	// A recovery task checks type=0 only on its final attempt. It never
+	// submits again, and avoids doubling every polling round.
+	if recovery && check == maxChecks {
+		listTypes = append(listTypes, "0")
+	}
+	return listTypes
 }
 
 func (w *worker) verifyCreatedOrder(t task, page playwright.Page, site pddsite.Site, order pddcheckout.Order) (pddcheckout.Order, error) {

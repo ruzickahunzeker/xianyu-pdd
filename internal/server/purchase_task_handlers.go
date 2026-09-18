@@ -119,6 +119,9 @@ func (s *Server) claimPurchaseTask(w http.ResponseWriter, r *http.Request) {
 	s.purchaseMu.Lock()
 	defer s.purchaseMu.Unlock()
 	now := time.Now().Unix()
+	// Retryable pre-submit failures wait without being claimable. Once their
+	// backoff expires they become terminal attempts, allowing a fresh attempt.
+	_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE pdd_purchase_tasks SET status='failed',lease_expires_at=0,updated_at=? WHERE user_id=? AND status='retry_wait' AND lease_expires_at>0 AND lease_expires_at<=?`, now, userID, now)
 	// Submission may already have created an order. Expired submit/reconcile
 	// leases must therefore re-enter reconciliation instead of fresh purchase.
 	_ = s.recoverExpiredPurchaseLeases(r.Context(), userID, now)
@@ -480,9 +483,22 @@ func (s *Server) abortPurchaseTask(w http.ResponseWriter, r *http.Request) {
 		Reason     string `json:"reason"`
 	}
 	_ = decodeJSON(r, &in)
-	userID := auth.SessionFromContext(r.Context()).UserID
-	now := time.Now().Unix()
-	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE pdd_purchase_tasks SET status='aborted',last_error=?,lease_token='',lease_expires_at=0,finished_at=?,updated_at=? WHERE id=? AND user_id=? AND lease_token=? AND status NOT IN ('completed','aborted')`, strings.TrimSpace(in.Reason), now, now, chi.URLParam(r, "task_id"), userID, strings.TrimSpace(in.LeaseToken))
+	userID, taskID := auth.SessionFromContext(r.Context()).UserID, chi.URLParam(r, "task_id")
+	now, reason := time.Now().Unix(), strings.TrimSpace(in.Reason)
+	var attempt int
+	var orderID string
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT attempt,order_id FROM pdd_purchase_tasks WHERE id=? AND user_id=? AND lease_token=?`, taskID, userID, strings.TrimSpace(in.LeaseToken)).Scan(&attempt, &orderID); err != nil {
+		writeErr(w, 409, "任务租约无效或任务已结束")
+		return
+	}
+	status, retryAt := "blocked", int64(0)
+	if purchaseFailureRetryable(reason) && attempt <= 3 {
+		status = "retry_wait"
+		retryAt = now + int64(purchaseRetryDelay(attempt)/time.Second)
+	} else if purchaseFailureRetryable(reason) {
+		reason += "；已达到最大自动重试次数"
+	}
+	res, err := s.Store.DB.ExecContext(r.Context(), `UPDATE pdd_purchase_tasks SET status=?,last_error=?,lease_token='',lease_expires_at=?,finished_at=?,updated_at=? WHERE id=? AND user_id=? AND lease_token=? AND status NOT IN ('completed','aborted','blocked')`, status, reason, retryAt, now, now, taskID, userID, strings.TrimSpace(in.LeaseToken))
 	if err != nil {
 		writeErr(w, 500, "中止任务失败")
 		return
@@ -492,12 +508,35 @@ func (s *Server) abortPurchaseTask(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "任务租约无效或任务已结束")
 		return
 	}
-	var orderID string
-	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT order_id FROM pdd_purchase_tasks WHERE id=? AND user_id=?`, chi.URLParam(r, "task_id"), userID).Scan(&orderID)
 	if orderID != "" {
 		_, _ = s.Store.DB.ExecContext(r.Context(), `DELETE FROM pdd_account_locks WHERE user_id=? AND order_id=?`, userID, orderID)
+		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET last_error=?,updated_at=? WHERE order_id=? AND user_id=?`, reason, now, orderID, userID)
 	}
-	writeJSON(w, 200, map[string]any{"success": true})
+	if status == "blocked" {
+		s.createFulfillmentException(r, userID, orderID, taskID, "purchase_blocked", reason, map[string]any{"attempt": attempt, "reason": reason})
+	}
+	writeJSON(w, 200, map[string]any{"success": true, "status": status, "retry_at": retryAt})
+}
+
+func purchaseFailureRetryable(reason string) bool {
+	lower := strings.ToLower(strings.TrimSpace(reason))
+	for _, marker := range []string{"timeout", "超时", "connection", "network", "unexpected eof", "http 500", "http 502", "http 503", "http 504", "temporarily", "临时错误"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func purchaseRetryDelay(attempt int) time.Duration {
+	switch attempt {
+	case 1:
+		return time.Minute
+	case 2:
+		return 5 * time.Minute
+	default:
+		return 30 * time.Minute
+	}
 }
 
 func (s *Server) confirmUnknownPurchaseCancelled(w http.ResponseWriter, r *http.Request) {

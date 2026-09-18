@@ -315,6 +315,14 @@ func (s *Server) requestPurchase(w http.ResponseWriter, r *http.Request) {
 	if accountErr != nil || !account.Enabled {
 		problems = append(problems, "请先配置并启用默认拼多多账号")
 	}
+	// An explicit purchase request is the manual acknowledgement for a blocked
+	// or waiting pre-submit attempt. Preserve its audit row, but make it terminal
+	// so a fresh attempt can be claimed immediately.
+	if len(problems) == 0 {
+		now := time.Now().Unix()
+		_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE pdd_purchase_tasks SET status='aborted',last_error=CASE WHEN last_error='' THEN '人工重新尝试' ELSE last_error END,lease_token='',lease_expires_at=0,finished_at=?,updated_at=? WHERE user_id=? AND order_id=? AND status IN ('blocked','retry_wait') AND COALESCE(pdd_order_id,'')=''`, now, now, userID, orderID)
+		_, _ = s.Store.DB.ExecContext(r.Context(), `DELETE FROM pdd_account_locks WHERE user_id=? AND order_id=?`, userID, orderID)
+	}
 	var active int
 	var recovery int
 	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM pdd_purchase_tasks WHERE user_id=? AND order_id=? AND status NOT IN ('failed','aborted','completed','result_unknown')`, userID, orderID).Scan(&active)

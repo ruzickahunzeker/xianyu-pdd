@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCanSavePurchaseBaseline(t *testing.T) {
@@ -105,6 +106,70 @@ func TestRecoverExpiredPurchaseLeasesOnlyReconcilesPostSubmit(t *testing.T) {
 		}
 		if expected == "result_unknown" && (token != "" || lease != 0) {
 			t.Fatalf("%s recovery lease not cleared: token=%q lease=%d", id, token, lease)
+		}
+	}
+}
+
+func TestPurchaseFailureRetryPolicy(t *testing.T) {
+	if !purchaseFailureRetryable("playwright timeout") || !purchaseFailureRetryable("HTTP 503") {
+		t.Fatal("transient failures must be retryable")
+	}
+	for _, reason := range []string{"商品存在有效拼单但缺少 group_id", "预计利润低于 0.5 元", "页面出现安全验证"} {
+		if purchaseFailureRetryable(reason) {
+			t.Fatalf("deterministic/risk failure must block: %q", reason)
+		}
+	}
+	if purchaseRetryDelay(1) != time.Minute || purchaseRetryDelay(2) != 5*time.Minute || purchaseRetryDelay(3) != 30*time.Minute {
+		t.Fatal("unexpected retry schedule")
+	}
+}
+
+func TestAbortPurchaseTaskWaitsOrBlocksInsteadOfImmediateReclaim(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	admin, err := store.Users.GetByUsername(t.Context(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO cookies(id,value,user_id) VALUES('account','unb=1; _m_h5_tk=t_1;',?)`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO orders(order_id,item_id,cookie_id,order_status) VALUES('retry-order','item','account','pending_ship'),('blocked-order','item','account','pending_ship')`); err != nil {
+		t.Fatal(err)
+	}
+	for _, orderID := range []string{"retry-order", "blocked-order"} {
+		if _, err = store.DB.Exec(`INSERT INTO order_fulfillments(order_id,user_id,cookie_id,item_id,mapping_status,created_at,updated_at) VALUES(?,?,?,'item','mapped',1,1)`, orderID, admin.ID, "account"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().Unix()
+	for _, row := range []struct{ id, orderID, token string }{{"retry-task", "retry-order", "retry-token"}, {"blocked-task", "blocked-order", "blocked-token"}} {
+		if _, err = store.DB.Exec(`INSERT INTO pdd_purchase_tasks(id,user_id,order_id,attempt,status,worker_id,lease_token,lease_expires_at,created_at,updated_at) VALUES(?,?,?,1,'loading_goods','worker',?,?,?,?)`, row.id, admin.ID, row.orderID, row.token, now+120, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := func(taskID, token, reason string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/fulfillment/purchase-tasks/"+taskID+"/abort", strings.NewReader(`{"lease_token":"`+token+`","reason":"`+reason+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(loginHelper(t, srv.Router()))
+		rec := httptest.NewRecorder()
+		srv.Router().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := request("retry-task", "retry-token", "playwright timeout"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"retry_wait"`) {
+		t.Fatalf("retry abort=%d %s", rec.Code, rec.Body.String())
+	}
+	if rec := request("blocked-task", "blocked-token", "商品存在有效拼单但缺少 group_id"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"blocked"`) {
+		t.Fatalf("blocked abort=%d %s", rec.Code, rec.Body.String())
+	}
+	for taskID, expected := range map[string]string{"retry-task": "retry_wait", "blocked-task": "blocked"} {
+		var status, token string
+		var retryAt int64
+		if err = store.DB.QueryRow(`SELECT status,lease_token,lease_expires_at FROM pdd_purchase_tasks WHERE id=?`, taskID).Scan(&status, &token, &retryAt); err != nil {
+			t.Fatal(err)
+		}
+		if status != expected || token != "" || (expected == "retry_wait" && retryAt <= now) || (expected == "blocked" && retryAt != 0) {
+			t.Fatalf("task=%s status=%s token=%q retry_at=%d", taskID, status, token, retryAt)
 		}
 	}
 }

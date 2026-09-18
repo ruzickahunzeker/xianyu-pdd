@@ -33,13 +33,17 @@ type GroupOffer struct {
 
 // SelectActiveGroupOffer returns the first usable, non-expired group offer.
 // PDD pages have used both second and millisecond Unix timestamps.
+// Incomplete offers are ignored: recent pages can expose a group_order_id and
+// detail_id without a group_id. Joining such an offer would be unsafe, while
+// ignoring it lets checkout fall back to create-group or direct purchase where
+// the final amount is verified before submission.
 func SelectActiveGroupOffer(snapshot Snapshot, now time.Time) (GroupOffer, bool, error) {
 	for _, offer := range snapshot.GroupOffers {
 		if strings.TrimSpace(offer.GroupOrderID) == "" || groupOfferExpired(offer.ExpireAt, now) {
 			continue
 		}
 		if strings.TrimSpace(offer.GroupID) == "" || strings.TrimSpace(offer.DetailID) == "" {
-			return GroupOffer{}, false, errors.New("商品存在有效拼单但缺少 group_id 或 detail_id")
+			continue
 		}
 		return offer, true, nil
 	}

@@ -32,10 +32,18 @@ func TestSelectActiveGroupOfferHandlesSecondsAndMilliseconds(t *testing.T) {
 	}
 }
 
-func TestSelectActiveGroupOfferRejectsIncompleteActiveOffer(t *testing.T) {
-	_, _, err := SelectActiveGroupOffer(Snapshot{GroupOffers: []GroupOffer{{GroupOrderID: "active"}}}, time.Unix(100, 0))
-	if err == nil {
-		t.Fatal("expected incomplete group context error")
+func TestSelectActiveGroupOfferSkipsIncompleteOffers(t *testing.T) {
+	snapshot := Snapshot{GroupOffers: []GroupOffer{
+		{GroupOrderID: "detail-only", DetailID: "detail", ExpireAt: 200},
+		{GroupOrderID: "complete", GroupID: "group", DetailID: "detail", ExpireAt: 200},
+	}}
+	offer, ok, err := SelectActiveGroupOffer(snapshot, time.Unix(100, 0))
+	if err != nil || !ok || offer.GroupOrderID != "complete" {
+		t.Fatalf("offer=%#v ok=%v err=%v", offer, ok, err)
+	}
+	_, ok, err = SelectActiveGroupOffer(Snapshot{GroupOffers: snapshot.GroupOffers[:1]}, time.Unix(100, 0))
+	if err != nil || ok {
+		t.Fatalf("incomplete-only offers must fall back safely: ok=%v err=%v", ok, err)
 	}
 }
 
