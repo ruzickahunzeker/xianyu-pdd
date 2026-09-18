@@ -446,7 +446,7 @@ export const getAdminStats = async (): Promise<AdminStats> => {
 };
 
 export interface FulfillmentOrder {
-  order_id:string; cookie_id:string; item_id:string; spec_name:string; spec_value:string;
+  order_id:string; cookie_id:string; item_id:string; order_status:string; spec_name:string; spec_value:string;
   receiver_name:string; receiver_phone:string; receiver_address:string; receiver_city:string;
   material_id:number; material_sku_id:string; source_goods_id:string; source_sku_id:string; xianyu_sku_id:string;
   mapping_status:'pending'|'mapped'|'unmapped'|'ambiguous'|string; pdd_ordered:boolean; pdd_paid:boolean; pdd_paid_at:number; pdd_paid_source:string; pdd_order_id:string;

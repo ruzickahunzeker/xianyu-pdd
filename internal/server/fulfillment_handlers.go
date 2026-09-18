@@ -223,7 +223,7 @@ func (s *Server) listFulfillments(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "同步履约订单失败")
 		return
 	}
-	query := `SELECT f.order_id,f.cookie_id,f.item_id,COALESCE(o.spec_name,''),COALESCE(o.spec_value,''),COALESCE(o.receiver_name,''),COALESCE(o.receiver_phone,''),COALESCE(o.receiver_address,''),COALESCE(o.receiver_city,''),f.material_id,f.material_sku_id,f.source_goods_id,f.source_sku_id,f.xianyu_sku_id,f.mapping_status,f.pdd_ordered,f.pdd_paid,f.pdd_paid_at,f.pdd_paid_source,f.pdd_order_id,COALESCE((SELECT t.pdd_order_json FROM pdd_purchase_tasks t WHERE t.user_id=f.user_id AND t.order_id=f.order_id AND t.pdd_order_id=f.pdd_order_id AND t.pdd_order_json<>'' ORDER BY t.attempt DESC LIMIT 1),''),f.pdd_shipped,f.logistics_company,f.tracking_number,f.xianyu_shipped,f.reminded,f.fulfillment_exempt,f.reminder_exempt,f.manual_modified_at,f.history_repaired_at,f.phone_restore_due_at,f.address_match_status,f.last_error,f.purchase_requested_at,f.updated_at FROM order_fulfillments f JOIN orders o ON o.order_id=f.order_id WHERE f.user_id=? AND o.deleted_at IS NULL AND o.order_status<>'cancelled'`
+	query := `SELECT f.order_id,f.cookie_id,f.item_id,o.order_status,COALESCE(o.spec_name,''),COALESCE(o.spec_value,''),COALESCE(o.receiver_name,''),COALESCE(o.receiver_phone,''),COALESCE(o.receiver_address,''),COALESCE(o.receiver_city,''),f.material_id,f.material_sku_id,f.source_goods_id,f.source_sku_id,f.xianyu_sku_id,f.mapping_status,f.pdd_ordered,f.pdd_paid,f.pdd_paid_at,f.pdd_paid_source,f.pdd_order_id,COALESCE((SELECT t.pdd_order_json FROM pdd_purchase_tasks t WHERE t.user_id=f.user_id AND t.order_id=f.order_id AND t.pdd_order_id=f.pdd_order_id AND t.pdd_order_json<>'' ORDER BY t.attempt DESC LIMIT 1),''),f.pdd_shipped,f.logistics_company,f.tracking_number,f.xianyu_shipped,f.reminded,f.fulfillment_exempt,f.reminder_exempt,f.manual_modified_at,f.history_repaired_at,f.phone_restore_due_at,f.address_match_status,f.last_error,f.purchase_requested_at,f.updated_at FROM order_fulfillments f JOIN orders o ON o.order_id=f.order_id WHERE f.user_id=? AND o.deleted_at IS NULL AND o.order_status<>'cancelled'`
 	args := []any{userID}
 	for _, field := range []string{"pdd_ordered", "pdd_paid", "pdd_shipped", "xianyu_shipped", "reminded"} {
 		value, present, err := fulfillmentBoolFilter(r.URL.Query().Get(field))
@@ -257,11 +257,11 @@ func (s *Server) listFulfillments(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	result := []map[string]any{}
 	for rows.Next() {
-		var orderID, cookieID, itemID, specName, specValue, receiverName, receiverPhone, receiverAddress, receiverCity, materialSKU, goodsID, sourceSKU, xianyuSKU, mappingStatus, pddPaidSource, pddOrderID, pddOrderJSON, logistics, tracking, addressStatus, lastError string
+		var orderID, cookieID, itemID, orderStatus, specName, specValue, receiverName, receiverPhone, receiverAddress, receiverCity, materialSKU, goodsID, sourceSKU, xianyuSKU, mappingStatus, pddPaidSource, pddOrderID, pddOrderJSON, logistics, tracking, addressStatus, lastError string
 		var materialID, pddPaidAt, manualModifiedAt, repairedAt, restoreDue, purchaseRequestedAt, updated int64
 		var pddOrdered, pddPaid, pddShipped, xianyuShipped, reminded, fulfillmentExempt, reminderExempt int
-		if rows.Scan(&orderID, &cookieID, &itemID, &specName, &specValue, &receiverName, &receiverPhone, &receiverAddress, &receiverCity, &materialID, &materialSKU, &goodsID, &sourceSKU, &xianyuSKU, &mappingStatus, &pddOrdered, &pddPaid, &pddPaidAt, &pddPaidSource, &pddOrderID, &pddOrderJSON, &pddShipped, &logistics, &tracking, &xianyuShipped, &reminded, &fulfillmentExempt, &reminderExempt, &manualModifiedAt, &repairedAt, &restoreDue, &addressStatus, &lastError, &purchaseRequestedAt, &updated) == nil {
-			result = append(result, map[string]any{"order_id": orderID, "cookie_id": cookieID, "item_id": itemID, "spec_name": specName, "spec_value": specValue, "receiver_name": receiverName, "receiver_phone": receiverPhone, "receiver_address": receiverAddress, "receiver_city": receiverCity, "material_id": materialID, "material_sku_id": materialSKU, "source_goods_id": goodsID, "source_sku_id": sourceSKU, "xianyu_sku_id": xianyuSKU, "mapping_status": mappingStatus, "pdd_ordered": pddOrdered != 0, "pdd_paid": pddPaid != 0, "pdd_paid_at": pddPaidAt, "pdd_paid_source": pddPaidSource, "pdd_order_id": pddOrderID, "pdd_order": json.RawMessage(emptyJSONObject(pddOrderJSON)), "pdd_shipped": pddShipped != 0, "logistics_company": logistics, "tracking_number": tracking, "xianyu_shipped": xianyuShipped != 0, "reminded": reminded != 0, "fulfillment_exempt": fulfillmentExempt != 0, "reminder_exempt": reminderExempt != 0, "manual_modified_at": manualModifiedAt, "history_repaired_at": repairedAt, "phone_restore_due_at": restoreDue, "address_match_status": addressStatus, "last_error": lastError, "purchase_requested_at": purchaseRequestedAt, "updated_at": updated})
+		if rows.Scan(&orderID, &cookieID, &itemID, &orderStatus, &specName, &specValue, &receiverName, &receiverPhone, &receiverAddress, &receiverCity, &materialID, &materialSKU, &goodsID, &sourceSKU, &xianyuSKU, &mappingStatus, &pddOrdered, &pddPaid, &pddPaidAt, &pddPaidSource, &pddOrderID, &pddOrderJSON, &pddShipped, &logistics, &tracking, &xianyuShipped, &reminded, &fulfillmentExempt, &reminderExempt, &manualModifiedAt, &repairedAt, &restoreDue, &addressStatus, &lastError, &purchaseRequestedAt, &updated) == nil {
+			result = append(result, map[string]any{"order_id": orderID, "cookie_id": cookieID, "item_id": itemID, "order_status": db.NormalizeOrderStatus(strings.TrimSpace(orderStatus)), "spec_name": specName, "spec_value": specValue, "receiver_name": receiverName, "receiver_phone": receiverPhone, "receiver_address": receiverAddress, "receiver_city": receiverCity, "material_id": materialID, "material_sku_id": materialSKU, "source_goods_id": goodsID, "source_sku_id": sourceSKU, "xianyu_sku_id": xianyuSKU, "mapping_status": mappingStatus, "pdd_ordered": pddOrdered != 0, "pdd_paid": pddPaid != 0, "pdd_paid_at": pddPaidAt, "pdd_paid_source": pddPaidSource, "pdd_order_id": pddOrderID, "pdd_order": json.RawMessage(emptyJSONObject(pddOrderJSON)), "pdd_shipped": pddShipped != 0, "logistics_company": logistics, "tracking_number": tracking, "xianyu_shipped": xianyuShipped != 0, "reminded": reminded != 0, "fulfillment_exempt": fulfillmentExempt != 0, "reminder_exempt": reminderExempt != 0, "manual_modified_at": manualModifiedAt, "history_repaired_at": repairedAt, "phone_restore_due_at": restoreDue, "address_match_status": addressStatus, "last_error": lastError, "purchase_requested_at": purchaseRequestedAt, "updated_at": updated})
 		}
 	}
 	writeJSON(w, 200, result)
@@ -291,7 +291,7 @@ func (s *Server) requestPurchase(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "初始化履约记录失败")
 		return
 	}
-	if order.OrderStatus != "processing" && order.OrderStatus != "pending_ship" {
+	if !isPurchaseEligibleOrderStatus(order.OrderStatus) {
 		writeErr(w, 422, "闲鱼订单不是可采购状态")
 		return
 	}
@@ -336,6 +336,11 @@ func (s *Server) requestPurchase(w http.ResponseWriter, r *http.Request) {
 		status = "recovery_queued"
 	}
 	writeJSON(w, 200, map[string]any{"success": true, "order_id": orderID, "status": status, "purchase_requested_at": now})
+}
+
+func isPurchaseEligibleOrderStatus(status string) bool {
+	normalized := db.NormalizeOrderStatus(strings.TrimSpace(status))
+	return normalized == "processing" || normalized == "pending_ship"
 }
 
 func (s *Server) updateFulfillment(w http.ResponseWriter, r *http.Request) {

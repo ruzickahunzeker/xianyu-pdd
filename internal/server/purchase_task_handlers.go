@@ -167,7 +167,7 @@ func (s *Server) claimPurchaseTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, out)
 		return
 	}
-	query := `SELECT f.order_id,f.source_goods_id,f.source_sku_id,COALESCE(o.quantity,'1'),COALESCE(o.amount,'0'),COALESCE(o.receiver_name,''),COALESCE(o.receiver_city,''),COALESCE(o.receiver_address,'') FROM order_fulfillments f JOIN orders o ON o.order_id=f.order_id WHERE f.user_id=? AND o.deleted_at IS NULL AND o.order_status IN ('processing','pending_ship') AND f.fulfillment_exempt=0 AND f.pdd_ordered=0 AND f.pdd_order_id='' AND f.mapping_status='mapped' AND f.source_goods_id<>'' AND f.source_sku_id<>''`
+	query := `SELECT f.order_id,f.source_goods_id,f.source_sku_id,COALESCE(o.quantity,'1'),COALESCE(o.amount,'0'),COALESCE(o.receiver_name,''),COALESCE(o.receiver_city,''),COALESCE(o.receiver_address,'') FROM order_fulfillments f JOIN orders o ON o.order_id=f.order_id WHERE f.user_id=? AND o.deleted_at IS NULL AND o.order_status IN ('processing','1','pending_ship','paid','2') AND f.fulfillment_exempt=0 AND f.pdd_ordered=0 AND f.pdd_order_id='' AND f.mapping_status='mapped' AND f.source_goods_id<>'' AND f.source_sku_id<>''`
 	args := []any{userID}
 	if in.OrderID != "" {
 		query += ` AND f.order_id=?`

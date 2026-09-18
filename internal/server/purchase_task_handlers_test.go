@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +18,36 @@ func TestCanSavePurchaseBaseline(t *testing.T) {
 		if canSavePurchaseBaseline(status) {
 			t.Fatalf("status %q must not allow saving the baseline", status)
 		}
+	}
+}
+
+func TestClaimPurchaseTaskAcceptsNumericPendingShipStatus(t *testing.T) {
+	t.Setenv("XIANYU_DATA_KEY", "purchase-claim-status-test-key")
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	admin, err := store.Users.GetByUsername(t.Context(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.PDDAccounts.SaveSingle(t.Context(), admin.ID, "主账号", "pinduoduo", "api_uid=1; token=x", "1", "60984097534", "test-agent", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO cookies(id,value,user_id) VALUES('claim-account','unb=1; _m_h5_tk=t_1;',?)`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO orders(order_id,item_id,cookie_id,order_status,quantity,amount,receiver_name,receiver_city,receiver_address) VALUES('claim-numeric','item-1','claim-account','2','1','19.90','张三','深圳市','广东省深圳市福田区华强北街道1号')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO order_fulfillments(order_id,user_id,cookie_id,item_id,source_goods_id,source_sku_id,mapping_status,manual_modified_at,created_at,updated_at) VALUES('claim-numeric',?,'claim-account','item-1','goods-1','sku-1','mapped',1,1,1)`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/fulfillment/purchase-tasks/claim", strings.NewReader(`{"order_id":"claim-numeric","worker_id":"test-worker","lease_seconds":120}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.AddCookie(loginHelper(t, srv.Router()))
+	rec := httptest.NewRecorder()
+	srv.Router().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"order_id":"claim-numeric"`) {
+		t.Fatalf("numeric pending-ship order should be claimable: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

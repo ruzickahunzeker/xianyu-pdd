@@ -275,6 +275,51 @@ func TestFulfillmentBoolFilter(t *testing.T) {
 	}
 }
 
+func TestPurchaseEligibilityNormalizesLegacyOrderStatuses(t *testing.T) {
+	for _, status := range []string{"processing", "1", "pending_ship", "paid", "2"} {
+		if !isPurchaseEligibleOrderStatus(status) {
+			t.Errorf("status %q should be purchase eligible", status)
+		}
+	}
+	for _, status := range []string{"shipped", "3", "completed", "4", "refunding", "cancelled", ""} {
+		if isPurchaseEligibleOrderStatus(status) {
+			t.Errorf("status %q must not be purchase eligible", status)
+		}
+	}
+}
+
+func TestRequestPurchaseAcceptsNumericAndPaidStatuses(t *testing.T) {
+	t.Setenv("XIANYU_DATA_KEY", "purchase-status-test-key")
+	server, store, cleanup := newTestServer(t)
+	defer cleanup()
+	admin, err := store.Users.GetByUsername(t.Context(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.PDDAccounts.SaveSingle(t.Context(), admin.ID, "主账号", "pinduoduo", "api_uid=1; token=x", "1", "60984097534", "test-agent", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO cookies(id,value,user_id) VALUES('purchase-account','unb=1; _m_h5_tk=t_1;',?)`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	cookie := loginHelper(t, server.Router())
+	for _, row := range []struct{ id, status string }{{"purchase-numeric", "2"}, {"purchase-paid", "paid"}} {
+		if _, err = store.DB.Exec(`INSERT INTO orders(order_id,item_id,cookie_id,order_status) VALUES(?,?,'purchase-account',?)`, row.id, "item-"+row.id, row.status); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = store.DB.Exec(`INSERT INTO order_fulfillments(order_id,user_id,cookie_id,item_id,source_goods_id,source_sku_id,mapping_status,manual_modified_at,created_at,updated_at) VALUES(?,?,'purchase-account',?,'goods-1','sku-1','mapped',1,1,1)`, row.id, admin.ID, "item-"+row.id); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/fulfillment/orders/"+row.id+"/purchase-request", strings.NewReader(`{}`))
+		req.AddCookie(cookie)
+		rec := httptest.NewRecorder()
+		server.Router().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"queued"`) {
+			t.Fatalf("status %q should queue purchase: %d %s", row.status, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 func TestFulfillmentPropertiesMatch(t *testing.T) {
 	properties := []materialProperty{{Name: "款式", Value: "USB 转 Type-C"}, {Name: "长度", Value: "1米"}}
 	if !fulfillmentPropertiesMatch(properties, "款式", "USB 转 Type-C") {
