@@ -8,7 +8,7 @@ import {
   FulfillmentHistoryRepairPreview, getFulfillmentOrders, getOrderSyncStatus, OrderSyncStatus,
   PDDPurchaseTask, PDDWorkerStatus, FulfillmentException, clearFulfillmentExceptions, confirmPDDPurchasePayment, confirmUnknownPurchaseCancelled, getFulfillmentExceptions, getPDDPurchaseTasks, getPDDWorkerStatus, readFulfillmentExceptions, requestFulfillmentPurchase, resolveFulfillmentException,
   previewFulfillmentHistoryRepair, repairFulfillmentHistory, updateFulfillmentOrder,
-  getPDDAccount,
+  getPDDAccount, getLogisticsSyncTasks, LogisticsSyncTask, queueLogisticsSync, queueLogisticsSyncBatch,
 } from '../services/api';
 
 type Preset = 'pending_order' | 'pending_pdd_ship' | 'pending_xianyu_ship' | 'pending_reminder' | 'all';
@@ -57,6 +57,8 @@ const FulfillmentWorkbench: React.FC = () => {
   const [tasksOpen, setTasksOpen] = useState(() => localStorage.getItem('fulfillment.tasks.open') === 'true');
   const [exceptionsOpen, setExceptionsOpen] = useState(() => localStorage.getItem('fulfillment.exceptions.open') === 'true');
   const [pddBaseURL, setPDDBaseURL] = useState('https://mobile.pinduoduo.com');
+  const [logisticsTasks, setLogisticsTasks] = useState<LogisticsSyncTask[]>([]);
+  const [logisticsBusy, setLogisticsBusy] = useState('');
   const previousUnread = useRef(0);
 
   const loadOrders = async () => {
@@ -64,13 +66,14 @@ const FulfillmentWorkbench: React.FC = () => {
     setError('');
     try {
       const selected = presets.find(item => item.id === preset)?.filters || {};
-      const [nextOrders, nextStatus, nextTasks, nextExceptions, pddAccount, nextWorkerStatus] = await Promise.all([
+      const [nextOrders, nextStatus, nextTasks, nextExceptions, pddAccount, nextWorkerStatus, nextLogisticsTasks] = await Promise.all([
         getFulfillmentOrders({ ...selected, mapping_status: mappingStatus || undefined }),
         getOrderSyncStatus(),
         getPDDPurchaseTasks(),
         getFulfillmentExceptions(),
         getPDDAccount(),
         getPDDWorkerStatus(),
+        getLogisticsSyncTasks(),
       ]);
       setOrders(nextOrders);
       setSyncStatus(nextStatus);
@@ -78,6 +81,7 @@ const FulfillmentWorkbench: React.FC = () => {
       setExceptions(nextExceptions);
       setPDDBaseURL(pddAccount.base_url || 'https://mobile.pinduoduo.com');
       setWorkerStatus(nextWorkerStatus);
+      setLogisticsTasks(nextLogisticsTasks);
     } catch (err) {
       setError((err as Error).message || '读取履约订单失败');
     } finally {
@@ -122,6 +126,11 @@ const FulfillmentWorkbench: React.FC = () => {
   };
 
   useEffect(() => { void loadOrders(); }, [preset, mappingStatus]);
+  useEffect(() => {
+    if (!logisticsTasks.some(task => task.status === 'queued' || task.status === 'processing')) return;
+    const timer = window.setInterval(() => { void loadOrders(); }, 5000);
+    return () => window.clearInterval(timer);
+  }, [logisticsTasks]);
   useEffect(() => { localStorage.setItem('fulfillment.tasks.open', String(tasksOpen)); }, [tasksOpen]);
   useEffect(() => { localStorage.setItem('fulfillment.exceptions.open', String(exceptionsOpen)); }, [exceptionsOpen]);
   const unreadExceptions = useMemo(() => exceptions.filter(item => !item.read_at).length, [exceptions]);
@@ -139,6 +148,34 @@ const FulfillmentWorkbench: React.FC = () => {
       order.receiver_name, order.tracking_number,
     ].some(value => String(value || '').toLowerCase().includes(needle)));
   }, [orders, search]);
+
+  const logisticsTaskByOrder = useMemo(() => {
+    const result = new Map<string, LogisticsSyncTask>();
+    for (const task of logisticsTasks) if (!result.has(task.order_id)) result.set(task.order_id, task);
+    return result;
+  }, [logisticsTasks]);
+
+  const syncLogistics = async (order: FulfillmentOrder) => {
+    setLogisticsBusy(order.order_id); setError('');
+    try { await queueLogisticsSync(order.order_id); await loadOrders(); }
+    catch (err) { setError((err as Error).message || '获取拼多多快递单号失败'); }
+    finally { setLogisticsBusy(''); }
+  };
+
+  const syncAllLogistics = async () => {
+    setLogisticsBusy('batch'); setError('');
+    try {
+      const result = await queueLogisticsSyncBatch();
+      setError(result.queued > 0 ? '' : '没有新的拼多多未发货订单需要同步');
+      await loadOrders();
+    } catch (err) { setError((err as Error).message || '批量获取拼多多快递单号失败'); }
+    finally { setLogisticsBusy(''); }
+  };
+
+  const logisticsTaskLabel = (task?: LogisticsSyncTask) => {
+    if (!task) return '';
+    return ({queued:'等待获取快递单号',processing:'正在获取快递单号',succeeded:'快递单号已更新',not_shipped:'拼多多暂未发货',failed:'获取失败',blocked:'账号已阻塞'} as Record<string,string>)[task.status] || task.status;
+  };
 
   const openEditor = (order: FulfillmentOrder) => {
     setEditing(order);
@@ -218,7 +255,7 @@ const FulfillmentWorkbench: React.FC = () => {
             <p className={`mt-1 text-xs font-bold ${workerStatus?.online ? 'text-green-600' : 'text-amber-600'}`}>PDD Worker：{workerStatus?.online ? `${workerStatus.state || '运行中'} · ${formatTime(workerStatus.last_seen_at)}` : '离线'} · 活跃任务 {workerStatus?.active_tasks || 0} · 待同步物流 {workerStatus?.logistics_demand || 0}</p>
           </div>
         </div>
-        <div className="flex flex-wrap gap-2"><button type="button" onClick={openRepairPreview} disabled={repairing} className="px-4 py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold flex items-center justify-center gap-2 disabled:opacity-50"><ShieldCheck className="w-4 h-4" />修复历史订单</button><button type="button" onClick={loadOrders} disabled={loading} className="px-4 py-2.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold flex items-center justify-center gap-2 disabled:opacity-50"><RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />同步并刷新</button></div>
+        <div className="flex flex-wrap gap-2"><button type="button" onClick={syncAllLogistics} disabled={logisticsBusy==='batch'} className="px-4 py-2.5 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 font-bold flex items-center justify-center gap-2 disabled:opacity-50">{logisticsBusy==='batch'?<Loader2 className="w-4 h-4 animate-spin"/>:<Truck className="w-4 h-4"/>}一键获取快递单号</button><button type="button" onClick={openRepairPreview} disabled={repairing} className="px-4 py-2.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-800 font-bold flex items-center justify-center gap-2 disabled:opacity-50"><ShieldCheck className="w-4 h-4" />修复历史订单</button><button type="button" onClick={loadOrders} disabled={loading} className="px-4 py-2.5 rounded-xl bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold flex items-center justify-center gap-2 disabled:opacity-50"><RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />同步并刷新</button></div>
       </div>
 
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -266,11 +303,13 @@ const FulfillmentWorkbench: React.FC = () => {
               <tbody className="divide-y divide-gray-100">
                 {visibleOrders.map(order => {
                   const mapping = mappingMeta(order.mapping_status);
+                  const logisticsTask = logisticsTaskByOrder.get(order.order_id);
+                  const logisticsActive = logisticsTask?.status === 'queued' || logisticsTask?.status === 'processing';
                   return <tr key={order.order_id} className="hover:bg-blue-50/30 align-top">
                     <td className="px-5 py-4"><div className="font-mono text-sm font-bold text-gray-900" title={order.order_id}>{shortID(order.order_id)}</div><div className="mt-1 text-xs text-gray-500">商品 {shortID(order.item_id)}</div><div className="mt-1 text-xs text-gray-400">账号 {shortID(order.cookie_id)}</div></td>
                     <td className="px-4 py-4"><span className={`inline-flex px-2.5 py-1 rounded-lg text-xs font-bold ${mapping.className}`}>{mapping.label}</span><div className="mt-2 text-sm text-gray-700">{order.spec_name && `${order.spec_name}：`}{order.spec_value || '未记录规格'}</div><div className="mt-1 font-mono text-xs text-gray-400">PDD SKU {shortID(order.source_sku_id)}</div></td>
                     <td className="px-4 py-4"><div className={`text-sm font-bold ${order.fulfillment_exempt ? 'text-blue-600' : order.pdd_paid ? 'text-green-700' : order.pdd_ordered ? 'text-amber-600' : 'text-gray-400'}`}>{order.fulfillment_exempt ? '无需履约' : order.pdd_paid ? '已付款 · 待发货' : order.pdd_ordered ? '已下单 · 待付款' : '未下单'}</div><div className="mt-1 font-mono text-xs text-gray-500">{order.pdd_order_id || '-'}</div>{order.pdd_order?.amount_cent != null && <div className="mt-2 text-xs text-gray-600">采购 ¥{(order.pdd_order.amount_cent / 100).toFixed(2)} · 数量 {order.pdd_order.quantity || 1}</div>}{order.pdd_order?.sku_id && <div className="mt-1 font-mono text-[11px] text-gray-400">SKU {order.pdd_order.sku_id}</div>}{order.pdd_order?.payment_deadline && !order.pdd_paid ? <div className="mt-1 text-[11px] text-amber-600">付款截止 {formatTime(order.pdd_order.payment_deadline)}</div> : null}{order.pdd_paid && <div className="mt-1 text-[11px] text-green-600">{order.pdd_paid_source === 'manual' ? '人工确认付款' : order.pdd_paid_source === 'auto_pdd_pending_ship' ? '待发货列表自动确认' : '已确认付款'} · {formatTime(order.pdd_paid_at)}</div>}{order.pdd_order?.receiver_name && <div className="mt-1 text-[11px] text-gray-400">{order.pdd_order.receiver_name} · {[order.pdd_order.province, order.pdd_order.city, order.pdd_order.district].filter(Boolean).join('')}</div>}{order.source_goods_id && <a href={`${pddBaseURL}/goods.html?goods_id=${encodeURIComponent(order.source_goods_id)}`} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-blue-600">打开拼多多商品 <ExternalLink className="w-3 h-3" /></a>}</td>
-                    <td className="px-4 py-4"><div className={`text-sm font-bold ${order.pdd_shipped ? 'text-green-700' : 'text-gray-400'}`}>{order.pdd_shipped ? '拼多多已发货' : '等待拼多多发货'}</div><div className="mt-1 text-xs text-gray-500">{order.logistics_company || '-'} · {order.tracking_number || '-'}</div></td>
+                    <td className="px-4 py-4"><div className={`text-sm font-bold ${order.pdd_shipped ? 'text-green-700' : 'text-gray-400'}`}>{order.pdd_shipped ? '拼多多已发货' : '拼多多未发货'}</div><div className="mt-1 text-xs text-gray-500">{order.logistics_company || '-'} · {order.tracking_number || '-'}</div>{logisticsTask&&<div className={`mt-1 text-[11px] ${logisticsTask.status==='failed'||logisticsTask.status==='blocked'?'text-red-600':'text-blue-600'}`}>{logisticsTaskLabel(logisticsTask)}{logisticsTask.last_error?`：${logisticsTask.last_error}`:''}</div>}{order.pdd_order_id&&!order.pdd_shipped&&!order.xianyu_shipped&&!order.fulfillment_exempt&&<button type="button" onClick={()=>syncLogistics(order)} disabled={logisticsActive||logisticsBusy===order.order_id} className="mt-2 inline-flex items-center gap-1 rounded-lg bg-blue-50 px-2.5 py-1.5 text-xs font-bold text-blue-700 disabled:opacity-45">{logisticsActive||logisticsBusy===order.order_id?<Loader2 className="h-3.5 w-3.5 animate-spin"/>:<RefreshCw className="h-3.5 w-3.5"/>}{logisticsActive?logisticsTaskLabel(logisticsTask):'获取快递单号'}</button>}</td>
                     <td className="px-4 py-4 space-y-1.5"><div className="flex items-center gap-1.5 text-xs"><PackageCheck className={`w-3.5 h-3.5 ${order.fulfillment_exempt || order.xianyu_shipped ? 'text-green-600' : 'text-gray-300'}`} />{order.fulfillment_exempt ? '无需继续履约' : `闲鱼${order.xianyu_shipped ? '已发货' : '未发货'}`}</div><div className="flex items-center gap-1.5 text-xs"><CheckCircle2 className={`w-3.5 h-3.5 ${order.reminder_exempt || order.reminded ? 'text-green-600' : 'text-gray-300'}`} />{order.reminder_exempt ? '无需提醒' : order.reminded ? '已提醒' : '未提醒'}</div><div className="text-[11px] text-gray-400">更新 {formatTime(order.updated_at)}</div></td>
                     <td className="px-5 py-4 text-right"><div className="flex flex-col items-end gap-2">{isPurchaseEligible(order) && !order.fulfillment_exempt && !order.pdd_ordered && !order.pdd_order_id && <button type="button" onClick={() => requestPurchase(order)} disabled={taskBusy === order.order_id || order.mapping_status !== 'mapped' || order.purchase_requested_at > 0} className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold disabled:opacity-45">{taskBusy === order.order_id ? '处理中…' : order.purchase_requested_at > 0 ? '已优先排队' : '立即下单'}</button>}<button type="button" onClick={() => openEditor(order)} className="px-3.5 py-2 rounded-lg bg-gray-900 hover:bg-black text-white text-xs font-bold">更新履约</button></div></td>
                   </tr>;
