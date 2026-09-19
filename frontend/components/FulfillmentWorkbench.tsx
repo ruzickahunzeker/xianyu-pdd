@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, CheckCircle2, ChevronDown, ClipboardList, ExternalLink, Eye, Loader2,
-  PackageCheck, RefreshCw, Search, ShieldCheck, Trash2, Truck, X,
+  AlertTriangle, Bell, CheckCircle2, ChevronDown, ClipboardList, ExternalLink, Eye, Loader2,
+  PackageCheck, RefreshCw, Search, Send, ShieldCheck, Trash2, Truck, X,
 } from 'lucide-react';
 import {
   FulfillmentOrder, FulfillmentOrderFilters, FulfillmentOrderPatch,
@@ -9,6 +9,7 @@ import {
   PDDPurchaseTask, PDDWorkerStatus, FulfillmentException, clearFulfillmentExceptions, confirmPDDPurchasePayment, confirmUnknownPurchaseCancelled, getFulfillmentExceptions, getPDDPurchaseTasks, getPDDWorkerStatus, readFulfillmentExceptions, requestFulfillmentPurchase, resolveFulfillmentException,
   previewFulfillmentHistoryRepair, repairFulfillmentHistory, updateFulfillmentOrder,
   getPDDAccount, getLogisticsSyncTasks, LogisticsSyncTask, queueLogisticsSync, queueLogisticsSyncBatch,
+  requestFulfillmentReminder, shippingPrecheck, submitPhysicalShipment,
 } from '../services/api';
 
 type Preset = 'pending_order' | 'pending_pdd_ship' | 'pending_xianyu_ship' | 'pending_reminder' | 'all';
@@ -107,6 +108,28 @@ const FulfillmentWorkbench: React.FC = () => {
     setTaskBusy(order.order_id); setError('');
     try { await requestFulfillmentPurchase(order.order_id); await loadOrders(); }
     catch (err) { setError((err as Error).message || '加入采购队列失败'); }
+    finally { setTaskBusy(''); }
+  };
+
+  const shipOrder = async (order: FulfillmentOrder) => {
+    setTaskBusy(`ship:${order.order_id}`); setError('');
+    try {
+      const check = await shippingPrecheck(order.order_id);
+      if (!check.ready) throw new Error(check.problems.join('；') || '发货预检未通过');
+      if (!window.confirm(`确认使用 ${check.logistics_company} ${check.tracking_number} 为该闲鱼订单发货？`)) return;
+      await submitPhysicalShipment(order.order_id, `manual-ship:${order.order_id}:${Date.now()}`);
+      await loadOrders();
+    } catch (err) { setError((err as Error).message || '闲鱼发货失败'); }
+    finally { setTaskBusy(''); }
+  };
+
+  const remindOrder = async (order: FulfillmentOrder) => {
+    setTaskBusy(`remind:${order.order_id}`); setError('');
+    try {
+      const result = await requestFulfillmentReminder(order.order_id);
+      window.alert(result.replayed ? '该订单的提醒任务已经存在，请到“拼多多消息”继续确认发送' : '提醒任务已创建，请到“拼多多消息”确认发送');
+      await loadOrders();
+    } catch (err) { setError((err as Error).message || '创建提醒任务失败'); }
     finally { setTaskBusy(''); }
   };
 
@@ -311,7 +334,7 @@ const FulfillmentWorkbench: React.FC = () => {
                     <td className="px-4 py-4"><div className={`text-sm font-bold ${order.fulfillment_exempt ? 'text-blue-600' : order.pdd_paid ? 'text-green-700' : order.pdd_ordered ? 'text-amber-600' : 'text-gray-400'}`}>{order.fulfillment_exempt ? '无需履约' : order.pdd_paid ? '已付款 · 待发货' : order.pdd_ordered ? '已下单 · 待付款' : '未下单'}</div><div className="mt-1 font-mono text-xs text-gray-500">{order.pdd_order_id || '-'}</div>{order.pdd_order?.amount_cent != null && <div className="mt-2 text-xs text-gray-600">采购 ¥{(order.pdd_order.amount_cent / 100).toFixed(2)} · 数量 {order.pdd_order.quantity || 1}</div>}{order.pdd_order?.sku_id && <div className="mt-1 font-mono text-[11px] text-gray-400">SKU {order.pdd_order.sku_id}</div>}{order.pdd_order?.payment_deadline && !order.pdd_paid ? <div className="mt-1 text-[11px] text-amber-600">付款截止 {formatTime(order.pdd_order.payment_deadline)}</div> : null}{order.pdd_paid && <div className="mt-1 text-[11px] text-green-600">{order.pdd_paid_source === 'manual' ? '人工确认付款' : order.pdd_paid_source === 'auto_pdd_pending_ship' ? '待发货列表自动确认' : '已确认付款'} · {formatTime(order.pdd_paid_at)}</div>}{order.pdd_order?.receiver_name && <div className="mt-1 text-[11px] text-gray-400">{order.pdd_order.receiver_name} · {[order.pdd_order.province, order.pdd_order.city, order.pdd_order.district].filter(Boolean).join('')}</div>}{order.source_goods_id && <a href={`${pddBaseURL}/goods.html?goods_id=${encodeURIComponent(order.source_goods_id)}`} target="_blank" rel="noreferrer" className="mt-2 inline-flex items-center gap-1 text-xs font-bold text-blue-600">打开拼多多商品 <ExternalLink className="w-3 h-3" /></a>}</td>
                     <td className="px-4 py-4"><div className={`text-sm font-bold ${order.pdd_shipped ? 'text-green-700' : 'text-gray-400'}`}>{order.pdd_shipped ? '拼多多已发货' : '拼多多未发货'}</div><div className="mt-1 text-xs text-gray-500">{order.logistics_company || '-'} · {order.tracking_number || '-'}</div>{logisticsTask&&<div className={`mt-1 text-[11px] ${logisticsTask.status==='failed'||logisticsTask.status==='blocked'?'text-red-600':'text-blue-600'}`}>{logisticsTaskLabel(logisticsTask)}{logisticsTask.last_error?`：${logisticsTask.last_error}`:''}</div>}{order.pdd_order_id&&!order.pdd_shipped&&!order.xianyu_shipped&&!order.fulfillment_exempt&&<button type="button" onClick={()=>syncLogistics(order)} disabled={logisticsActive||logisticsBusy===order.order_id} className="mt-2 inline-flex items-center gap-1 rounded-lg bg-blue-50 px-2.5 py-1.5 text-xs font-bold text-blue-700 disabled:opacity-45">{logisticsActive||logisticsBusy===order.order_id?<Loader2 className="h-3.5 w-3.5 animate-spin"/>:<RefreshCw className="h-3.5 w-3.5"/>}{logisticsActive?logisticsTaskLabel(logisticsTask):'获取快递单号'}</button>}</td>
                     <td className="px-4 py-4 space-y-1.5"><div className="flex items-center gap-1.5 text-xs"><PackageCheck className={`w-3.5 h-3.5 ${order.fulfillment_exempt || order.xianyu_shipped ? 'text-green-600' : 'text-gray-300'}`} />{order.fulfillment_exempt ? '无需继续履约' : `闲鱼${order.xianyu_shipped ? '已发货' : '未发货'}`}</div><div className="flex items-center gap-1.5 text-xs"><CheckCircle2 className={`w-3.5 h-3.5 ${order.reminder_exempt || order.reminded ? 'text-green-600' : 'text-gray-300'}`} />{order.reminder_exempt ? '无需提醒' : order.reminded ? '已提醒' : '未提醒'}</div><div className="text-[11px] text-gray-400">更新 {formatTime(order.updated_at)}</div></td>
-                    <td className="px-5 py-4 text-right"><div className="flex flex-col items-end gap-2">{isPurchaseEligible(order) && !order.fulfillment_exempt && !order.pdd_ordered && !order.pdd_order_id && <button type="button" onClick={() => requestPurchase(order)} disabled={taskBusy === order.order_id || order.mapping_status !== 'mapped' || order.purchase_requested_at > 0} className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold disabled:opacity-45">{taskBusy === order.order_id ? '处理中…' : order.purchase_requested_at > 0 ? '已优先排队' : '立即下单'}</button>}<button type="button" onClick={() => openEditor(order)} className="px-3.5 py-2 rounded-lg bg-gray-900 hover:bg-black text-white text-xs font-bold">更新履约</button></div></td>
+                    <td className="px-5 py-4 text-right"><div className="flex flex-col items-end gap-2">{isPurchaseEligible(order) && !order.fulfillment_exempt && !order.pdd_ordered && !order.pdd_order_id && <button type="button" onClick={() => requestPurchase(order)} disabled={taskBusy === order.order_id || order.mapping_status !== 'mapped' || order.purchase_requested_at > 0} className="px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold disabled:opacity-45">{taskBusy === order.order_id ? '处理中…' : order.purchase_requested_at > 0 ? '已优先排队' : '立即下单'}</button>}{order.pdd_shipped && !order.xianyu_shipped && !order.fulfillment_exempt && <button type="button" onClick={() => void shipOrder(order)} disabled={taskBusy === `ship:${order.order_id}`} className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white disabled:opacity-45">{taskBusy === `ship:${order.order_id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}立即发货</button>}{order.xianyu_shipped && !order.reminded && !order.reminder_exempt && <button type="button" onClick={() => void remindOrder(order)} disabled={taskBusy === `remind:${order.order_id}`} className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-2 text-xs font-bold text-white disabled:opacity-45">{taskBusy === `remind:${order.order_id}` ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Bell className="h-3.5 w-3.5" />}立即提醒</button>}<button type="button" onClick={() => openEditor(order)} className="px-3.5 py-2 rounded-lg bg-gray-900 hover:bg-black text-white text-xs font-bold">更新履约</button></div></td>
                   </tr>;
                 })}
               </tbody>

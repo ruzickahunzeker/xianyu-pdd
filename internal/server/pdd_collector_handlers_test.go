@@ -259,6 +259,17 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	if firstResponse["material_stock_updates"] != float64(2) {
 		t.Fatalf("response=%v", firstResponse)
 	}
+	if firstResponse["material_action"] != "existing" || firstResponse["material_id"] == nil {
+		t.Fatalf("automatic material response=%v", firstResponse)
+	}
+	createdMaterialID := int64(firstResponse["material_id"].(float64))
+	if reusedID, action, ensureErr := srv.ensureCollectedMaterial(context.Background(), "972484695683"); ensureErr != nil || action != "existing" || reusedID != createdMaterialID {
+		t.Fatalf("reused material id=%d action=%s err=%v", reusedID, action, ensureErr)
+	}
+	var automaticMaterialCount int
+	if err := store.DB.QueryRow(`SELECT COUNT(*) FROM product_materials WHERE source_type='pdd' AND source_id='972484695683' AND deleted_at IS NULL`).Scan(&automaticMaterialCount); err != nil || automaticMaterialCount != 1 {
+		t.Fatalf("automatic material count=%d err=%v", automaticMaterialCount, err)
+	}
 	var skuID, raw string
 	var price, stock int64
 	if err := store.DB.QueryRow(`SELECT sku_id,raw_snapshot_json,price_cent,stock FROM pdd_skus WHERE goods_id='972484695683'`).Scan(&skuID, &raw, &price, &stock); err != nil {
@@ -327,6 +338,29 @@ func TestPDDCollectorCatalog(t *testing.T) {
 	srv.pddGetProduct(detailRec, detailReq)
 	if detailRec.Code != http.StatusOK || !strings.Contains(detailRec.Body.String(), "整箱10罐") || !strings.Contains(detailRec.Body.String(), `"mall_sn":"mall-token"`) {
 		t.Fatalf("detail status=%d body=%s", detailRec.Code, detailRec.Body.String())
+	}
+}
+
+func TestEnsureCollectedMaterialCreatesOnlyOneDraft(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	if _, err := store.DB.Exec(`INSERT INTO pdd_products(id,goods_id,mall_sn,final_url,title,images_json,videos_json,properties_json,first_collected_at,last_collected_at) VALUES(1,'555','mall','https://mobile.pinduoduo.com/goods.html?goods_id=555','自动素材','["https://img.pddpic.com/a.jpg"]','[]','[]',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.Exec(`INSERT INTO pdd_skus(product_id,goods_id,sku_id,specs_json,spec_value_ids_json,thumb_url,prices_json,price_cent,stock,is_onsale,raw_snapshot_json,last_collected_at) VALUES(1,'555','666','[{"spec_key":"颜色","raw_value":"红色"}]','[]','https://img.pddpic.com/s.jpg','{}',299,8,1,'{}',1)`); err != nil {
+		t.Fatal(err)
+	}
+	firstID, action, err := srv.ensureCollectedMaterial(t.Context(), "555")
+	if err != nil || action != "created" || firstID <= 0 {
+		t.Fatalf("first id=%d action=%s err=%v", firstID, action, err)
+	}
+	secondID, action, err := srv.ensureCollectedMaterial(t.Context(), "555")
+	if err != nil || action != "existing" || secondID != firstID {
+		t.Fatalf("second id=%d action=%s err=%v", secondID, action, err)
+	}
+	var count int
+	if err = store.DB.QueryRow(`SELECT COUNT(*) FROM product_materials WHERE source_type='pdd' AND source_id='555' AND deleted_at IS NULL`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
 	}
 }
 

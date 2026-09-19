@@ -69,7 +69,14 @@ elements.upload.addEventListener("click", async () => {
   try {
     const result = await call({ type: "UPLOAD", payload });
     const stock = Number(result?.material_stock_updates || 0);
-    status(`上传/更新成功：${Number(result?.sku_count || payload.skus.length)} 个 SKU${stock ? `，同步 ${stock} 个素材库存` : ""}`, "success");
+    const material = result?.material_action === "created"
+      ? `，已自动创建素材 #${result.material_id}`
+      : result?.material_action === "existing"
+        ? `，沿用素材 #${result.material_id}`
+        : result?.material_action === "failed"
+          ? `，素材创建失败：${result.material_error || "未知错误"}`
+          : "";
+    status(`上传/更新成功：${Number(result?.sku_count || payload.skus.length)} 个 SKU${stock ? `，同步 ${stock} 个素材库存` : ""}${material}`, result?.material_action === "failed" ? "error" : "success");
   } catch (error) {
     status(error.message, "error");
   } finally {

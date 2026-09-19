@@ -24,6 +24,15 @@ func TestPDDMessageManualConfirmationWorkflow(t *testing.T) {
 	if _, err = store.DB.Exec(`INSERT INTO pdd_products(goods_id,mall_sn,final_url,title,images_json,first_collected_at,last_collected_at) VALUES('goods-1','mall-1','https://mobile.pinduoduo.com/goods.html?goods_id=goods-1','商品','[]',1,1)`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err = store.DB.Exec(`INSERT INTO cookies(id,value,user_id) VALUES('account-1','cookie=1',?)`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO orders(order_id,item_id,cookie_id,order_status) VALUES('xy-order-1','item-1','account-1','shipped')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.DB.Exec(`INSERT INTO order_fulfillments(order_id,user_id,cookie_id,item_id,xianyu_shipped,created_at,updated_at) VALUES('xy-order-1',?,'account-1','item-1',1,1,1)`, admin.ID); err != nil {
+		t.Fatal(err)
+	}
 	cookie := loginHelper(t, server.Router())
 	request := func(method, path string, body any, key string) *httptest.ResponseRecorder {
 		var raw []byte
@@ -40,7 +49,7 @@ func TestPDDMessageManualConfirmationWorkflow(t *testing.T) {
 		server.Router().ServeHTTP(rec, req)
 		return rec
 	}
-	input := map[string]any{"pdd_account_id": account.ID, "goods_id": "goods-1", "task_type": "custom_message", "message": "您好，测试消息", "send_mode": "manual_confirm"}
+	input := map[string]any{"pdd_account_id": account.ID, "goods_id": "goods-1", "task_type": "restore_phone", "message": "您好，测试消息", "send_mode": "manual_confirm", "pdd_order_id": "pdd-order-1", "xianyu_order_id": "xy-order-1"}
 	created := request(http.MethodPost, "/api/pdd/messages", input, "custom:goods-1:1")
 	if created.Code != http.StatusCreated || !strings.Contains(created.Body.String(), `"mall_sn":"mall-1"`) {
 		t.Fatalf("create=%d %s", created.Code, created.Body.String())
@@ -75,5 +84,15 @@ func TestPDDMessageManualConfirmationWorkflow(t *testing.T) {
 	claimed = request(http.MethodPost, "/api/pdd/messages/claim", map[string]any{"worker_id": "test", "lease_seconds": 180}, "")
 	if claimed.Code != http.StatusOK || !strings.Contains(claimed.Body.String(), `"action":"send"`) {
 		t.Fatalf("send claim=%d %s", claimed.Code, claimed.Body.String())
+	}
+	_ = json.Unmarshal(claimed.Body.Bytes(), &task)
+	token, _ = task["lease_token"].(string)
+	verified := request(http.MethodPost, "/api/pdd/messages/"+id+"/result", map[string]any{"lease_token": token, "status": "verified", "result": map[string]any{"clicked": true}}, "")
+	if verified.Code != http.StatusOK {
+		t.Fatalf("verified=%d %s", verified.Code, verified.Body.String())
+	}
+	var reminded int
+	if err = store.DB.QueryRow(`SELECT reminded FROM order_fulfillments WHERE order_id='xy-order-1'`).Scan(&reminded); err != nil || reminded != 1 {
+		t.Fatalf("reminded=%d err=%v", reminded, err)
 	}
 }

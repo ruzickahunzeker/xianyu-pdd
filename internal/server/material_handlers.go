@@ -1270,6 +1270,15 @@ func (s *Server) createMaterial(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) insertMaterial(w http.ResponseWriter, r *http.Request, sourceType, sourceID string, in materialInput) {
 	uid := auth.SessionFromContext(r.Context()).UserID
+	id, err := s.insertMaterialForUser(r.Context(), uid, sourceType, sourceID, in)
+	if err != nil {
+		writeErr(w, 500, "创建素材失败")
+		return
+	}
+	writeJSON(w, 201, map[string]any{"success": true, "id": id})
+}
+
+func (s *Server) insertMaterialForUser(ctx context.Context, uid int64, sourceType, sourceID string, in materialInput) (int64, error) {
 	images, _ := json.Marshal(in.Images)
 	cat, _ := json.Marshal(in.Category)
 	skus, _ := json.Marshal(in.SKUs)
@@ -1282,25 +1291,31 @@ func (s *Server) insertMaterial(w http.ResponseWriter, r *http.Request, sourceTy
 		videoEnabled = 1
 	}
 	now := time.Now().Unix()
-	id, err := materialInsertReturningID(r.Context(), s.Store.DB, s.Store.Dialect, `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,is_split_source,publish_parameters_json,revision) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?,?,?,1)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now, in.ImagePropertyName, videoEnabled, string(videos), 0, string(parametersJSON))
-	if err != nil {
-		writeErr(w, 500, "创建素材失败")
-		return
-	}
-	writeJSON(w, 201, map[string]any{"success": true, "id": id})
+	return materialInsertReturningID(ctx, s.Store.DB, s.Store.Dialect, `INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,postage_mode,postage_cent,status,created_at,updated_at,image_property_name,video_enabled,videos_json,is_split_source,publish_parameters_json,revision) VALUES(?,?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?,?,?,1)`, uid, sourceType, sourceID, in.Title, in.Description, string(images), string(cat), string(skus), in.PostageMode, in.PostageCents, now, now, in.ImagePropertyName, videoEnabled, string(videos), 0, string(parametersJSON))
 }
 func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 	goodsID := chi.URLParam(r, "goodsID")
-	var title, images, productVideos, productProperties string
-	var productID int64
-	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,title,images_json,videos_json,properties_json FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&productID, &title, &images, &productVideos, &productProperties); err != nil {
-		writeErr(w, 404, "采集商品不存在")
+	in, err := s.materialInputFromPDD(r.Context(), goodsID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, 404, "采集商品不存在")
+		} else {
+			writeErr(w, 400, err.Error())
+		}
 		return
 	}
-	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT sku_id,specs_json,thumb_url,prices_json,price_cent,stock,is_onsale,last_collected_at FROM pdd_skus WHERE product_id=? ORDER BY id`, productID)
+	s.insertMaterial(w, r, "pdd", goodsID, in)
+}
+
+func (s *Server) materialInputFromPDD(ctx context.Context, goodsID string) (materialInput, error) {
+	var title, images, productVideos, productProperties string
+	var productID int64
+	if err := s.Store.DB.QueryRowContext(ctx, `SELECT id,title,images_json,videos_json,properties_json FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&productID, &title, &images, &productVideos, &productProperties); err != nil {
+		return materialInput{}, err
+	}
+	rows, err := s.Store.DB.QueryContext(ctx, `SELECT sku_id,specs_json,thumb_url,prices_json,price_cent,stock,is_onsale,last_collected_at FROM pdd_skus WHERE product_id=? ORDER BY id`, productID)
 	if err != nil {
-		writeErr(w, 500, "读取采集 SKU 失败")
-		return
+		return materialInput{}, errors.New("读取采集 SKU 失败")
 	}
 	defer rows.Close()
 	skus := []materialSKU{}
@@ -1358,14 +1373,12 @@ func (s *Server) createMaterialFromPDD(w http.ResponseWriter, r *http.Request) {
 	}
 	in := materialInput{Title: title, Description: title, Images: cleanImages, Category: map[string]any{}, SKUs: skus, PostageMode: "free", VideoEnabled: &videoEnabled, Videos: videos, SourceProperties: sourceProperties, ImageMetadata: imageMetadata, PriceStrategy: materialPriceStrategy{Mode: "manual", MinimumProfitCent: 50}, StockStrategy: materialStockStrategy{Mode: "manual", DisableWhenOOS: true}}
 	if err := protectMaterialSKUIdentities("pdd", goodsID, nil, in.SKUs); err != nil {
-		writeErr(w, 400, err.Error())
-		return
+		return materialInput{}, err
 	}
 	if err := validateMaterial(&in); err != nil {
-		writeErr(w, 400, err.Error())
-		return
+		return materialInput{}, err
 	}
-	s.insertMaterial(w, r, "pdd", goodsID, in)
+	return in, nil
 }
 func (s *Server) updateMaterial(w http.ResponseWriter, r *http.Request) {
 	uid := auth.SessionFromContext(r.Context()).UserID

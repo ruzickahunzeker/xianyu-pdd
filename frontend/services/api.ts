@@ -462,6 +462,7 @@ export const getFulfillmentOrders = (filters:FulfillmentOrderFilters = {}):Promi
 export const updateFulfillmentOrder = (orderId:string,data:FulfillmentOrderPatch):Promise<ApiResponse> => put(`/api/fulfillment/orders/${encodeURIComponent(orderId)}`,data);
 export const updateFulfillment = updateFulfillmentOrder;
 export const requestFulfillmentPurchase = (orderId:string):Promise<{success:boolean;order_id:string;status:string;purchase_requested_at:number}> => post(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/purchase-request`,{});
+export const requestFulfillmentReminder = (orderId:string):Promise<{success:boolean;task_id:string;status:string;replayed?:boolean}> => post(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/remind`,{});
 export const previewFulfillmentAddress = (orderId:string):Promise<Record<string,unknown>> => post(`/api/fulfillment/orders/${encodeURIComponent(orderId)}/address-preview`,{});
 export interface FulfillmentHistoryRepairPreview { eligible:number; active_excluded:number; manual_excluded:number; pdd_excluded:number; }
 export const previewFulfillmentHistoryRepair = ():Promise<FulfillmentHistoryRepairPreview> => get('/api/fulfillment/history-repair/preview');
@@ -1250,7 +1251,7 @@ export interface PDDSKU {
 export interface PDDProductSummary {
   id: number; goods_id: string; mall_sn:string; final_url: string; title: string; images: string[]; videos: PDDProductVideo[];
   first_collected_at: number; last_collected_at: number; sku_count: number; onsale_sku_count: number;
-  min_price_cent: number; max_price_cent: number;
+  min_price_cent: number; max_price_cent: number; material_id:number;
 }
 export interface PDDProductVideo { url:string; cover_url?:string; width?:number; height?:number; duration_ms?:number }
 export interface PDDProductDetail extends Omit<PDDProductSummary, 'sku_count' | 'onsale_sku_count' | 'min_price_cent' | 'max_price_cent'> { gallery_images:string[]; detail_images:string[]; goods_property:PDDGoodsProperty[]; skus: PDDSKU[] }

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -110,10 +111,7 @@ func (s *Server) createPDDMessage(w http.ResponseWriter, r *http.Request) {
 	if in.ScheduledAt == 0 {
 		in.ScheduledAt = time.Now().Unix()
 	}
-	metadata, _ := json.Marshal(in.Metadata)
-	digest := sha256.Sum256([]byte(in.Message))
-	now, id := time.Now().Unix(), uuid.NewString()
-	_, err := s.Store.DB.ExecContext(r.Context(), `INSERT INTO pdd_message_tasks(id,user_id,idempotency_key,pdd_account_id,goods_id,sku_id,mall_sn,captured_chat_url,task_type,message_text,message_fingerprint,business_id,xianyu_order_id,pdd_order_id,metadata_json,source_platform,source_conversation_id,source_message_id,parent_task_id,reply_expected,send_mode,priority,scheduled_at,status,last_error,result_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','','{}',?,?)`, id, uid, key, in.PDDAccountID, strings.TrimSpace(in.GoodsID), strings.TrimSpace(in.SKUID), strings.TrimSpace(in.MallSN), strings.TrimSpace(in.CapturedChatURL), in.TaskType, in.Message, hex.EncodeToString(digest[:]), strings.TrimSpace(in.BusinessID), strings.TrimSpace(in.XianyuOrderID), strings.TrimSpace(in.PDDOrderID), string(metadata), strings.TrimSpace(in.SourcePlatform), strings.TrimSpace(in.SourceConversationID), strings.TrimSpace(in.SourceMessageID), strings.TrimSpace(in.ParentTaskID), boolInt(in.ReplyExpected), in.SendMode, in.Priority, in.ScheduledAt, now, now)
+	id, err := s.enqueuePDDMessage(r.Context(), uid, key, in)
 	if err != nil {
 		row := s.Store.DB.QueryRowContext(r.Context(), `SELECT `+pddMessageColumns+` FROM pdd_message_tasks WHERE user_id=? AND idempotency_key=?`, uid, key)
 		if out, scanErr := pddMessageMap(row); scanErr == nil {
@@ -125,6 +123,14 @@ func (s *Server) createPDDMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	out, _ := pddMessageMap(s.Store.DB.QueryRowContext(r.Context(), `SELECT `+pddMessageColumns+` FROM pdd_message_tasks WHERE id=?`, id))
 	writeJSON(w, 201, out)
+}
+
+func (s *Server) enqueuePDDMessage(ctx context.Context, uid int64, key string, in pddMessageInput) (string, error) {
+	metadata, _ := json.Marshal(in.Metadata)
+	digest := sha256.Sum256([]byte(in.Message))
+	now, id := time.Now().Unix(), uuid.NewString()
+	_, err := s.Store.DB.ExecContext(ctx, `INSERT INTO pdd_message_tasks(id,user_id,idempotency_key,pdd_account_id,goods_id,sku_id,mall_sn,captured_chat_url,task_type,message_text,message_fingerprint,business_id,xianyu_order_id,pdd_order_id,metadata_json,source_platform,source_conversation_id,source_message_id,parent_task_id,reply_expected,send_mode,priority,scheduled_at,status,last_error,result_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending','','{}',?,?)`, id, uid, key, in.PDDAccountID, strings.TrimSpace(in.GoodsID), strings.TrimSpace(in.SKUID), strings.TrimSpace(in.MallSN), strings.TrimSpace(in.CapturedChatURL), in.TaskType, in.Message, hex.EncodeToString(digest[:]), strings.TrimSpace(in.BusinessID), strings.TrimSpace(in.XianyuOrderID), strings.TrimSpace(in.PDDOrderID), string(metadata), strings.TrimSpace(in.SourcePlatform), strings.TrimSpace(in.SourceConversationID), strings.TrimSpace(in.SourceMessageID), strings.TrimSpace(in.ParentTaskID), boolInt(in.ReplyExpected), in.SendMode, in.Priority, in.ScheduledAt, now, now)
+	return id, err
 }
 
 func (s *Server) listPDDMessages(w http.ResponseWriter, r *http.Request) {
@@ -315,6 +321,12 @@ func (s *Server) resultPDDMessage(w http.ResponseWriter, r *http.Request) {
 	if n != 1 {
 		writeErr(w, 409, "消息任务状态已变化")
 		return
+	}
+	if in.Status == "verified" {
+		var taskType, orderID string
+		if s.Store.DB.QueryRowContext(r.Context(), `SELECT task_type,xianyu_order_id FROM pdd_message_tasks WHERE id=? AND user_id=?`, id, uid).Scan(&taskType, &orderID) == nil && taskType == "restore_phone" && strings.TrimSpace(orderID) != "" {
+			_, _ = s.Store.DB.ExecContext(r.Context(), `UPDATE order_fulfillments SET reminded=1,reminded_at=CASE WHEN reminded_at=0 THEN ? ELSE reminded_at END,updated_at=? WHERE order_id=? AND user_id=? AND xianyu_shipped=1`, now, now, orderID, uid)
+		}
 	}
 	s.releasePDDMessageLocks(r, id)
 	writeJSON(w, 200, map[string]any{"success": true, "status": in.Status})

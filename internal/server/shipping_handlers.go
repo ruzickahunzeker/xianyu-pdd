@@ -384,7 +384,7 @@ func (s *Server) createShippingOperation(w http.ResponseWriter, r *http.Request)
 func (s *Server) markPhysicalShipmentSuccess(ctx context.Context, order *db.Order, userID, finished int64) {
 	phoneEnabled, _ := s.Store.Settings.Get(ctx, "pdd_phone_change_enabled")
 	if settingEnabled(phoneEnabled) {
-		_, _ = s.Store.DB.ExecContext(ctx, `UPDATE order_fulfillments SET xianyu_shipped=1,xianyu_shipped_at=CASE WHEN xianyu_shipped_at=0 THEN ? ELSE xianyu_shipped_at END,shipping_status='xianyu_shipped',shipping_last_error='',shipping_attempts=shipping_attempts+1,phone_restore_due_at=?,reminder_exempt=0,updated_at=? WHERE order_id=? AND user_id=?`, finished, finished+86400, finished, order.OrderID, userID)
+		_, _ = s.Store.DB.ExecContext(ctx, `UPDATE order_fulfillments SET xianyu_shipped=1,xianyu_shipped_at=CASE WHEN xianyu_shipped_at=0 THEN ? ELSE xianyu_shipped_at END,shipping_status='xianyu_shipped',shipping_last_error='',shipping_attempts=shipping_attempts+1,phone_restore_due_at=?,reminder_exempt=0,updated_at=? WHERE order_id=? AND user_id=?`, finished, finished+int64(time.Hour/time.Second), finished, order.OrderID, userID)
 	} else {
 		_, _ = s.Store.DB.ExecContext(ctx, `UPDATE order_fulfillments SET xianyu_shipped=1,xianyu_shipped_at=CASE WHEN xianyu_shipped_at=0 THEN ? ELSE xianyu_shipped_at END,shipping_status='xianyu_shipped',shipping_last_error='',shipping_attempts=shipping_attempts+1,phone_restore_due_at=0,reminder_exempt=1,updated_at=? WHERE order_id=? AND user_id=?`, finished, finished, order.OrderID, userID)
 	}

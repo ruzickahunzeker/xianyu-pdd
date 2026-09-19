@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ func (s *Server) mountFulfillment(r chi.Router) {
 	r.Post("/api/fulfillment/history-repair", s.repairFulfillmentHistory)
 	r.Put("/api/fulfillment/orders/{order_id}", s.updateFulfillment)
 	r.Post("/api/fulfillment/orders/{order_id}/purchase-request", s.requestPurchase)
+	r.Post("/api/fulfillment/orders/{order_id}/remind", s.requestFulfillmentReminder)
 	r.Post("/api/fulfillment/orders/{order_id}/address-preview", s.previewFulfillmentAddress)
 	r.Post("/api/fulfillment/orders/{order_id}/pdd-address/apply", s.applyPDDAddress)
 	r.Delete("/api/fulfillment/orders/{order_id}/pdd-address/lock", s.releasePDDAddressLock)
@@ -68,6 +70,59 @@ func (s *Server) mountFulfillment(r chi.Router) {
 	r.Get("/api/fulfillment/shipping-accounts", s.listShippingAccounts)
 	r.Put("/api/fulfillment/shipping-accounts/{cookie_id}", s.saveShippingAccount)
 	r.Post("/api/fulfillment/shipping-accounts/{cookie_id}/sync", s.syncShippingAddresses)
+}
+
+func (s *Server) requestFulfillmentReminder(w http.ResponseWriter, r *http.Request) {
+	orderID := chi.URLParam(r, "order_id")
+	order, ok := s.requireOrderOwner(w, r, orderID)
+	if !ok {
+		return
+	}
+	uid := auth.SessionFromContext(r.Context()).UserID
+	var goodsID, skuID, pddOrderID, temporaryPhone string
+	var xianyuShipped, reminded, reminderExempt int
+	if err := s.Store.DB.QueryRowContext(r.Context(), `SELECT source_goods_id,source_sku_id,pdd_order_id,temporary_phone,xianyu_shipped,reminded,reminder_exempt FROM order_fulfillments WHERE order_id=? AND user_id=?`, orderID, uid).Scan(&goodsID, &skuID, &pddOrderID, &temporaryPhone, &xianyuShipped, &reminded, &reminderExempt); err != nil {
+		writeErr(w, 404, "履约记录不存在")
+		return
+	}
+	if xianyuShipped == 0 || reminded != 0 || reminderExempt != 0 {
+		writeErr(w, 409, "订单当前不需要提醒")
+		return
+	}
+	if strings.TrimSpace(pddOrderID) == "" || strings.TrimSpace(goodsID) == "" {
+		writeErr(w, 422, "缺少拼多多订单或商品信息")
+		return
+	}
+	account, err := s.Store.PDDAccounts.Default(r.Context(), uid)
+	if err != nil || !account.Enabled {
+		writeErr(w, 422, "拼多多账号不可用")
+		return
+	}
+	var mallSN string
+	_ = s.Store.DB.QueryRowContext(r.Context(), `SELECT mall_sn FROM pdd_products WHERE goods_id=?`, goodsID).Scan(&mallSN)
+	if strings.TrimSpace(mallSN) == "" {
+		writeErr(w, 422, "采集商品缺少 mall_sn，无法定位商家")
+		return
+	}
+	phone := strings.TrimSpace(order.ReceiverPhone)
+	if phone == "" {
+		writeErr(w, 422, "闲鱼订单缺少原始收货手机号")
+		return
+	}
+	message := fmt.Sprintf("您好，订单 %s 的收货手机号请恢复为 %s，麻烦协助处理，谢谢。", pddOrderID, phone)
+	key := "fulfillment-reminder:" + orderID + ":" + phone
+	in := pddMessageInput{PDDAccountID: account.ID, GoodsID: goodsID, SKUID: skuID, MallSN: mallSN, TaskType: "restore_phone", BusinessID: orderID, XianyuOrderID: orderID, PDDOrderID: pddOrderID, Message: message, SendMode: "manual_confirm", SourcePlatform: "fulfillment", ScheduledAt: time.Now().Unix(), Metadata: map[string]any{"temporary_phone": temporaryPhone, "original_phone": phone}}
+	taskID, err := s.enqueuePDDMessage(r.Context(), uid, key, in)
+	if err != nil {
+		var existingStatus string
+		if scanErr := s.Store.DB.QueryRowContext(r.Context(), `SELECT id,status FROM pdd_message_tasks WHERE user_id=? AND idempotency_key=?`, uid, key).Scan(&taskID, &existingStatus); scanErr == nil {
+			writeJSON(w, 200, map[string]any{"success": true, "task_id": taskID, "status": existingStatus, "replayed": true})
+			return
+		}
+		writeErr(w, 500, "创建提醒任务失败")
+		return
+	}
+	writeJSON(w, 201, map[string]any{"success": true, "task_id": taskID, "status": "pending"})
 }
 
 func (s *Server) fulfillmentWorkerStatus(w http.ResponseWriter, r *http.Request) {

@@ -544,7 +544,11 @@ func jsonValue(raw string, fallback any) any {
 }
 
 func (s *Server) pddListProducts(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT p.id,p.goods_id,p.mall_sn,p.final_url,p.title,p.images_json,p.videos_json,p.first_collected_at,p.last_collected_at,COUNT(s.id),COALESCE(SUM(CASE WHEN s.is_onsale=1 THEN 1 ELSE 0 END),0),COALESCE(MIN(s.price_cent),0),COALESCE(MAX(s.price_cent),0) FROM pdd_products p LEFT JOIN pdd_skus s ON s.product_id=p.id GROUP BY p.id,p.goods_id,p.mall_sn,p.final_url,p.title,p.images_json,p.videos_json,p.first_collected_at,p.last_collected_at ORDER BY p.last_collected_at DESC`)
+	var uid int64
+	if session := auth.SessionFromContext(r.Context()); session != nil {
+		uid = session.UserID
+	}
+	rows, err := s.Store.DB.QueryContext(r.Context(), `SELECT p.id,p.goods_id,p.mall_sn,p.final_url,p.title,p.images_json,p.videos_json,p.first_collected_at,p.last_collected_at,COUNT(s.id),COALESCE(SUM(CASE WHEN s.is_onsale=1 THEN 1 ELSE 0 END),0),COALESCE(MIN(s.price_cent),0),COALESCE(MAX(s.price_cent),0),COALESCE((SELECT MIN(m.id) FROM product_materials m WHERE m.user_id=? AND m.source_type='pdd' AND m.source_id=p.goods_id AND m.parent_material_id=0 AND m.deleted_at IS NULL),0) FROM pdd_products p LEFT JOIN pdd_skus s ON s.product_id=p.id GROUP BY p.id,p.goods_id,p.mall_sn,p.final_url,p.title,p.images_json,p.videos_json,p.first_collected_at,p.last_collected_at ORDER BY p.last_collected_at DESC`, uid)
 	if err != nil {
 		writeErr(w, 500, "查询拼多多商品失败")
 		return
@@ -552,13 +556,13 @@ func (s *Server) pddListProducts(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := make([]map[string]any, 0)
 	for rows.Next() {
-		var id, firstAt, lastAt, skuCount, onSaleCount, minPrice, maxPrice int64
+		var id, firstAt, lastAt, skuCount, onSaleCount, minPrice, maxPrice, materialID int64
 		var goodsID, mallSN, finalURL, title, images, videos string
-		if err := rows.Scan(&id, &goodsID, &mallSN, &finalURL, &title, &images, &videos, &firstAt, &lastAt, &skuCount, &onSaleCount, &minPrice, &maxPrice); err != nil {
+		if err := rows.Scan(&id, &goodsID, &mallSN, &finalURL, &title, &images, &videos, &firstAt, &lastAt, &skuCount, &onSaleCount, &minPrice, &maxPrice, &materialID); err != nil {
 			writeErr(w, 500, "读取拼多多商品失败")
 			return
 		}
-		out = append(out, map[string]any{"id": id, "goods_id": goodsID, "mall_sn": mallSN, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "videos": jsonValue(videos, []any{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "sku_count": skuCount, "onsale_sku_count": onSaleCount, "min_price_cent": minPrice, "max_price_cent": maxPrice})
+		out = append(out, map[string]any{"id": id, "goods_id": goodsID, "mall_sn": mallSN, "final_url": finalURL, "title": title, "images": jsonValue(images, []string{}), "videos": jsonValue(videos, []any{}), "first_collected_at": firstAt, "last_collected_at": lastAt, "sku_count": skuCount, "onsale_sku_count": onSaleCount, "min_price_cent": minPrice, "max_price_cent": maxPrice, "material_id": materialID})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -985,5 +989,40 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "提交采集数据失败")
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"status": "collected", "collection_id": in.CollectionID, "product_id": productID, "goods_id": in.Goods.GoodsID, "sku_count": len(in.SKUs), "material_stock_updates": materialStockUpdates})
+	response := map[string]any{"status": "collected", "collection_id": in.CollectionID, "product_id": productID, "goods_id": in.Goods.GoodsID, "sku_count": len(in.SKUs), "material_stock_updates": materialStockUpdates}
+	if materialID, action, materialErr := s.ensureCollectedMaterial(r.Context(), in.Goods.GoodsID); materialErr != nil {
+		response["material_action"] = "failed"
+		response["material_error"] = materialErr.Error()
+	} else {
+		response["material_id"] = materialID
+		response["material_action"] = action
+	}
+	writeJSON(w, http.StatusCreated, response)
+}
+
+// ensureCollectedMaterial creates one editable root draft for a collected PDD
+// product. Repeated collections reuse the existing root draft and never
+// overwrite fields that the operator may already have edited.
+func (s *Server) ensureCollectedMaterial(ctx context.Context, goodsID string) (int64, string, error) {
+	admin, err := s.Store.Users.GetAdmin(ctx)
+	if err != nil {
+		return 0, "", errors.New("管理员尚未初始化，无法自动创建素材")
+	}
+	var materialID int64
+	err = s.Store.DB.QueryRowContext(ctx, `SELECT id FROM product_materials WHERE user_id=? AND source_type='pdd' AND source_id=? AND parent_material_id=0 AND deleted_at IS NULL ORDER BY id LIMIT 1`, admin.ID, goodsID).Scan(&materialID)
+	if err == nil {
+		return materialID, "existing", nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return 0, "", err
+	}
+	in, err := s.materialInputFromPDD(ctx, goodsID)
+	if err != nil {
+		return 0, "", err
+	}
+	materialID, err = s.insertMaterialForUser(ctx, admin.ID, "pdd", goodsID, in)
+	if err != nil {
+		return 0, "", err
+	}
+	return materialID, "created", nil
 }
