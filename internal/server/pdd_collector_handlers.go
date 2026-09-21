@@ -818,12 +818,11 @@ func pddPriceCent(prices map[string]any) int64 {
 	return 0
 }
 
-// syncCollectedStockToMaterials keeps draft/material inventory aligned with
-// the latest collector payload. Identity is source goods_id + source sku_id;
-// prices, published property text and already-published Xianyu inventory are
-// intentionally outside this operation.
+// syncCollectedStockToMaterials applies newly collected source stock according
+// to each material's stock strategy. Manual/fixed inventory is user-owned and
+// must never be overwritten by a later browser collection.
 func syncCollectedStockToMaterials(ctx context.Context, tx *sql.Tx, dialect db.Dialect, goodsID string, stocks map[string]int64, now int64) (int64, error) {
-	query := `SELECT id,source_id,skus_json FROM product_materials WHERE source_type='pdd' AND deleted_at IS NULL`
+	query := `SELECT id,source_id,skus_json,publish_parameters_json FROM product_materials WHERE source_type='pdd' AND deleted_at IS NULL`
 	if dialect == db.DialectMySQL || dialect == db.DialectPostgres {
 		query += ` FOR UPDATE`
 	}
@@ -832,13 +831,13 @@ func syncCollectedStockToMaterials(ctx context.Context, tx *sql.Tx, dialect db.D
 		return 0, err
 	}
 	type materialRow struct {
-		id            int64
-		sourceID, raw string
+		id                        int64
+		sourceID, raw, parameters string
 	}
 	materials := []materialRow{}
 	for rows.Next() {
 		var row materialRow
-		if err = rows.Scan(&row.id, &row.sourceID, &row.raw); err != nil {
+		if err = rows.Scan(&row.id, &row.sourceID, &row.raw, &row.parameters); err != nil {
 			_ = rows.Close()
 			return 0, err
 		}
@@ -853,8 +852,20 @@ func syncCollectedStockToMaterials(ctx context.Context, tx *sql.Tx, dialect db.D
 		if json.Unmarshal([]byte(row.raw), &skus) != nil {
 			continue
 		}
+		var parameters materialPublishParameters
+		_ = json.Unmarshal([]byte(row.parameters), &parameters)
+		normalizePublishParameters(&parameters, nil)
+		if parameters.StockStrategy.Mode == "manual" || parameters.StockStrategy.Mode == "fixed" {
+			continue
+		}
 		changed := false
 		for i := range skus {
+			if skus[i].SKUType == materialSKUTypePlaceholder {
+				if skus[i].Quantity != 0 {
+					skus[i].Quantity, changed = 0, true
+				}
+				continue
+			}
 			sourceGoodsID := skus[i].SourceGoodsID
 			if sourceGoodsID == "" && skus[i].SourceSKUID != "" {
 				sourceGoodsID = row.sourceID
@@ -863,8 +874,21 @@ func syncCollectedStockToMaterials(ctx context.Context, tx *sql.Tx, dialect db.D
 				continue
 			}
 			stock, ok := stocks[skus[i].SourceSKUID]
-			if ok && skus[i].Quantity != stock {
+			if !ok {
+				continue
+			}
+			stock -= parameters.StockStrategy.Reserve
+			if stock < 0 {
+				stock = 0
+			}
+			if parameters.StockStrategy.Mode == "cap" && stock > parameters.StockStrategy.Cap {
+				stock = parameters.StockStrategy.Cap
+			}
+			if skus[i].Quantity != stock {
 				skus[i].Quantity, changed = stock, true
+			}
+			if stock == 0 && parameters.StockStrategy.DisableWhenOOS && skus[i].Enabled {
+				skus[i].Enabled, changed = false, true
 			}
 		}
 		if !changed {

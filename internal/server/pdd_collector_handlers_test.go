@@ -242,7 +242,7 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	if err := json.Unmarshal([]byte(materialRaw), &materialRows); err != nil {
 		t.Fatal(err)
 	}
-	if materialRows[0].Quantity != 0 || materialRows[0].PriceCents != 39900 || materialRows[0].Properties[0].Value != "保留文字" || materialRows[1].Quantity != 9 {
+	if materialRows[0].Quantity != 3 || materialRows[0].PriceCents != 39900 || materialRows[0].Properties[0].Value != "保留文字" || materialRows[1].Quantity != 9 {
 		t.Fatalf("collector stock sync changed unexpected fields: %+v", materialRows)
 	}
 	if err := store.DB.QueryRow(`SELECT skus_json FROM product_materials WHERE source_id='111111111111'`).Scan(&materialRaw); err != nil {
@@ -251,12 +251,12 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	if err := json.Unmarshal([]byte(materialRaw), &materialRows); err != nil {
 		t.Fatal(err)
 	}
-	if materialRows[0].Quantity != 0 || materialRows[0].PriceCents != 49900 || materialRows[0].Properties[0].Value != "商品B" {
+	if materialRows[0].Quantity != 4 || materialRows[0].PriceCents != 49900 || materialRows[0].Properties[0].Value != "商品B" {
 		t.Fatalf("bundle stock sync=%+v", materialRows)
 	}
 	var firstResponse map[string]any
 	_ = json.Unmarshal(first.Body.Bytes(), &firstResponse)
-	if firstResponse["material_stock_updates"] != float64(2) {
+	if firstResponse["material_stock_updates"] != float64(0) {
 		t.Fatalf("response=%v", firstResponse)
 	}
 	if firstResponse["material_action"] != "existing" || firstResponse["material_id"] == nil {
@@ -393,7 +393,7 @@ func TestPDDRefreshProductKeepsMissingSKUAndOnlySyncsMaterialStock(t *testing.T)
 		}
 	}
 	materialSKUs := `[{"material_sku_id":"material-1","source_sku_id":"456","price_cent":8800,"quantity":2,"enabled":true,"properties":[{"name":"自定义规格","value":"人工名称"}]}]`
-	_, err = store.DB.Exec(`INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,status,created_at,updated_at) VALUES(1,'pdd','123','素材','','[]','{}',?,'draft',1,1)`, materialSKUs)
+	_, err = store.DB.Exec(`INSERT INTO product_materials(user_id,source_type,source_id,title,description,images_json,category_json,skus_json,publish_parameters_json,status,created_at,updated_at) VALUES(1,'pdd','123','素材','','[]','{}',?,'{"stock_strategy":{"mode":"mirror","reserve":0,"disable_when_oos":true}}','draft',1,1)`, materialSKUs)
 	if err != nil {
 		t.Fatal(err)
 	}
