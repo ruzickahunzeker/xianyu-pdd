@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"xianyu-go/internal/auth"
 	"xianyu-go/internal/db"
+	"xianyu-go/internal/pddproduct"
 )
 
 func seedScheduledMaterial(t *testing.T, store *db.Store, salePrice int64) int64 {
@@ -143,6 +144,31 @@ func TestFailedScheduledTaskCannotBeClaimedAgain(t *testing.T) {
 	_ = store.DB.QueryRow(`SELECT COUNT(*) FROM scheduled_publish_tasks WHERE material_id=? AND status='pending' AND id<>?`, id, taskID).Scan(&cloned)
 	if cloned != 1 {
 		t.Fatalf("cloned pending tasks=%d, want 1", cloned)
+	}
+}
+
+func TestScheduledTaskDoesNotRefreshPDDSourceBeforePublish(t *testing.T) {
+	srv, store, cleanup := newTestServer(t)
+	defer cleanup()
+	materialID := seedScheduledMaterial(t, store, 131)
+	if _, err := store.DB.Exec(`UPDATE product_materials SET images_json='["invalid"]' WHERE id=?`, materialID); err != nil {
+		t.Fatal(err)
+	}
+	srv.PDDProductFetch = func(context.Context, *db.PDDAccount, string) (pddproduct.Snapshot, error) {
+		t.Fatal("scheduled publish must not refresh PDD product data")
+		return pddproduct.Snapshot{}, nil
+	}
+	_, _ = store.DB.Exec(`INSERT INTO scheduled_publish_batches(id,user_id,account_id,start_at,task_count,status,created_at) VALUES('batch-direct',1,'scheduled-account',1,1,'running',1)`)
+	_, _ = store.DB.Exec(`INSERT INTO scheduled_publish_tasks(id,batch_id,user_id,material_id,material_revision,account_id,sequence_no,planned_at,not_before,status,attempt_count,idempotency_key,snapshot_json,minimum_profit_cent,created_at) VALUES('task-direct','batch-direct',1,?,1,'scheduled-account',1,1,1,'pending',0,'direct-once','{}',30,1)`, materialID)
+
+	srv.executeScheduledPublishTask(context.Background(), "task-direct")
+
+	var status, stage, code string
+	if err := store.DB.QueryRow(`SELECT status,error_stage,error_code FROM scheduled_publish_tasks WHERE id='task-direct'`).Scan(&status, &stage, &code); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || stage != "publish" || code == "PDD_REFRESH_FAILED" {
+		t.Fatalf("status=%s stage=%s code=%s, want direct publish failure without PDD refresh", status, stage, code)
 	}
 }
 

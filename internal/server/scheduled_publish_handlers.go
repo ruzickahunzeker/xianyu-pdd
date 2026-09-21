@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -484,41 +483,6 @@ func scheduledAccountError(message string) bool {
 	return false
 }
 
-func (s *Server) refreshScheduledMaterialSources(ctx context.Context, userID, materialID int64) error {
-	var raw string
-	if err := s.Store.DB.QueryRowContext(ctx, `SELECT skus_json FROM product_materials WHERE id=? AND user_id=? AND deleted_at IS NULL`, materialID, userID).Scan(&raw); err != nil {
-		return errors.New("素材不存在")
-	}
-	var skus []materialSKU
-	if json.Unmarshal([]byte(raw), &skus) != nil {
-		return errors.New("素材SKU数据无效")
-	}
-	goodsIDs := map[string]bool{}
-	for _, sku := range skus {
-		if sku.Enabled && sku.SKUType == materialSKUTypeSource && strings.TrimSpace(sku.SourceGoodsID) != "" {
-			goodsIDs[strings.TrimSpace(sku.SourceGoodsID)] = true
-		}
-	}
-	for goodsID := range goodsIDs {
-		request := httptest.NewRequest(http.MethodPost, "/api/pdd-collector/catalog/"+goodsID+"/refresh", nil)
-		routeContext := chi.NewRouteContext()
-		routeContext.URLParams.Add("goodsID", goodsID)
-		request = request.WithContext(auth.WithSession(context.WithValue(ctx, chi.RouteCtxKey, routeContext), &db.Session{UserID: userID}))
-		recorder := httptest.NewRecorder()
-		s.pddRefreshProduct(recorder, request)
-		if recorder.Code < 200 || recorder.Code >= 300 {
-			var payload map[string]any
-			_ = json.Unmarshal(recorder.Body.Bytes(), &payload)
-			message := strings.TrimSpace(fmt.Sprint(payload["detail"]))
-			if message == "" {
-				message = "刷新拼多多商品失败"
-			}
-			return fmt.Errorf("商品%s：%s", goodsID, message)
-		}
-	}
-	return nil
-}
-
 func (s *Server) executeScheduledPublishTask(ctx context.Context, taskID string) {
 	now := time.Now().Unix()
 	result, err := s.Store.DB.ExecContext(ctx, `UPDATE scheduled_publish_tasks SET status='publishing',attempt_count=1,started_at=? WHERE id=? AND status='pending' AND attempt_count=0`, now, taskID)
@@ -535,10 +499,6 @@ func (s *Server) executeScheduledPublishTask(ctx context.Context, taskID string)
 		return
 	}
 	s.refreshScheduledBatchByID(ctx, batchID)
-	if err := s.refreshScheduledMaterialSources(ctx, userID, materialID); err != nil {
-		s.failScheduledTask(ctx, taskID, batchID, accountID, "source_refresh", "PDD_REFRESH_FAILED", err.Error(), scheduledAccountError(err.Error()))
-		return
-	}
 	check := s.checkScheduledMaterial(ctx, userID, materialID, minimum)
 	if !check.OK || check.MaterialRevision != revision {
 		message := strings.Join(check.Reasons, "；")
