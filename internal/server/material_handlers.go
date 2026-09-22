@@ -215,9 +215,15 @@ type materialImageMetadata struct {
 }
 
 type materialPriceStrategy struct {
-	Mode              string  `json:"mode"`
-	Value             float64 `json:"value"`
-	MinimumProfitCent int64   `json:"minimum_profit_cent"`
+	Mode               string  `json:"mode"`
+	Value              float64 `json:"value"`
+	MinimumProfitCent  int64   `json:"minimum_profit_cent"`
+	RepriceMode        string  `json:"reprice_mode"`
+	MaxIncreaseCent    int64   `json:"max_increase_cent"`
+	MaxIncreasePercent float64 `json:"max_increase_percent"`
+	MaximumPriceCent   int64   `json:"maximum_price_cent"`
+	CooldownSeconds    int64   `json:"cooldown_seconds"`
+	LowStockThreshold  int64   `json:"low_stock_threshold"`
 }
 
 type materialStockStrategy struct {
@@ -249,6 +255,15 @@ func normalizePublishParameters(parameters *materialPublishParameters, images []
 	}
 	if parameters.PriceStrategy.Mode == "" {
 		parameters.PriceStrategy.Mode = "manual"
+	}
+	if parameters.PriceStrategy.RepriceMode == "" {
+		parameters.PriceStrategy.RepriceMode = "off"
+	}
+	if parameters.PriceStrategy.CooldownSeconds <= 0 {
+		parameters.PriceStrategy.CooldownSeconds = 6 * 60 * 60
+	}
+	if parameters.PriceStrategy.LowStockThreshold <= 0 {
+		parameters.PriceStrategy.LowStockThreshold = 10
 	}
 	if parameters.StockStrategy.Mode == "" {
 		parameters.StockStrategy.Mode = "manual"
@@ -998,11 +1013,15 @@ func validateMaterial(in *materialInput) error {
 	if !validPriceModes[in.PriceStrategy.Mode] {
 		return errors.New("售价策略无效")
 	}
+	validRepriceModes := map[string]bool{"": true, "off": true, "notify": true, "automatic": true}
+	if !validRepriceModes[in.PriceStrategy.RepriceMode] {
+		return errors.New("价格联动模式无效")
+	}
 	validStockModes := map[string]bool{"": true, "manual": true, "mirror": true, "cap": true, "fixed": true}
 	if !validStockModes[in.StockStrategy.Mode] {
 		return errors.New("库存策略无效")
 	}
-	if in.PriceStrategy.MinimumProfitCent < 0 || in.StockStrategy.Cap < 0 || in.StockStrategy.Reserve < 0 || in.StockStrategy.FixedQuantity < 0 {
+	if in.PriceStrategy.MinimumProfitCent < 0 || in.PriceStrategy.MaxIncreaseCent < 0 || in.PriceStrategy.MaxIncreasePercent < 0 || in.PriceStrategy.MaximumPriceCent < 0 || in.PriceStrategy.CooldownSeconds < 0 || in.PriceStrategy.LowStockThreshold < 0 || in.StockStrategy.Cap < 0 || in.StockStrategy.Reserve < 0 || in.StockStrategy.FixedQuantity < 0 {
 		return errors.New("售价或库存策略参数不能小于 0")
 	}
 	if in.VideoEnabled == nil {
