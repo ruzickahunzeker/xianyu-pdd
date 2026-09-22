@@ -114,7 +114,10 @@ func main() {
 		baseURL:       strings.TrimRight(env("FULFILLMENT_API_URL", "http://127.0.0.1:59188"), "/"),
 		apiKey:        strings.TrimSpace(os.Getenv("FULFILLMENT_API_KEY")),
 		screenshotDir: env("PDD_SCREENSHOT_DIR", "/data/screenshots"), submit: strings.EqualFold(os.Getenv("PDD_PURCHASE_SUBMIT"), "true"),
-		once: strings.EqualFold(os.Getenv("PDD_WORKER_ONCE"), "true"), client: &http.Client{Timeout: 30 * time.Second},
+		// The lightweight dispatcher may stay alive, but every claimed task owns
+		// a fresh persistent Chromium context which is closed before the next
+		// claim. PDD_WORKER_ONCE remains available for manual one-shot debugging.
+		once: workerSingleUse(os.Getenv("PDD_WORKER_ONCE")), client: &http.Client{Timeout: 30 * time.Second},
 		logisticsOnly: strings.EqualFold(os.Getenv("PDD_WORKER_LOGISTICS_ONLY"), "true"),
 	}
 	if w.apiKey == "" {
@@ -149,6 +152,9 @@ func main() {
 		if purchaseErr != nil && !errors.Is(purchaseErr, errNoTask) {
 			log.Printf("采购任务失败: %v", purchaseErr)
 		}
+		if w.once && !errors.Is(purchaseErr, errNoTask) {
+			return
+		}
 
 		// Purchase and merchant-message queues are independent. Always give the
 		// message queue a turn so a failed or long-lived purchase task cannot
@@ -157,21 +163,20 @@ func main() {
 		if messageErr != nil && !errors.Is(messageErr, errNoTask) {
 			log.Printf("商家消息任务失败: %v", messageErr)
 		}
+		if w.once && !errors.Is(messageErr, errNoTask) {
+			return
+		}
 
 		logisticsTaskErr := w.runLogisticsOne()
 		if logisticsTaskErr != nil && !errors.Is(logisticsTaskErr, errNoTask) {
 			log.Printf("人工物流同步失败: %v", logisticsTaskErr)
 		}
-
-		var logisticsErr error
-		if errors.Is(purchaseErr, errNoTask) && errors.Is(messageErr, errNoTask) && errors.Is(logisticsTaskErr, errNoTask) {
-			w.reportState("syncing_logistics", "")
-			if logisticsErr = w.syncLogistics(); logisticsErr != nil {
-				log.Printf("物流同步失败: %v", logisticsErr)
-			}
+		if w.once && !errors.Is(logisticsTaskErr, errNoTask) {
+			return
 		}
+
 		lastError := ""
-		for _, runErr := range []error{purchaseErr, messageErr, logisticsTaskErr, logisticsErr} {
+		for _, runErr := range []error{purchaseErr, messageErr, logisticsTaskErr} {
 			if runErr != nil && !errors.Is(runErr, errNoTask) {
 				lastError = runErr.Error()
 				break
@@ -187,6 +192,10 @@ func main() {
 		}
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func workerSingleUse(value string) bool {
+	return strings.EqualFold(strings.TrimSpace(value), "true")
 }
 
 func (w *worker) reportState(state, lastError string) {

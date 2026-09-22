@@ -242,7 +242,7 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	if err := json.Unmarshal([]byte(materialRaw), &materialRows); err != nil {
 		t.Fatal(err)
 	}
-	if materialRows[0].Quantity != 3 || materialRows[0].PriceCents != 39900 || materialRows[0].Properties[0].Value != "保留文字" || materialRows[1].Quantity != 9 {
+	if materialRows[0].Quantity != 0 || materialRows[0].PriceCents != 39900 || materialRows[0].SourcePriceCents != 28500 || materialRows[0].SourcePriceOrigin != "collected" || materialRows[0].Properties[0].Value != "保留文字" || materialRows[1].Quantity != 9 {
 		t.Fatalf("collector stock sync changed unexpected fields: %+v", materialRows)
 	}
 	if err := store.DB.QueryRow(`SELECT skus_json FROM product_materials WHERE source_id='111111111111'`).Scan(&materialRaw); err != nil {
@@ -251,12 +251,12 @@ func TestPDDCollectorUploadAndIdempotency(t *testing.T) {
 	if err := json.Unmarshal([]byte(materialRaw), &materialRows); err != nil {
 		t.Fatal(err)
 	}
-	if materialRows[0].Quantity != 4 || materialRows[0].PriceCents != 49900 || materialRows[0].Properties[0].Value != "商品B" {
+	if materialRows[0].Quantity != 0 || materialRows[0].PriceCents != 49900 || materialRows[0].SourcePriceCents != 28500 || materialRows[0].Properties[0].Value != "商品B" {
 		t.Fatalf("bundle stock sync=%+v", materialRows)
 	}
 	var firstResponse map[string]any
 	_ = json.Unmarshal(first.Body.Bytes(), &firstResponse)
-	if firstResponse["material_stock_updates"] != float64(0) {
+	if firstResponse["material_stock_updates"] != float64(2) {
 		t.Fatalf("response=%v", firstResponse)
 	}
 	if firstResponse["material_action"] != "existing" || firstResponse["material_id"] == nil {

@@ -425,7 +425,7 @@ func (s *Server) pddRefreshProduct(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = rows.Close()
-	seen, stocks := map[string]bool{}, map[string]int64{}
+	seen := map[string]bool{}
 	added, priceChanged, stockChanged, statusChanged := 0, 0, 0, 0
 	skuUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id", "sku_id"}, map[string]string{"specs_json": "EXCLUDED.specs_json", "spec_value_ids_json": "EXCLUDED.spec_value_ids_json", "thumb_url": "EXCLUDED.thumb_url", "prices_json": "EXCLUDED.prices_json", "price_cent": "EXCLUDED.price_cent", "stock": "EXCLUDED.stock", "is_onsale": "EXCLUDED.is_onsale", "raw_snapshot_json": "EXCLUDED.raw_snapshot_json", "last_collected_at": "EXCLUDED.last_collected_at"})
 	for _, sku := range snapshot.SKUs {
@@ -434,9 +434,6 @@ func (s *Server) pddRefreshProduct(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		seen[sku.SKUID] = true
-		if sku.StockExact {
-			stocks[sku.SKUID] = sku.Stock
-		}
 		previous, exists := old[sku.SKUID]
 		if !exists {
 			added++
@@ -487,7 +484,11 @@ func (s *Server) pddRefreshProduct(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "更新商品失败")
 		return
 	}
-	materialUpdates, err := syncCollectedStockToMaterials(r.Context(), tx, s.Store.Dialect, goodsID, stocks, now)
+	states := make(map[string]collectedSKUState, len(snapshot.SKUs))
+	for _, sku := range snapshot.SKUs {
+		states[sku.SKUID] = collectedSKUState{PriceCent: sku.PriceCent, Stock: sku.Stock, StockExact: sku.StockExact}
+	}
+	materialUpdates, err := syncCollectedStateToMaterials(r.Context(), tx, s.Store.Dialect, goodsID, states, now)
 	if err != nil {
 		writeErr(w, 500, "同步素材库存失败")
 		return
@@ -818,10 +819,16 @@ func pddPriceCent(prices map[string]any) int64 {
 	return 0
 }
 
-// syncCollectedStockToMaterials applies newly collected source stock according
-// to each material's stock strategy. Manual/fixed inventory is user-owned and
-// must never be overwritten by a later browser collection.
-func syncCollectedStockToMaterials(ctx context.Context, tx *sql.Tx, dialect db.Dialect, goodsID string, stocks map[string]int64, now int64) (int64, error) {
+type collectedSKUState struct {
+	PriceCent  int64
+	Stock      int64
+	StockExact bool
+}
+
+// syncCollectedStateToMaterials refreshes trusted source prices and applies
+// stock policies. Manual/fixed stock stays user-owned while source inventory
+// is healthy, but exact low stock (<10) acts as a safety ceiling.
+func syncCollectedStateToMaterials(ctx context.Context, tx *sql.Tx, dialect db.Dialect, goodsID string, states map[string]collectedSKUState, now int64) (int64, error) {
 	query := `SELECT id,source_id,skus_json,publish_parameters_json FROM product_materials WHERE source_type='pdd' AND deleted_at IS NULL`
 	if dialect == db.DialectMySQL || dialect == db.DialectPostgres {
 		query += ` FOR UPDATE`
@@ -855,9 +862,6 @@ func syncCollectedStockToMaterials(ctx context.Context, tx *sql.Tx, dialect db.D
 		var parameters materialPublishParameters
 		_ = json.Unmarshal([]byte(row.parameters), &parameters)
 		normalizePublishParameters(&parameters, nil)
-		if parameters.StockStrategy.Mode == "manual" || parameters.StockStrategy.Mode == "fixed" {
-			continue
-		}
 		changed := false
 		for i := range skus {
 			if skus[i].SKUType == materialSKUTypePlaceholder {
@@ -873,10 +877,20 @@ func syncCollectedStockToMaterials(ctx context.Context, tx *sql.Tx, dialect db.D
 			if sourceGoodsID != goodsID {
 				continue
 			}
-			stock, ok := stocks[skus[i].SourceSKUID]
+			state, ok := states[skus[i].SourceSKUID]
 			if !ok {
 				continue
 			}
+			if state.PriceCent > 0 && (skus[i].SourcePriceCents != state.PriceCent || skus[i].SourcePriceUpdatedAt != now) {
+				skus[i].SourcePriceCents = state.PriceCent
+				skus[i].SourcePriceUpdatedAt = now
+				skus[i].SourcePriceOrigin = "collected"
+				changed = true
+			}
+			if !state.StockExact {
+				continue
+			}
+			stock := state.Stock
 			stock -= parameters.StockStrategy.Reserve
 			if stock < 0 {
 				stock = 0
@@ -884,7 +898,11 @@ func syncCollectedStockToMaterials(ctx context.Context, tx *sql.Tx, dialect db.D
 			if parameters.StockStrategy.Mode == "cap" && stock > parameters.StockStrategy.Cap {
 				stock = parameters.StockStrategy.Cap
 			}
-			if skus[i].Quantity != stock {
+			applyStock := parameters.StockStrategy.Mode == "mirror" || parameters.StockStrategy.Mode == "cap"
+			if stock < 10 && skus[i].Quantity > stock {
+				applyStock = true
+			}
+			if applyStock && skus[i].Quantity != stock {
 				skus[i].Quantity, changed = stock, true
 			}
 			if stock == 0 && parameters.StockStrategy.DisableWhenOOS && skus[i].Enabled {
@@ -973,11 +991,8 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	skuUpsert := db.DialectUpsert(s.Store.Dialect, []string{"goods_id", "sku_id"}, map[string]string{"product_id": "EXCLUDED.product_id", "specs_json": "EXCLUDED.specs_json", "spec_value_ids_json": "EXCLUDED.spec_value_ids_json", "thumb_url": "EXCLUDED.thumb_url", "prices_json": "EXCLUDED.prices_json", "price_cent": "EXCLUDED.price_cent", "stock": "EXCLUDED.stock", "is_onsale": "EXCLUDED.is_onsale", "raw_snapshot_json": "EXCLUDED.raw_snapshot_json", "last_collected_at": "EXCLUDED.last_collected_at"})
-	stocks := make(map[string]int64, len(in.SKUs))
+	states := make(map[string]collectedSKUState, len(in.SKUs))
 	for _, sku := range in.SKUs {
-		if pddInputStockExact(sku) {
-			stocks[sku.SKUID] = sku.Stock
-		}
 		specs, _ := json.Marshal(sku.Specs)
 		specIDs, _ := json.Marshal(sku.SpecValueIDs)
 		prices, _ := json.Marshal(sku.Prices)
@@ -987,6 +1002,7 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 			onSale = 1
 		}
 		priceCent := pddPriceCent(sku.Prices)
+		states[sku.SKUID] = collectedSKUState{PriceCent: priceCent, Stock: sku.Stock, StockExact: pddInputStockExact(sku)}
 		_, err = tx.ExecContext(r.Context(), `INSERT INTO pdd_skus(product_id,goods_id,sku_id,specs_json,spec_value_ids_json,thumb_url,prices_json,price_cent,stock,is_onsale,raw_snapshot_json,last_collected_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`+skuUpsert, productID, sku.GoodsID, sku.SKUID, string(specs), string(specIDs), sku.ThumbURL, string(prices), priceCent, sku.Stock, onSale, string(raw), collectedAt)
 		if err != nil {
 			writeErr(w, 500, "保存SKU失败")
@@ -1003,7 +1019,7 @@ func (s *Server) pddCollectorUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	materialStockUpdates, err := syncCollectedStockToMaterials(r.Context(), tx, s.Store.Dialect, in.Goods.GoodsID, stocks, receivedAt)
+	materialStockUpdates, err := syncCollectedStateToMaterials(r.Context(), tx, s.Store.Dialect, in.Goods.GoodsID, states, receivedAt)
 	if err != nil {
 		writeErr(w, 500, "同步素材库存失败")
 		return

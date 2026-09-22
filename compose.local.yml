@@ -26,6 +26,8 @@ services:
     profiles: ["pdd-worker"]
     image: xianyu-pdd:local
     pull_policy: never
+    # The dispatcher stays alive, but Chromium is launched per task and fully
+    # closed after that task. Idle polling only touches the local app API.
     restart: unless-stopped
     depends_on:
       app:
@@ -37,6 +39,7 @@ services:
       FULFILLMENT_API_URL: http://app:59188
       DATABASE_URL: ${DATABASE_URL:-/app/data/xianyu_data.db}
       PDD_PURCHASE_SUBMIT: ${PDD_PURCHASE_SUBMIT:-false}
+      PDD_WORKER_ONCE: ${PDD_WORKER_ONCE:-false}
       PDD_HEADLESS: ${PDD_HEADLESS:-true}
       PDD_SCREENSHOT_DIR: /app/data/pdd-screenshots
       PDD_BROWSER_DATA_DIR: /app/browser_data

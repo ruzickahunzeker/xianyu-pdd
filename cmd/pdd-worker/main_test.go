@@ -175,3 +175,16 @@ func TestOrderPollListTypesOnlyChecksCancelledOnFinalRecoveryAttempt(t *testing.
 		}
 	}
 }
+
+func TestWorkerSingleUseIsExplicit(t *testing.T) {
+	for _, value := range []string{"", "false", " FALSE ", "1"} {
+		if workerSingleUse(value) {
+			t.Fatalf("value %q should keep the local-only dispatcher running", value)
+		}
+	}
+	for _, value := range []string{"true", " TRUE "} {
+		if !workerSingleUse(value) {
+			t.Fatalf("value %q should enable manual one-shot mode", value)
+		}
+	}
+}
